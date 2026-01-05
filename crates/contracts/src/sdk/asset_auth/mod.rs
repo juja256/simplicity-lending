@@ -1,5 +1,5 @@
-mod creation_asset_auth;
-mod unlock_asset_auth;
+mod creation;
+mod unlock;
 
-pub use creation_asset_auth::*;
-pub use unlock_asset_auth::*;
+pub use creation::*;
+pub use unlock::*;
