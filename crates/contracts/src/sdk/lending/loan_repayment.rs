@@ -8,8 +8,10 @@ use crate::asset_auth::get_asset_auth_address;
 use crate::error::TransactionBuildError;
 use crate::lending::build_arguments::LendingArguments;
 use crate::sdk::basic::{add_base_input_from_utxo, check_asset_id, check_asset_value};
-use crate::sdk::{taproot_unspendable_internal_key};
-use crate::sdk::parameters::{FirstNFTParameters, SecondNFTParameters, calculate_principal_with_interest};
+use crate::sdk::parameters::{
+    FirstNFTParameters, SecondNFTParameters, calculate_principal_with_interest,
+};
+use crate::sdk::taproot_unspendable_internal_key;
 
 pub fn build_lending_loan_repayment(
     lending_utxo: (OutPoint, TxOut),
@@ -65,7 +67,10 @@ pub fn build_lending_loan_repayment(
         lending_arguments.borrower_nft_asset_id(),
     )?;
 
-    let principal_with_interest = calculate_principal_with_interest(lending_params.principal_amount, lending_params.principal_interest_rate);
+    let principal_with_interest = calculate_principal_with_interest(
+        lending_params.principal_amount,
+        lending_params.principal_interest_rate,
+    );
 
     check_asset_value(lending_value, lending_params.collateral_amount)?;
     check_asset_value(principal_value, principal_with_interest)?;
@@ -81,21 +86,24 @@ pub fn build_lending_loan_repayment(
             asset_amount: 1,
             with_asset_burn: true,
         },
-        address_params
-    ).unwrap().script_pubkey();
+        address_params,
+    )
+    .unwrap()
+    .script_pubkey();
 
     let mut pst = PartiallySignedTransaction::new_v2();
 
     // Inputs setup
 
     // Add Lending covenant input with the collateral asset
-    add_base_input_from_utxo(&mut pst, lending_out_point, lending_tx_out);
+    add_base_input_from_utxo(&mut pst, lending_out_point, lending_tx_out, None);
 
     // Add First Parameters NFT input
     add_base_input_from_utxo(
         &mut pst,
         first_parameters_nft_out_point,
         first_parameters_nft_tx_out,
+        None,
     );
 
     // Add Second Parameters NFT input
@@ -103,16 +111,17 @@ pub fn build_lending_loan_repayment(
         &mut pst,
         second_parameters_nft_out_point,
         second_parameters_nft_tx_out,
+        None,
     );
 
     // Add Borrower NFT input
-    add_base_input_from_utxo(&mut pst, borrower_nft_out_point, borrower_nft_tx_out);
+    add_base_input_from_utxo(&mut pst, borrower_nft_out_point, borrower_nft_tx_out, None);
 
     // Add Principal input
-    add_base_input_from_utxo(&mut pst, principal_out_point, principal_tx_out);
+    add_base_input_from_utxo(&mut pst, principal_out_point, principal_tx_out, None);
 
     // Add Fee input
-    add_base_input_from_utxo(&mut pst, fee_out_point, fee_tx_out);
+    add_base_input_from_utxo(&mut pst, fee_out_point, fee_tx_out, None);
 
     // Outputs setup
 
