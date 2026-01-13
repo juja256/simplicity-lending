@@ -1,3 +1,4 @@
+use simplicity_contracts::bytes32_tr_storage::unspendable_internal_key;
 use simplicity_contracts::sdk::taproot_pubkey_gen::TaprootPubkeyGen;
 
 use simplicity_contracts::sdk::validation::TxOutExt;
@@ -11,7 +12,7 @@ use crate::lending::build_arguments::LendingArguments;
 use crate::lending::get_lending_address;
 use crate::script_auth::build_arguments::ScriptAuthArguments;
 use crate::script_auth::get_script_auth_address;
-use crate::sdk::lending::basic::{add_base_input_from_utxo, check_asset_id, check_asset_value};
+use crate::sdk::basic::{add_base_input_from_utxo, check_asset_id, check_asset_value};
 use crate::sdk::parameters::{FirstNFTParameters, SecondNFTParameters};
 
 pub fn build_lending_creation(
@@ -85,20 +86,19 @@ pub fn build_lending_creation(
     let lending_taproot_pubkey_gen =
         TaprootPubkeyGen::from(lending_arguments, address_params, &get_lending_address)?;
 
-    let lending_auth_taproot_pubkey_gen = TaprootPubkeyGen::from(
+    let parameters_nft_output_script = get_script_auth_address(
+        &unspendable_internal_key(),
         &ScriptAuthArguments {
             script_hash: hash_script(&lending_taproot_pubkey_gen.address.script_pubkey()),
         },
         address_params,
-        &get_script_auth_address,
-    )?;
-    let parameters_nft_output_script = lending_auth_taproot_pubkey_gen.address.script_pubkey();
+    ).unwrap().script_pubkey();
 
     let mut pst = PartiallySignedTransaction::new_v2();
 
     // Inputs setup
 
-    // Add PreLock Covenant input with the collateral asset
+    // Add Collateral input
     add_base_input_from_utxo(&mut pst, collateral_out_point, collateral_tx_out);
 
     // Add First Parameters NFT input
@@ -198,3 +198,17 @@ pub fn build_lending_creation(
 
     Ok((pst, lending_taproot_pubkey_gen))
 }
+
+pub fn generate_lending_script(
+    lending_arguments: &LendingArguments,
+    address_params: &'static AddressParams,
+) -> Result<Script, TransactionBuildError> {
+    let lending_taproot_pubkey_gen = TaprootPubkeyGen::from(
+        lending_arguments,
+        address_params,
+        &get_lending_address,
+    )?;
+
+    Ok(lending_taproot_pubkey_gen.address.script_pubkey())
+}
+
