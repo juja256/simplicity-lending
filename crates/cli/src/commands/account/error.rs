@@ -1,13 +1,34 @@
 use simplex::{
     provider::ProviderError,
     signer::SignerError,
-    simplicityhl::{elements::OutPoint, simplicity::hex::HexToArrayError},
+    simplicityhl::{
+        elements::OutPoint,
+        simplicity::{bitcoin::key::ParsePublicKeyError, hex::HexToArrayError},
+    },
 };
 
 #[derive(thiserror::Error, Debug)]
 pub enum AccountCommandError {
     #[error("Not a signer utxo: {0}")]
     NotASignerUTXO(OutPoint),
+
+    #[error("The following outpoints do not belong to the signer: {}", .0.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "))]
+    NotSignerUTXOs(Vec<OutPoint>),
+
+    #[error("Duplicate outpoint in merge input: {0}")]
+    DuplicateOutpoint(OutPoint),
+
+    #[error("At least two outpoints are required for merge-utxo")]
+    MissingOutpointsToMerge,
+
+    #[error(
+        "All merged UTXOs must have the same asset. Expected {expected_asset_id}, but {outpoint} has {actual_asset_id}"
+    )]
+    UTXOsAssetMismatch {
+        expected_asset_id: String,
+        actual_asset_id: String,
+        outpoint: OutPoint,
+    },
 
     #[error(
         "Not enough {asset_id} asset to send: needed amount - {needed_amount}, actual amount - {actual_amount}"
@@ -34,4 +55,10 @@ pub enum AccountCommandError {
 
     #[error("Hex to array error: {0}")]
     HexToArray(#[from] HexToArrayError),
+
+    #[error("Invalid recipient blinding public key `{key}`: {source}")]
+    InvalidRecipientBlindingPublicKey {
+        key: String,
+        source: ParsePublicKeyError,
+    },
 }
