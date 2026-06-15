@@ -279,13 +279,14 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     )
   }, [state.walletType])
 
-  const getWalletUtxos = useCallback(async () => {
+  const getBlindedWalletUtxos = useCallback(async () => {
     const session = sessionRef.current
 
     if (!session) {
       throw new Error('WalletProvider: not connected')
     }
 
+    // LWK returns blinded UTXOs, which are spendable by LWK
     return session.wollet.utxos()
   }, [])
 
@@ -308,7 +309,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         verifyReceiveAddress,
         getXOnlyPublicKey,
         getWollet,
-        getWalletUtxos,
+        getBlindedWalletUtxos,
       }}
     >
       {children}

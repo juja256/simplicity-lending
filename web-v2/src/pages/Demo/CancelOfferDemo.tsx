@@ -91,7 +91,7 @@ const INITIAL_STATE: BroadcastState = {
 
 export default function CancelOfferDemo() {
   const { lwkNetwork } = useLwk()
-  const { connectionStatus, getWalletUtxos, syncing, syncWallet } = useWallet()
+  const { connectionStatus, getBlindedWalletUtxos, syncing, syncWallet } = useWallet()
   const { cancelOffer } = useCancelOffer()
   const { control, handleSubmit } = useForm<CancelOfferForm>({
     defaultValues: EMPTY_FORM,
@@ -99,8 +99,8 @@ export default function CancelOfferDemo() {
     resolver: cancelOfferFormResolver,
   })
   const [state, setState] = useState<BroadcastState>({ ...INITIAL_STATE })
-  const [walletUtxos, setWalletUtxos] = useState<WalletTxOut[]>([])
-  const [walletUtxosState, setWalletUtxosState] = useState<WalletUtxosState>({
+  const [blindedWalletUtxos, setBlindedWalletUtxos] = useState<WalletTxOut[]>([])
+  const [blindedWalletUtxosState, setBlindedWalletUtxosState] = useState<WalletUtxosState>({
     busy: false,
     error: null,
   })
@@ -110,37 +110,37 @@ export default function CancelOfferDemo() {
   const feeUtxoOptions = useMemo(() => {
     if (connectionStatus !== 'ready') return []
 
-    return walletUtxos
+    return blindedWalletUtxos
       .filter(utxo => isPolicyAssetUtxo(utxo, policyAssetId))
       .map(formatCollateralUtxoOption)
-  }, [connectionStatus, policyAssetId, walletUtxos])
+  }, [connectionStatus, policyAssetId, blindedWalletUtxos])
 
   const refreshWalletUtxos = useCallback(async () => {
-    setWalletUtxosState({ busy: true, error: null })
+    setBlindedWalletUtxosState({ busy: true, error: null })
 
     try {
       await syncWallet()
-      setWalletUtxos(await getWalletUtxos())
-      setWalletUtxosState({ busy: false, error: null })
+      setBlindedWalletUtxos(await getBlindedWalletUtxos())
+      setBlindedWalletUtxosState({ busy: false, error: null })
     } catch (err) {
-      setWalletUtxosState({
+      setBlindedWalletUtxosState({
         busy: false,
         error: err instanceof Error ? err.message : String(err),
       })
     }
-  }, [getWalletUtxos, syncWallet])
+  }, [getBlindedWalletUtxos, syncWallet])
 
   useEffect(() => {
     if (connectionStatus !== 'ready') return
 
     let cancelled = false
-    getWalletUtxos()
+    getBlindedWalletUtxos()
       .then(utxos => {
-        if (!cancelled) setWalletUtxos(utxos)
+        if (!cancelled) setBlindedWalletUtxos(utxos)
       })
       .catch(err => {
         if (!cancelled) {
-          setWalletUtxosState({
+          setBlindedWalletUtxosState({
             busy: false,
             error: err instanceof Error ? err.message : String(err),
           })
@@ -150,7 +150,7 @@ export default function CancelOfferDemo() {
     return () => {
       cancelled = true
     }
-  }, [connectionStatus, getWalletUtxos])
+  }, [connectionStatus, getBlindedWalletUtxos])
 
   const onSubmit = async (formValues: CancelOfferForm) => {
     setState({ busy: true, error: null, result: null })
@@ -246,15 +246,15 @@ export default function CancelOfferDemo() {
         />
       </div>
 
-      {walletUtxosState.error ? (
-        <p className='mt-2 text-xs text-red-500'>Wallet UTXOs: {walletUtxosState.error}</p>
+      {blindedWalletUtxosState.error ? (
+        <p className='mt-2 text-xs text-red-500'>Wallet UTXOs: {blindedWalletUtxosState.error}</p>
       ) : null}
 
       <div className='mt-4 flex flex-wrap gap-2'>
         <UiButton
           variant='outline'
-          isDisabled={connectionStatus !== 'ready' || syncing || walletUtxosState.busy}
-          isPending={syncing || walletUtxosState.busy}
+          isDisabled={connectionStatus !== 'ready' || syncing || blindedWalletUtxosState.busy}
+          isPending={syncing || blindedWalletUtxosState.busy}
           loadingText='Refreshing...'
           onPress={refreshWalletUtxos}
         >
