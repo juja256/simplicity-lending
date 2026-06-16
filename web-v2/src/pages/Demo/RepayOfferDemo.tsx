@@ -205,9 +205,10 @@ export default function RepayOfferDemo() {
     <div className='rounded border border-gray-300 bg-white p-4'>
       <div className='font-bold'>Repay Offer Demo</div>
       <p className='mt-2 max-w-3xl text-sm text-gray-600'>
-        Full repayment from the no-repayments phase: spends the active Lending covenant and the
-        Borrower NFT, burns the NFT, creates the finalized lender and protocol-fee vaults, and
-        returns the unlocked collateral to the specified address.
+        Full repayment: spends the active Lending covenant and the Borrower NFT, burns the NFT,
+        creates the finalized lender and protocol-fee vaults, and returns the unlocked collateral to
+        the specified address. Run ClaimPrincipalDemo first — repayment burns the Borrower NFT, so
+        the principal must be claimed beforehand.
       </p>
 
       <div className='mt-4 flex flex-col gap-3'>
@@ -220,9 +221,9 @@ export default function RepayOfferDemo() {
         {renderTextField({
           name: 'borrowerNftOutpoint',
           label: 'Borrower NFT outpoint',
-          placeholder: 'txid:vout',
+          placeholder: 'claim-principal-txid:0',
           description:
-            'Current outpoint of the Borrower NFT — originally create-offer-txid:2, but may have moved after unlocking the principal vault',
+            'ClaimPrincipalDemo outputs the Borrower NFT at vout 0 — use that outpoint here; repayment burns it',
         })}
         {renderTextField({
           name: 'collateralRecipientAddress',
