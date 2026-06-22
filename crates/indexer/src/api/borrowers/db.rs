@@ -1,12 +1,15 @@
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::api::OfferListQuery;
-use crate::api::offers::db::{apply_offer_list_filters, push_offer_list_order_by};
+use crate::api::offers::db::{
+    apply_offer_list_filters, enrich_offer_list_items, push_offer_list_order_by,
+};
 use crate::api::offers::dto::{OfferListItemShort, OfferListResponse};
+use crate::api::participants::push_latest_participant_offers_scope;
 use crate::api::utils::{format_hex, format_satoshis};
 use crate::models::{OfferModelShort, OfferStatus, ParticipantType};
 
-use super::dto::{AssetAmount, BorrowerDashboardResponse, BorrowerOverview};
+use super::dto::{AssetAmount, BorrowerOverview};
 
 const OPEN_BORROWER_STATUSES: [OfferStatus; 2] = [OfferStatus::Pending, OfferStatus::Active];
 
@@ -20,26 +23,6 @@ struct AssetSumRow {
 struct BorrowerCountsRow {
     active_loans: i64,
     pending_offers: i64,
-}
-
-fn push_borrower_offers_scope<'a>(
-    query_builder: &mut QueryBuilder<'a, Postgres>,
-    script_pubkey: &'a [u8],
-) {
-    query_builder.push(" AND id IN (");
-    query_builder.push(
-        "SELECT offer_id FROM (
-            SELECT DISTINCT ON (offer_id) offer_id, script_pubkey
-            FROM offer_participants
-            WHERE participant_type = ",
-    );
-    query_builder.push_bind(ParticipantType::Borrower);
-    query_builder.push(
-        " ORDER BY offer_id, created_at_height DESC
-        ) latest_borrower WHERE script_pubkey = ",
-    );
-    query_builder.push_bind(script_pubkey);
-    query_builder.push(")");
 }
 
 fn asset_amounts_from_rows(rows: Vec<AssetSumRow>) -> Vec<AssetAmount> {
@@ -56,7 +39,7 @@ fn asset_amounts_from_rows(rows: Vec<AssetSumRow>) -> Vec<AssetAmount> {
     skip(db, script_pubkey),
     fields(script_pubkey = %hex::encode(script_pubkey))
 )]
-async fn fetch_overview(
+pub async fn fetch_overview(
     db: &PgPool,
     script_pubkey: &[u8],
 ) -> Result<BorrowerOverview, sqlx::Error> {
@@ -67,7 +50,11 @@ async fn fetch_overview(
         WHERE 1=1
         "#,
     );
-    push_borrower_offers_scope(&mut collateral_builder, script_pubkey);
+    push_latest_participant_offers_scope(
+        &mut collateral_builder,
+        ParticipantType::Borrower,
+        script_pubkey,
+    );
     collateral_builder.push(" AND current_status = ANY(");
     collateral_builder.push_bind(OPEN_BORROWER_STATUSES);
     collateral_builder.push(") GROUP BY collateral_asset_id");
@@ -84,7 +71,11 @@ async fn fetch_overview(
         WHERE 1=1
         "#,
     );
-    push_borrower_offers_scope(&mut borrowings_builder, script_pubkey);
+    push_latest_participant_offers_scope(
+        &mut borrowings_builder,
+        ParticipantType::Borrower,
+        script_pubkey,
+    );
     borrowings_builder.push(" AND current_status = ANY(");
     borrowings_builder.push_bind(OPEN_BORROWER_STATUSES);
     borrowings_builder.push(") GROUP BY principal_asset_id");
@@ -111,7 +102,11 @@ async fn fetch_overview(
         WHERE 1=1
         "#,
     );
-    push_borrower_offers_scope(&mut counts_builder, script_pubkey);
+    push_latest_participant_offers_scope(
+        &mut counts_builder,
+        ParticipantType::Borrower,
+        script_pubkey,
+    );
 
     let counts = counts_builder
         .build_query_as::<BorrowerCountsRow>()
@@ -126,7 +121,7 @@ async fn fetch_overview(
     })
 }
 
-async fn fetch_offer_list(
+pub async fn fetch_offer_list(
     db: &PgPool,
     script_pubkey: &[u8],
     query: &OfferListQuery,
@@ -136,7 +131,11 @@ async fn fetch_offer_list(
 
     let mut count_builder: QueryBuilder<Postgres> =
         QueryBuilder::new("SELECT COUNT(*)::BIGINT FROM offers WHERE 1=1");
-    push_borrower_offers_scope(&mut count_builder, script_pubkey);
+    push_latest_participant_offers_scope(
+        &mut count_builder,
+        ParticipantType::Borrower,
+        script_pubkey,
+    );
     apply_offer_list_filters(&mut count_builder, query);
     let total: i64 = count_builder.build_query_scalar().fetch_one(db).await?;
 
@@ -158,7 +157,11 @@ async fn fetch_offer_list(
         WHERE 1=1
         "#,
     );
-    push_borrower_offers_scope(&mut query_builder, script_pubkey);
+    push_latest_participant_offers_scope(
+        &mut query_builder,
+        ParticipantType::Borrower,
+        script_pubkey,
+    );
     apply_offer_list_filters(&mut query_builder, query);
     push_offer_list_order_by(&mut query_builder, query);
     query_builder.push(" LIMIT ");
@@ -171,7 +174,9 @@ async fn fetch_offer_list(
         .fetch_all(db)
         .await?;
 
-    let items = rows.into_iter().map(OfferListItemShort::from).collect();
+    let mut items: Vec<OfferListItemShort> =
+        rows.into_iter().map(OfferListItemShort::from).collect();
+    enrich_offer_list_items(db, &mut items).await?;
 
     Ok(OfferListResponse {
         items,
@@ -179,30 +184,4 @@ async fn fetch_offer_list(
         limit,
         offset,
     })
-}
-
-#[tracing::instrument(
-    name = "Fetching borrower dashboard from DB",
-    skip(db, script_pubkey, query),
-    fields(
-        script_pubkey = %hex::encode(script_pubkey),
-        limit = %query.effective_limit(),
-        offset = %query.effective_offset(),
-        status = ?query.status,
-        collateral_asset = ?query.collateral_asset,
-        principal_asset = ?query.principal_asset,
-        factory_id = ?query.factory_id,
-        sort_by = ?query.sort_by,
-        sort_dir = ?query.sort_dir,
-    )
-)]
-pub async fn fetch_dashboard(
-    db: &PgPool,
-    script_pubkey: &[u8],
-    query: OfferListQuery,
-) -> Result<BorrowerDashboardResponse, sqlx::Error> {
-    let overview = fetch_overview(db, script_pubkey).await?;
-    let offers = fetch_offer_list(db, script_pubkey, &query).await?;
-
-    Ok(BorrowerDashboardResponse { overview, offers })
 }
