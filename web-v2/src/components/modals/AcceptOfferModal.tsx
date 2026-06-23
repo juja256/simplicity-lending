@@ -4,7 +4,7 @@ import { useMemo } from 'react'
 import { fetchFeeRateSatPerKvb } from '@/api/esplora/fee'
 import { fetchOffer } from '@/api/indexer/methods'
 import type { OfferShort } from '@/api/indexer/schemas'
-import { resolveCreateOfferNftOutpoints, resolvePendingOutpoint } from '@/api/indexer/utils'
+import { resolveNftOutpoints, resolvePendingOutpoint } from '@/api/indexer/utils'
 import OfferActionShell from '@/components/modals/OfferActionShell'
 import OfferDetailsBody from '@/components/modals/OfferDetailsBody'
 import { OfferStatusChip } from '@/components/OfferStatusChip'
@@ -69,7 +69,7 @@ export default function AcceptOfferModal({
       feeBudgetSats,
       feeRate,
     )
-    const nftOutpoints = resolveCreateOfferNftOutpoints(fullOffer)
+    const nftOutpoints = resolveNftOutpoints(fullOffer)
     if (!nftOutpoints) throw new Error('Offer NFT participants not found')
     const { lenderNft, borrowerNft } = nftOutpoints
 
