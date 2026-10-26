@@ -1,0 +1,363 @@
+/*
+ * PRIVATE LENDING
+ *
+ * The lending protocol of lending.simf with confidential collateral, principal, repayment and
+ * protocol fee. Their assets and amounts never appear on chain, neither in outputs nor in the
+ * program: every term is a pinned commitment, the SHA-256 of the output's confidential asset and
+ * amount (`asset_amount_hash`), which the borrower fixes when the offer is created by choosing all
+ * blinding factors. The borrower hands their openings to the chosen lender off chain, so the
+ * lender can check the terms before funding and both parties can open every output the covenant
+ * pins. Each pinned output's range proof is also rewindable with its recipient's blinding key.
+ *
+ * Pinning compares the consensus encoding of the commitments byte for byte, so it needs no
+ * decoding, and the negated commitment (another prefix byte) does not pass.
+ *
+ * Differences from lending.simf:
+ * - Terms are pinned commitments, not explicit assets, amounts and an interest rate.
+ * - The interest and the protocol fee are folded into the repayment and fee commitments; the
+ *   lender checks their openings once, off chain, before accepting the offer.
+ * - Full repayment only: partial repayments of a free amount would release collateral in
+ *   proportion to a hidden amount, which needs a zero-knowledge proof. There is no vault: the
+ *   repayment and the fee go to asset_auth outputs of the lender NFT and the fee keeper.
+ * - The storage holds the offer's status only (no debt).
+ */
+
+// Helper getters
+
+fn get_script_hash(index: u32, is_input_index: bool) -> u256 {
+    let script_hash: u256 = match is_input_index {
+        true => unwrap(jet::input_script_hash(index)),
+        false => unwrap(jet::output_script_hash(index)),
+    };
+
+    script_hash
+}
+
+fn get_explicit_asset_and_amount(index: u32, is_input_index: bool) -> (u256, u64) {
+    let pair: (Asset1, Amount1) = match is_input_index {
+        true => unwrap(jet::input_amount(index)),
+        false => unwrap(jet::output_amount(index)),
+    };
+    let (asset, amount): (Asset1, Amount1) = pair;
+    let asset_bits: u256 = unwrap_right::<(u1, u256)>(asset);
+    let amount: u64 = unwrap_right::<(u1, u256)>(amount);
+    (asset_bits, amount)
+}
+
+// SHA-256 of the consensus encoding of the asset and the amount (explicit or confidential)
+fn get_asset_and_amount_hash(index: u32, is_input_index: bool) -> u256 {
+    let pair: (Asset1, Amount1) = match is_input_index {
+        true => unwrap(jet::input_amount(index)),
+        false => unwrap(jet::output_amount(index)),
+    };
+    let (asset, amount): (Asset1, Amount1) = pair;
+
+    let hash_ctx1: Ctx8 = jet::sha_256_ctx_8_init();
+    let hash_ctx2: Ctx8 = jet::asset_amount_hash(hash_ctx1, asset, amount);
+
+    jet::sha_256_ctx_8_finalize(hash_ctx2)
+}
+
+fn is_op_return(output_index: u32) -> bool {
+    match jet::output_null_datum(output_index, 0) {
+        Some(entry: Option<Either<(u2, u256), Either<u1, u4>>>) => true,
+        None => false,
+    }
+}
+
+// Check helpers
+
+fn check_asset_amounts_eq(asset_amount_1: u64, asset_amount_2: u64) {
+    assert!(jet::eq_64(asset_amount_1, asset_amount_2));
+}
+
+fn check_assets_eq(asset_bits_1: u256, asset_bits_2: u256) {
+    assert!(jet::eq_256(asset_bits_1, asset_bits_2));
+}
+
+fn check_script_hashes_eq(script_1: u256, script_2: u256) {
+    assert!(jet::eq_256(script_1, script_2));
+}
+
+fn check_commitments_eq(commitment_hash_1: u256, commitment_hash_2: u256) {
+    assert!(jet::eq_256(commitment_hash_1, commitment_hash_2));
+}
+
+fn check_flags_eq(flag_1: bool, flag_2: bool) {
+    assert!(jet::eq_1(<bool>::into(flag_1), <bool>::into(flag_2)));
+}
+
+// Math helpers
+
+fn safe_add_32(first: u32, second: u32) -> u32 {
+    let (carry, result): (bool, u32) = jet::add_32(first, second);
+
+    check_flags_eq(carry, false);
+
+    result
+}
+
+// Ensure functions
+
+fn ensure_output_is_op_return(index: u32) {
+    check_flags_eq(is_op_return(index), true);
+}
+
+fn ensure_input_script_hash(input_index: u32, expected_script_hash: u256) {
+    let script_hash: u256 = get_script_hash(input_index, true);
+
+    check_script_hashes_eq(script_hash, expected_script_hash);
+}
+
+fn ensure_output_script_hash(output_index: u32, expected_script_hash: u256) {
+    let script_hash: u256 = get_script_hash(output_index, false);
+
+    check_script_hashes_eq(script_hash, expected_script_hash);
+}
+
+fn ensure_script_hash_transition(
+    input_index: u32,
+    output_index: u32,
+    expected_input_script_hash: u256,
+    expected_output_script_hash: u256
+) {
+    ensure_input_script_hash(input_index, expected_input_script_hash);
+    ensure_output_script_hash(output_index, expected_output_script_hash);
+}
+
+fn ensure_input_commitment(input_index: u32, expected_commitment_hash: u256) {
+    check_commitments_eq(get_asset_and_amount_hash(input_index, true), expected_commitment_hash);
+}
+
+fn ensure_output_commitment(output_index: u32, expected_commitment_hash: u256) {
+    check_commitments_eq(get_asset_and_amount_hash(output_index, false), expected_commitment_hash);
+}
+
+fn ensure_pinned_output(output_index: u32, expected_commitment_hash: u256, expected_script_hash: u256) {
+    ensure_output_commitment(output_index, expected_commitment_hash);
+    ensure_output_script_hash(output_index, expected_script_hash);
+}
+
+fn ensure_io_asset_and_amount_eq(
+    input_index: u32,
+    output_index: u32,
+    expected_asset_bits: u256,
+    expected_amount: u64
+) {
+    let (input_asset_bits, input_amount): (u256, u64) = get_explicit_asset_and_amount(input_index, true);
+    let (output_asset_bits, output_amount): (u256, u64) = get_explicit_asset_and_amount(output_index, false);
+
+    check_assets_eq(input_asset_bits, expected_asset_bits);
+    check_assets_eq(input_asset_bits, output_asset_bits);
+    check_asset_amounts_eq(input_amount, expected_amount);
+    check_asset_amounts_eq(input_amount, output_amount);
+}
+
+fn ensure_input_asset_and_amount_burn(
+    input_index: u32,
+    output_index: u32,
+    expected_asset_bits: u256,
+    expected_asset_amount: u64
+) {
+    ensure_io_asset_and_amount_eq(input_index, output_index, expected_asset_bits, expected_asset_amount);
+
+    ensure_output_is_op_return(output_index);
+}
+
+// Storage helpers
+
+fn get_is_active_slot_leaf(is_active: bool) -> u256 {
+    let is_active_num: u64 = jet::left_pad_low_1_64(<bool>::into(is_active));
+    let is_active_num: u256 = <(u128, u128)>::into((0, <(u64, u64)>::into((0, is_active_num))));
+
+    let state_ctx1: Ctx8 = jet::tapdata_init();
+    let state_ctx2: Ctx8 = jet::sha_256_ctx_8_add_32(state_ctx1, is_active_num);
+
+    jet::sha_256_ctx_8_finalize(state_ctx2)
+}
+
+fn get_script_hash_for_storage(is_active: bool) -> u256 {
+    let is_active_slot_leaf: u256 = get_is_active_slot_leaf(is_active);
+
+    let tap_node: u256 = jet::build_tapbranch(jet::tapleaf_hash(), is_active_slot_leaf);
+
+    // Compute a TapTweak
+    let bip0341_key: u256 = 0x50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0;
+    let tweaked_key: u256 = jet::build_taptweak(bip0341_key, tap_node);
+
+    // Turn the TapTweak into a script hash
+    let hash_ctx1: Ctx8 = jet::sha_256_ctx_8_init();
+    let hash_ctx2: Ctx8 = jet::sha_256_ctx_8_add_2(hash_ctx1, 0x5120); // Segwit v1, length 32
+    let hash_ctx3: Ctx8 = jet::sha_256_ctx_8_add_32(hash_ctx2, tweaked_key);
+
+    jet::sha_256_ctx_8_finalize(hash_ctx3)
+}
+
+// Full repayment flow
+
+fn get_full_repayment_offer_input_index(start_input_index: u32) -> u32 {
+    safe_add_32(start_input_index, 1)
+}
+
+fn get_full_repayment_lender_output_index(start_output_index: u32) -> u32 {
+    safe_add_32(start_output_index, 1)
+}
+
+fn get_full_repayment_protocol_fee_output_index(start_output_index: u32) -> u32 {
+    safe_add_32(start_output_index, 2)
+}
+
+fn full_repay_offer() {
+    let (borrower_nft_input_index, borrower_nft_output_index): (u32, u32) = (0, 0);
+    let offer_input_index: u32 = get_full_repayment_offer_input_index(borrower_nft_input_index);
+
+    assert!(jet::eq_32(jet::current_index(), offer_input_index));
+
+    ensure_input_script_hash(offer_input_index, get_script_hash_for_storage(true));
+    ensure_input_commitment(offer_input_index, param::ACTIVE_COLLATERAL_COMMITMENT);
+
+    ensure_input_asset_and_amount_burn(
+        borrower_nft_input_index,
+        borrower_nft_output_index,
+        param::BORROWER_NFT_ASSET_ID,
+        1
+    );
+
+    ensure_pinned_output(
+        get_full_repayment_lender_output_index(borrower_nft_output_index),
+        param::REPAYMENT_COMMITMENT,
+        param::REPAYMENT_OUTPUT_SCRIPT_HASH
+    );
+    ensure_pinned_output(
+        get_full_repayment_protocol_fee_output_index(borrower_nft_output_index),
+        param::PROTOCOL_FEE_COMMITMENT,
+        param::PROTOCOL_FEE_OUTPUT_SCRIPT_HASH
+    );
+}
+
+// Liquidation flow
+
+fn get_liquidation_lender_nft_indexes(start_input_index: u32, start_output_index: u32) -> (u32, u32) {
+    (safe_add_32(start_input_index, 1), start_output_index)
+}
+
+fn liquidate_offer() {
+    let (lending_input_index, lending_output_index): (u32, u32) = (jet::current_index(), 0);
+    let (
+        lender_nft_input_index,
+        lender_nft_output_index
+    ): (u32, u32) = get_liquidation_lender_nft_indexes(lending_input_index, lending_output_index);
+
+    assert!(jet::eq_32(lending_input_index, 0));
+
+    ensure_input_script_hash(lending_input_index, get_script_hash_for_storage(true));
+
+    jet::check_lock_height(param::LOAN_EXPIRATION_TIME);
+
+    ensure_input_commitment(lending_input_index, param::ACTIVE_COLLATERAL_COMMITMENT);
+
+    ensure_input_asset_and_amount_burn(lender_nft_input_index, lender_nft_output_index, param::LENDER_NFT_ASSET_ID, 1);
+}
+
+// Offer acceptance flow
+
+fn get_acceptance_principal_output_index(start_output_index: u32) -> u32 {
+    safe_add_32(start_output_index, 1)
+}
+
+fn get_acceptance_lender_nft_indexes(start_input_index: u32, start_output_index: u32) -> (u32, u32) {
+    (safe_add_32(start_input_index, 1), safe_add_32(start_output_index, 2))
+}
+
+fn accept_offer() {
+    let (lending_input_index, lending_output_index): (u32, u32) = (jet::current_index(), 0);
+    let (
+        lender_nft_input_index,
+        lender_nft_output_index
+    ): (u32, u32) = get_acceptance_lender_nft_indexes(lending_input_index, lending_output_index);
+    let principal_output_index: u32 = get_acceptance_principal_output_index(lending_output_index);
+
+    assert!(jet::eq_32(lending_input_index, 0));
+
+    ensure_script_hash_transition(
+        lending_input_index,
+        lending_output_index,
+        get_script_hash_for_storage(false),
+        get_script_hash_for_storage(true)
+    );
+
+    // The collateral moves to a second pinned commitment: re-using the pending one would need a
+    // surjection proof with a zero blinding difference.
+    ensure_input_commitment(lending_input_index, param::PENDING_COLLATERAL_COMMITMENT);
+    ensure_output_commitment(lending_output_index, param::ACTIVE_COLLATERAL_COMMITMENT);
+
+    ensure_io_asset_and_amount_eq(lender_nft_input_index, lender_nft_output_index, param::LENDER_NFT_ASSET_ID, 1);
+
+    ensure_pinned_output(principal_output_index, param::PRINCIPAL_COMMITMENT, param::PRINCIPAL_OUTPUT_SCRIPT_HASH);
+}
+
+// Offer cancellation flow
+
+fn get_cancellation_lender_nft_indexes(start_input_index: u32, start_output_index: u32) -> (u32, u32) {
+    (safe_add_32(start_input_index, 1), start_output_index)
+}
+
+fn get_cancellation_borrower_nft_indexes(start_input_index: u32, start_output_index: u32) -> (u32, u32) {
+    (safe_add_32(start_input_index, 2), safe_add_32(start_output_index, 1))
+}
+
+fn cancel_offer() {
+    let lending_input_index: u32 = jet::current_index();
+    let (
+        lender_nft_input_index,
+        lender_nft_output_index
+    ): (u32, u32) = get_cancellation_lender_nft_indexes(lending_input_index, 0);
+    let (
+        borrower_nft_input_index,
+        borrower_nft_output_index
+    ): (u32, u32) = get_cancellation_borrower_nft_indexes(lending_input_index, 0);
+
+    assert!(jet::eq_32(lending_input_index, 0));
+
+    ensure_input_script_hash(lending_input_index, get_script_hash_for_storage(false));
+
+    ensure_input_commitment(lending_input_index, param::PENDING_COLLATERAL_COMMITMENT);
+
+    ensure_input_asset_and_amount_burn(
+        borrower_nft_input_index,
+        borrower_nft_output_index,
+        param::BORROWER_NFT_ASSET_ID,
+        1
+    );
+    ensure_input_asset_and_amount_burn(
+        lender_nft_input_index,
+        lender_nft_output_index,
+        param::LENDER_NFT_ASSET_ID,
+        1
+    );
+}
+
+fn main() {
+    match witness::PATH {
+        Left(pending_offer_params: Either<(), ()>) => {
+            match pending_offer_params {
+                Left(params: ()) => {
+                    accept_offer();
+                },
+                Right(params: ()) => {
+                    cancel_offer();
+                },
+            }
+        },
+        Right(active_offer_params: Either<(), ()>) => {
+            match active_offer_params {
+                Left(params: ()) => {
+                    full_repay_offer();
+                },
+                Right(params: ()) => {
+                    liquidate_offer();
+                }
+            }
+        },
+    }
+}

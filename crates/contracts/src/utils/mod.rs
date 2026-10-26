@@ -1,4 +1,5 @@
 pub mod basis_points;
+pub mod confidential;
 pub mod op_return;
 pub mod seed;
 
