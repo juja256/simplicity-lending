@@ -23,6 +23,8 @@ workspace = true
 ring = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
+# Random blinding factors of pinned confidential outputs (the rand of secp256k1-zkp)
+rand = "0.8"
 
 smplx-std = { workspace = true }
 
