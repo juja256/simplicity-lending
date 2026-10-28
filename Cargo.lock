@@ -1786,6 +1786,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hex",
+ "private-lending-core",
  "rand 0.8.6",
  "ring",
  "smplx-std",

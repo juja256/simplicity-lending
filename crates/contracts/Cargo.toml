@@ -27,6 +27,7 @@ thiserror = { workspace = true }
 rand = "0.8"
 
 smplx-std = { workspace = true }
+private-lending-core = { path = "../private-lending-core" }
 
 [dev-dependencies]
 anyhow = "1"

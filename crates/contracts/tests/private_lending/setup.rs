@@ -10,7 +10,9 @@ use lending_contracts::programs::lending::OfferParameters;
 use lending_contracts::programs::private_lending::{
     PrivateLendingOffer, PrivateLendingParameters, PrivateLendingTerms,
 };
-use lending_contracts::utils::confidential::{ConfidentialTransaction, PinnedOutput};
+use lending_contracts::utils::confidential::{
+    ConfidentialTransaction, PinnedOutput, PinnedOutputExt,
+};
 
 use lending_contracts::utils::confidential::wait_for_confirmation;
 use lending_contracts::utils::get_random_seed;

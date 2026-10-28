@@ -7,7 +7,7 @@ use crate::{
         lending::OfferParameters,
         program::SimplexProgram,
     },
-    utils::confidential::PinnedOutput,
+    utils::confidential::{PinnedOutput, PinnedOutputExt},
 };
 
 /// The terms of a private offer: the economic parameters and the pinned outputs that carry them.
