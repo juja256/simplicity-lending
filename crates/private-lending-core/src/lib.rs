@@ -1,4 +1,5 @@
-//! Cryptography of Simplicity Lending private offers: lending keys and per-offer secrets.
+//! Cryptography of Simplicity Lending private offers: lending keys, per-offer secrets, signed
+//! terms, the marker, pinned outputs, and building and opening offers.
 //!
 //! The crate depends only on `elements` and `rand`, so the contracts crate and the browser's wasm
 //! module run the same code.
@@ -6,6 +7,7 @@
 mod blind;
 mod keys;
 mod marker;
+mod offer;
 mod pinned;
 mod secrets;
 mod terms;
@@ -15,6 +17,9 @@ use elements::hashes::{Hash, HashEngine, sha256};
 pub use blind::{BlindPsetError, PinnedBlinding, RewindError, blind_pset, rewind};
 pub use keys::{LendingKey, ephemeral_key, lift_lending_key};
 pub use marker::Marker;
+pub use offer::{
+    NewOffer, OfferError, OfferPinned, OpenError, OpenedOffer, open_as_borrower, open_as_lender,
+};
 pub use pinned::PinnedOutput;
 pub use secrets::{OfferSecrets, PinnedRole};
 pub use terms::{OfferTerms, SignedTerms, TERMS_VERSION, TermsError};
