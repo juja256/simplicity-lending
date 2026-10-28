@@ -144,6 +144,27 @@ fn assert_program_rejects(result: Result<impl Sized, ConfidentialTransactionErro
     }
 }
 
+/// The honest control of the acceptance failures: with the pinned principal, the transaction that
+/// [`build_acceptance_with_principal`] builds goes through, so they fail for their principal only.
+#[simplex::test]
+fn private_offer_acceptance_succeeds_with_the_pinned_principal(
+    context: simplex::TestContext,
+) -> anyhow::Result<()> {
+    let lender = context.random_signer();
+
+    let setup = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
+    let principal = setup.parameters.pinned.principal;
+
+    fund_lender(&context, &lender, principal.asset_id, principal.amount)?;
+
+    let ctx = build_acceptance_with_principal(&context, &setup, &lender, principal)?;
+    let acceptance_tx = broadcast(&ctx, &lender)?;
+
+    assert!(principal.matches(&acceptance_tx.output[1]));
+
+    Ok(())
+}
+
 #[simplex::test]
 fn private_offer_acceptance_fails_with_another_principal_amount(
     context: simplex::TestContext,
@@ -180,6 +201,36 @@ fn private_offer_acceptance_fails_with_unpinned_principal_blinders(
     let ctx = build_acceptance_with_principal(&context, &setup, &lender, reblinded_principal)?;
 
     assert_program_rejects(ctx.finalize(&lender));
+
+    Ok(())
+}
+
+/// The honest control of the repayment failures: with the pinned repayment and the full repayment
+/// branch, the transaction that [`build_repayment_with`] builds goes through, so they fail for
+/// their repayment or their branch only.
+#[simplex::test]
+fn private_offer_repayment_succeeds_with_the_pinned_repayment(
+    context: simplex::TestContext,
+) -> anyhow::Result<()> {
+    let borrower = context.get_default_signer();
+    let lender = context.random_signer();
+
+    let mut setup = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
+    let repayment = setup.parameters.pinned.repayment;
+
+    let acceptance_tx = accept_private_offer(&context, &mut setup, &lender)?;
+
+    let ctx = build_repayment_with(
+        &context,
+        &setup,
+        &acceptance_tx,
+        &lender,
+        PrivateLendingWitnessBranch::FullRepayment,
+        repayment,
+    )?;
+    let repayment_tx = broadcast(&ctx, borrower)?;
+
+    assert!(repayment.matches(&repayment_tx.output[1]));
 
     Ok(())
 }

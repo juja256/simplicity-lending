@@ -91,9 +91,11 @@ impl OfferSecrets {
 mod tests {
     use std::collections::HashSet;
 
+    use elements::hex::ToHex;
     use elements::secp256k1_zkp::Parity;
 
     use super::*;
+    use crate::test_util::sequence;
 
     const ALL_ROLES: [PinnedRole; 4] = [
         PinnedRole::PendingCollateral,
@@ -157,5 +159,25 @@ mod tests {
             })
             .collect();
         assert_eq!(all.len(), 8);
+    }
+
+    /// Frozen outputs of the derivation for a fixed shared secret, the bytes 0x80..=0x9f, so a
+    /// change of tag or label fails.
+    #[test]
+    fn view_tag_and_blinders_known_answers() {
+        let secrets = OfferSecrets {
+            shared_secret: SecretKey::from_slice(&sequence(0x80)).unwrap(),
+        };
+
+        assert_eq!(secrets.view_tag(), 0xda);
+        let (abf, vbf) = secrets.blinders(PinnedRole::PendingCollateral);
+        assert_eq!(
+            abf.into_inner().as_ref().to_hex(),
+            "6b94e2dffa5ea476fad3e58101b7d80f03e094ed13628cd84552555cfb2c04d6"
+        );
+        assert_eq!(
+            vbf.into_inner().as_ref().to_hex(),
+            "65537b6c8aa26a483786b244e94816364bc69fe7966b2176a75acc5b9f7491e7"
+        );
     }
 }
