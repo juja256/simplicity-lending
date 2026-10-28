@@ -1,0 +1,14 @@
+[package]
+name = "private-lending-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Cryptography of Simplicity Lending private offers, shared by the contracts and the wasm module"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+elements = "0.25.2"
+rand = "0.8"
