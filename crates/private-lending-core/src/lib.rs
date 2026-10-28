@@ -4,12 +4,14 @@
 //! module run the same code.
 
 mod keys;
+mod marker;
 mod secrets;
 mod terms;
 
 use elements::hashes::{Hash, HashEngine, sha256};
 
 pub use keys::{LendingKey, ephemeral_key, lift_lending_key};
+pub use marker::Marker;
 pub use secrets::{OfferSecrets, PinnedRole};
 pub use terms::{OfferTerms, SignedTerms, TERMS_VERSION, TermsError};
 
