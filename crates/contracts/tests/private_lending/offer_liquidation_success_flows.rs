@@ -16,7 +16,7 @@ pub(super) fn build_liquidation(
 ) -> anyhow::Result<ConfidentialTransaction> {
     let parameters = setup.parameters;
 
-    let active_offer_utxo = find_pinned_utxo(acceptance_tx, &parameters.terms.active_collateral);
+    let active_offer_utxo = find_pinned_utxo(acceptance_tx, &parameters.pinned.active_collateral);
     let lender_nft_utxo = lender.get_utxos_asset(parameters.lender_nft_asset_id)?[0].clone();
 
     let mut ctx = ConfidentialTransaction::new();
@@ -30,8 +30,8 @@ pub(super) fn build_liquidation(
     ctx.add_output(
         PartialOutput::new(
             lender.get_confidential_address().script_pubkey(),
-            parameters.terms.active_collateral.amount,
-            parameters.terms.active_collateral.asset_id,
+            parameters.pinned.active_collateral.amount,
+            parameters.pinned.active_collateral.asset_id,
         )
         .with_blinding_key(lender.get_blinding_public_key()),
     );
@@ -53,7 +53,7 @@ fn private_offer_liquidation_succeeds_after_expiration_time(
 
     setup.offer = get_active_offer(&setup);
 
-    let expiration_height = u64::from(parameters.terms.offer_parameters.loan_expiration_time) + 1;
+    let expiration_height = u64::from(parameters.loan_expiration_time) + 1;
     context
         .get_network_utils()
         .mine_until_height(expiration_height)?;
@@ -70,11 +70,11 @@ fn private_offer_liquidation_succeeds_after_expiration_time(
     );
     assert!(
         lender
-            .get_utxos_asset(parameters.terms.active_collateral.asset_id)?
+            .get_utxos_asset(parameters.pinned.active_collateral.asset_id)?
             .iter()
-            .any(|utxo| utxo.amount() == parameters.terms.active_collateral.amount)
+            .any(|utxo| utxo.amount() == parameters.pinned.active_collateral.amount)
     );
-    assert!(provider.fetch_tip_height()? >= parameters.terms.offer_parameters.loan_expiration_time);
+    assert!(provider.fetch_tip_height()? >= parameters.loan_expiration_time);
 
     Ok(())
 }

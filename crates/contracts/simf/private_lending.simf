@@ -1,25 +1,28 @@
 /*
  * PRIVATE LENDING
  *
- * The lending protocol of lending.simf with confidential collateral, principal, repayment and
- * protocol fee. Their assets and amounts never appear on chain, neither in outputs nor in the
- * program: every term is a pinned commitment, the SHA-256 of the output's confidential asset and
- * amount (`asset_amount_hash`), which the borrower fixes when the offer is created by choosing all
- * blinding factors. The borrower hands their openings to the chosen lender off chain, so the
- * lender can check the terms before funding and both parties can open every output the covenant
- * pins. Each pinned output's range proof is also rewindable with its recipient's blinding key.
+ * The lending protocol of lending.simf with confidential collateral, principal and repayment.
+ * Their assets and amounts never appear on chain, neither in outputs nor in the program: every
+ * term is a pinned commitment, the SHA-256 of the output's confidential asset and amount
+ * (`asset_amount_hash`), whose blinding factors are fixed when the offer is created. The borrower
+ * derives them from a secret it shares with the chosen lender, so both parties can open every
+ * output the covenant pins and the lender can check the terms before funding. Each pinned output's
+ * range proof is also rewindable with its recipient's blinding key.
  *
  * Pinning compares the consensus encoding of the commitments byte for byte, so it needs no
  * decoding, and the negated commitment (another prefix byte) does not pass.
  *
  * Differences from lending.simf:
  * - Terms are pinned commitments, not explicit assets, amounts and an interest rate.
- * - The interest and the protocol fee are folded into the repayment and fee commitments; the
- *   lender checks their openings once, off chain, before accepting the offer.
+ * - No protocol fee. The interest is folded into the repayment commitment; the lender checks its
+ *   opening once, off chain, before accepting the offer.
  * - Full repayment only: partial repayments of a free amount would release collateral in
- *   proportion to a hidden amount, which needs a zero-knowledge proof. There is no vault: the
- *   repayment and the fee go to asset_auth outputs of the lender NFT and the fee keeper.
- * - The storage holds the offer's status only (no debt).
+ *   proportion to a hidden amount, which needs a zero-knowledge proof. The witness keeps the
+ *   shape of lending.simf, with the partial repayment branch reserved: it always fails. There is
+ *   no vault: the repayment goes to an asset_auth output of the lender NFT.
+ * - The storage has the two slots of lending.simf, the offer's status and its outstanding debt,
+ *   here the debt's commitment hash. As there is no partial repayment, the debt is
+ *   REPAYMENT_COMMITMENT from creation until the full repayment.
  */
 
 // Helper getters
@@ -176,10 +179,19 @@ fn get_is_active_slot_leaf(is_active: bool) -> u256 {
     jet::sha_256_ctx_8_finalize(state_ctx2)
 }
 
-fn get_script_hash_for_storage(is_active: bool) -> u256 {
-    let is_active_slot_leaf: u256 = get_is_active_slot_leaf(is_active);
+fn get_debt_slot_leaf(debt: u256) -> u256 {
+    let state_ctx1: Ctx8 = jet::tapdata_init();
+    let state_ctx2: Ctx8 = jet::sha_256_ctx_8_add_32(state_ctx1, debt);
 
-    let tap_node: u256 = jet::build_tapbranch(jet::tapleaf_hash(), is_active_slot_leaf);
+    jet::sha_256_ctx_8_finalize(state_ctx2)
+}
+
+fn get_script_hash_for_storage(is_active: bool, debt: u256) -> u256 {
+    let is_active_slot_leaf: u256 = get_is_active_slot_leaf(is_active);
+    let debt_slot_leaf: u256 = get_debt_slot_leaf(debt);
+
+    let first_tap_node: u256 = jet::build_tapbranch(jet::tapleaf_hash(), is_active_slot_leaf);
+    let tap_node: u256 = jet::build_tapbranch(first_tap_node, debt_slot_leaf);
 
     // Compute a TapTweak
     let bip0341_key: u256 = 0x50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0;
@@ -203,17 +215,16 @@ fn get_full_repayment_lender_output_index(start_output_index: u32) -> u32 {
     safe_add_32(start_output_index, 1)
 }
 
-fn get_full_repayment_protocol_fee_output_index(start_output_index: u32) -> u32 {
-    safe_add_32(start_output_index, 2)
-}
-
 fn full_repay_offer() {
     let (borrower_nft_input_index, borrower_nft_output_index): (u32, u32) = (0, 0);
     let offer_input_index: u32 = get_full_repayment_offer_input_index(borrower_nft_input_index);
 
     assert!(jet::eq_32(jet::current_index(), offer_input_index));
 
-    ensure_input_script_hash(offer_input_index, get_script_hash_for_storage(true));
+    ensure_input_script_hash(
+        offer_input_index,
+        get_script_hash_for_storage(true, param::REPAYMENT_COMMITMENT)
+    );
     ensure_input_commitment(offer_input_index, param::ACTIVE_COLLATERAL_COMMITMENT);
 
     ensure_input_asset_and_amount_burn(
@@ -227,11 +238,6 @@ fn full_repay_offer() {
         get_full_repayment_lender_output_index(borrower_nft_output_index),
         param::REPAYMENT_COMMITMENT,
         param::REPAYMENT_OUTPUT_SCRIPT_HASH
-    );
-    ensure_pinned_output(
-        get_full_repayment_protocol_fee_output_index(borrower_nft_output_index),
-        param::PROTOCOL_FEE_COMMITMENT,
-        param::PROTOCOL_FEE_OUTPUT_SCRIPT_HASH
     );
 }
 
@@ -250,7 +256,10 @@ fn liquidate_offer() {
 
     assert!(jet::eq_32(lending_input_index, 0));
 
-    ensure_input_script_hash(lending_input_index, get_script_hash_for_storage(true));
+    ensure_input_script_hash(
+        lending_input_index,
+        get_script_hash_for_storage(true, param::REPAYMENT_COMMITMENT)
+    );
 
     jet::check_lock_height(param::LOAN_EXPIRATION_TIME);
 
@@ -282,8 +291,8 @@ fn accept_offer() {
     ensure_script_hash_transition(
         lending_input_index,
         lending_output_index,
-        get_script_hash_for_storage(false),
-        get_script_hash_for_storage(true)
+        get_script_hash_for_storage(false, param::REPAYMENT_COMMITMENT),
+        get_script_hash_for_storage(true, param::REPAYMENT_COMMITMENT)
     );
 
     // The collateral moves to a second pinned commitment: re-using the pending one would need a
@@ -319,7 +328,10 @@ fn cancel_offer() {
 
     assert!(jet::eq_32(lending_input_index, 0));
 
-    ensure_input_script_hash(lending_input_index, get_script_hash_for_storage(false));
+    ensure_input_script_hash(
+        lending_input_index,
+        get_script_hash_for_storage(false, param::REPAYMENT_COMMITMENT)
+    );
 
     ensure_input_commitment(lending_input_index, param::PENDING_COLLATERAL_COMMITMENT);
 
@@ -349,10 +361,18 @@ fn main() {
                 },
             }
         },
-        Right(active_offer_params: Either<(), ()>) => {
+        Right(active_offer_params: Either<Either<(), ()>, ()>) => {
             match active_offer_params {
-                Left(params: ()) => {
-                    full_repay_offer();
+                Left(repayment_params: Either<(), ()>) => {
+                    match repayment_params {
+                        Left(partial_repayment_params: ()) => {
+                            // Reserved for partial repayment, which a later contract version adds
+                            panic!();
+                        },
+                        Right(full_repayment_params: ()) => {
+                            full_repay_offer();
+                        },
+                    }
                 },
                 Right(params: ()) => {
                     liquidate_offer();

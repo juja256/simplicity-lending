@@ -1,4 +1,6 @@
-use simplex::transaction::{PartialOutput, RequiredSignature};
+use simplex::signer::Signer;
+use simplex::simplicityhl::elements::{Script, Transaction};
+use simplex::transaction::{PartialInput, PartialOutput, RequiredSignature};
 
 use lending_contracts::programs::private_lending::{
     PrivateLendingOffer, PrivateLendingWitnessBranch,
@@ -11,8 +13,8 @@ use lending_contracts::utils::confidential::{
 
 use super::offer_liquidation_success_flows::build_liquidation;
 use super::setup::{
-    PrivateOfferSetup, accept_private_offer, add_lender_principal, default_offer_parameters,
-    find_explicit_utxo, find_pinned_utxo, fund_lender, get_active_offer,
+    PrivateOfferSetup, accept_private_offer, add_lender_principal, broadcast, build_full_repayment,
+    default_offer_parameters, find_explicit_utxo, find_pinned_utxo, fund_lender, get_active_offer,
     setup_pending_private_offer,
 };
 
@@ -21,14 +23,14 @@ use super::setup::{
 fn build_acceptance_with_principal(
     context: &simplex::TestContext,
     setup: &PrivateOfferSetup,
-    lender: &simplex::signer::Signer,
+    lender: &Signer,
     principal: PinnedOutput,
 ) -> anyhow::Result<ConfidentialTransaction> {
     let borrower = context.get_default_signer();
     let parameters = setup.parameters;
 
     let pending_offer_utxo =
-        find_pinned_utxo(&setup.creation_tx, &parameters.terms.pending_collateral);
+        find_pinned_utxo(&setup.creation_tx, &parameters.pinned.pending_collateral);
     let lender_nft_utxo = find_explicit_utxo(&setup.creation_tx, parameters.lender_nft_asset_id);
 
     let mut ctx = ConfidentialTransaction::new();
@@ -47,7 +49,7 @@ fn build_acceptance_with_principal(
     let active_offer = PrivateLendingOffer::new_active(parameters);
     ctx.add_pinned_output(
         active_offer.get_script_pubkey(),
-        parameters.terms.active_collateral,
+        parameters.pinned.active_collateral,
         borrower.get_blinding_public_key(),
     );
     ctx.add_pinned_output(
@@ -68,6 +70,72 @@ fn build_acceptance_with_principal(
     Ok(ctx)
 }
 
+/// A full repayment of the active offer accepted in `acceptance_tx`, built by hand: the offer input
+/// takes the witness of `branch` and the lender is paid `repayment`, where `attach_full_repayment`
+/// uses `FullRepayment` and the pinned repayment.
+fn build_repayment_with(
+    context: &simplex::TestContext,
+    setup: &PrivateOfferSetup,
+    acceptance_tx: &Transaction,
+    lender: &Signer,
+    branch: PrivateLendingWitnessBranch,
+    repayment: PinnedOutput,
+) -> anyhow::Result<ConfidentialTransaction> {
+    let borrower = context.get_default_signer();
+    let parameters = setup.parameters;
+    let active_offer = get_active_offer(setup);
+
+    let active_offer_utxo = find_pinned_utxo(acceptance_tx, &parameters.pinned.active_collateral);
+    let borrower_nft_utxo = borrower.get_utxos_asset(parameters.borrower_nft_asset_id)?[0].clone();
+    let borrower_principal_utxo = borrower.get_utxos_filter(
+        &|utxo| {
+            utxo.explicit_asset() == repayment.asset_id && utxo.explicit_amount() > repayment.amount
+        },
+        &|_| true,
+    )?[0]
+        .clone();
+    let principal_utxo_amount = borrower_principal_utxo.explicit_amount();
+
+    let mut ctx = ConfidentialTransaction::new();
+
+    ctx.add_input(
+        PartialInput::new(borrower_nft_utxo),
+        RequiredSignature::NativeEcdsa,
+    );
+    ctx.add_output(PartialOutput::new(
+        Script::new_op_return(b"burn"),
+        1,
+        parameters.borrower_nft_asset_id,
+    ));
+    active_offer.add_program_input(&mut ctx, active_offer_utxo, branch.build_witness());
+    ctx.add_pinned_output(
+        parameters
+            .get_repayment_output_asset_auth()
+            .get_script_pubkey(),
+        repayment,
+        lender.get_blinding_public_key(),
+    );
+    ctx.add_input(
+        PartialInput::new(borrower_principal_utxo),
+        RequiredSignature::NativeEcdsa,
+    );
+    ctx.add_output(
+        PartialOutput::new(
+            borrower.get_confidential_address().script_pubkey(),
+            parameters.pinned.active_collateral.amount,
+            parameters.pinned.active_collateral.asset_id,
+        )
+        .with_blinding_key(borrower.get_blinding_public_key()),
+    );
+    ctx.add_output(PartialOutput::new(
+        borrower.get_address().script_pubkey(),
+        principal_utxo_amount - repayment.amount,
+        repayment.asset_id,
+    ));
+
+    Ok(ctx)
+}
+
 fn assert_program_rejects(result: Result<impl Sized, ConfidentialTransactionError>) {
     match result {
         Err(ConfidentialTransactionError::Program(_)) => {}
@@ -83,7 +151,7 @@ fn private_offer_acceptance_fails_with_another_principal_amount(
     let lender = context.random_signer();
 
     let setup = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
-    let principal = setup.parameters.terms.principal;
+    let principal = setup.parameters.pinned.principal;
 
     fund_lender(&context, &lender, principal.asset_id, principal.amount)?;
 
@@ -103,7 +171,7 @@ fn private_offer_acceptance_fails_with_unpinned_principal_blinders(
     let lender = context.random_signer();
 
     let setup = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
-    let principal = setup.parameters.terms.principal;
+    let principal = setup.parameters.pinned.principal;
 
     fund_lender(&context, &lender, principal.asset_id, principal.amount)?;
 
@@ -124,74 +192,80 @@ fn private_offer_repayment_fails_with_unpinned_repayment_blinders(
     let lender = context.random_signer();
 
     let mut setup = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
-    let parameters = setup.parameters;
+    let repayment = setup.parameters.pinned.repayment;
 
     let acceptance_tx = accept_private_offer(&context, &mut setup, &lender)?;
-    let active_offer = get_active_offer(&setup);
-
-    let active_offer_utxo = find_pinned_utxo(&acceptance_tx, &parameters.terms.active_collateral);
-    let borrower_nft_utxo = borrower.get_utxos_asset(parameters.borrower_nft_asset_id)?[0].clone();
-    let borrower_principal_utxo = borrower.get_utxos_filter(
-        &|utxo| {
-            utxo.explicit_asset() == parameters.terms.principal.asset_id
-                && utxo.explicit_amount() >= parameters.terms.get_total_amount_to_repay()
-        },
-        &|_| true,
-    )?[0]
-        .clone();
-    let principal_utxo_amount = borrower_principal_utxo.explicit_amount();
 
     // the borrower pays the right amount, but under blinding factors the lender cannot know
-    let mut ctx = ConfidentialTransaction::new();
+    let reblinded_repayment = PinnedOutput::new_random(repayment.asset_id, repayment.amount);
+    let ctx = build_repayment_with(
+        &context,
+        &setup,
+        &acceptance_tx,
+        &lender,
+        PrivateLendingWitnessBranch::FullRepayment,
+        reblinded_repayment,
+    )?;
 
-    ctx.add_input(
-        simplex::transaction::PartialInput::new(borrower_nft_utxo),
-        RequiredSignature::NativeEcdsa,
+    assert_program_rejects(ctx.finalize(borrower));
+
+    Ok(())
+}
+
+#[simplex::test]
+fn private_offer_partial_repayment_branch_fails(
+    context: simplex::TestContext,
+) -> anyhow::Result<()> {
+    let borrower = context.get_default_signer();
+    let lender = context.random_signer();
+
+    let mut setup = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
+    let repayment = setup.parameters.pinned.repayment;
+
+    let acceptance_tx = accept_private_offer(&context, &mut setup, &lender)?;
+
+    // a valid full repayment, spent through the reserved partial repayment branch
+    let ctx = build_repayment_with(
+        &context,
+        &setup,
+        &acceptance_tx,
+        &lender,
+        PrivateLendingWitnessBranch::PartialRepayment,
+        repayment,
+    )?;
+
+    assert_program_rejects(ctx.finalize(borrower));
+
+    Ok(())
+}
+
+#[simplex::test]
+fn private_offer_repayment_fails_with_wrong_debt_slot(
+    context: simplex::TestContext,
+) -> anyhow::Result<()> {
+    let borrower = context.get_default_signer();
+    let lender = context.random_signer();
+
+    let setup = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
+    let parameters = setup.parameters;
+
+    // an active offer whose debt slot holds another commitment hash than the repayment's
+    let wrong_debt_offer = PrivateLendingOffer::new_with_storage(
+        parameters,
+        true,
+        parameters.pinned.principal.commitment_hash(),
     );
-    ctx.add_output(PartialOutput::new(
-        simplex::simplicityhl::elements::Script::new_op_return(b"burn"),
-        1,
-        parameters.borrower_nft_asset_id,
-    ));
-    active_offer.add_program_input(
-        &mut ctx,
-        active_offer_utxo,
-        PrivateLendingWitnessBranch::FullRepayment.build_witness(),
-    );
-    ctx.add_pinned_output(
-        parameters
-            .get_repayment_output_asset_auth()
-            .get_script_pubkey(),
-        PinnedOutput::new_random(
-            parameters.terms.repayment.asset_id,
-            parameters.terms.repayment.amount,
-        ),
-        lender.get_blinding_public_key(),
-    );
-    ctx.add_pinned_output(
-        parameters
-            .get_protocol_fee_output_asset_auth()
-            .get_script_pubkey(),
-        parameters.terms.protocol_fee,
+
+    let mut funding_ctx = ConfidentialTransaction::new();
+    funding_ctx.add_pinned_output(
+        wrong_debt_offer.get_script_pubkey(),
+        parameters.pinned.active_collateral,
         borrower.get_blinding_public_key(),
     );
-    ctx.add_input(
-        simplex::transaction::PartialInput::new(borrower_principal_utxo),
-        RequiredSignature::NativeEcdsa,
-    );
-    ctx.add_output(
-        PartialOutput::new(
-            borrower.get_confidential_address().script_pubkey(),
-            parameters.terms.active_collateral.amount,
-            parameters.terms.active_collateral.asset_id,
-        )
-        .with_blinding_key(borrower.get_blinding_public_key()),
-    );
-    ctx.add_output(PartialOutput::new(
-        borrower.get_address().script_pubkey(),
-        principal_utxo_amount - parameters.terms.get_total_amount_to_repay(),
-        parameters.terms.principal.asset_id,
-    ));
+    let funding_tx = broadcast(&funding_ctx, borrower)?;
+
+    let wrong_debt_offer_utxo = find_pinned_utxo(&funding_tx, &parameters.pinned.active_collateral);
+    let ctx = build_full_repayment(&wrong_debt_offer, wrong_debt_offer_utxo, borrower, &lender)?;
 
     assert_program_rejects(ctx.finalize(borrower));
 
@@ -212,7 +286,7 @@ fn private_offer_liquidation_fails_before_expiration_time(
 
     setup.offer = get_active_offer(&setup);
 
-    assert!(provider.fetch_tip_height()? < parameters.terms.offer_parameters.loan_expiration_time);
+    assert!(provider.fetch_tip_height()? < parameters.loan_expiration_time);
 
     // the program accepts the lock time, but the network refuses a transaction not final yet
     let result = build_liquidation(&setup, &acceptance_tx, &lender)?.broadcast(&lender);

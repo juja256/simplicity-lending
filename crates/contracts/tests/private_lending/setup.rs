@@ -1,18 +1,18 @@
 use simplex::signer::Signer;
 use simplex::simplicityhl::elements::secp256k1_zkp::Secp256k1;
-use simplex::simplicityhl::elements::{AssetId, OutPoint, Transaction, TxOutSecrets};
+use simplex::simplicityhl::elements::{AssetId, OutPoint, Transaction, TxOut, TxOutSecrets};
 use simplex::transaction::{
     FinalTransaction, PartialInput, PartialOutput, RequiredSignature, UTXO,
 };
 
 use lending_contracts::programs::asset_auth::{AssetAuth, AssetAuthWitnessParams};
 use lending_contracts::programs::lending::OfferParameters;
-use lending_contracts::programs::private_lending::{
-    PrivateLendingOffer, PrivateLendingParameters, PrivateLendingTerms,
-};
+use lending_contracts::programs::private_lending::{PrivateLendingOffer, PrivateLendingParameters};
+use lending_contracts::programs::program::SimplexProgram;
 use lending_contracts::utils::confidential::{
     ConfidentialTransaction, PinnedOutput, PinnedOutputExt,
 };
+use private_lending_core::{LendingKey, NewOffer, OfferTerms};
 
 use lending_contracts::utils::confidential::wait_for_confirmation;
 use lending_contracts::utils::get_random_seed;
@@ -95,13 +95,11 @@ pub(super) fn find_explicit_utxo(tx: &Transaction, asset_id: AssetId) -> UTXO {
     }
 }
 
-/// What `signer` recovers by rewinding the range proof of `utxo` with its blinding key.
-pub(super) fn unblind_with(signer: &Signer, utxo: &UTXO) -> anyhow::Result<TxOutSecrets> {
+/// What `signer` recovers by rewinding the range proof of `txout` with its blinding key.
+pub(super) fn unblind_with(signer: &Signer, txout: &TxOut) -> anyhow::Result<TxOutSecrets> {
     let secp = Secp256k1::new();
 
-    Ok(utxo
-        .txout
-        .unblind(&secp, signer.get_blinding_private_key().inner)?)
+    Ok(txout.unblind(&secp, signer.get_blinding_private_key().inner)?)
 }
 
 pub(super) fn fund_lender(
@@ -219,32 +217,50 @@ fn issue_asset(context: &simplex::TestContext, asset_amount: u64) -> anyhow::Res
     Ok(issuance_details.asset_id)
 }
 
-/// The borrower (the default signer) issues the NFTs and the principal asset (it also holds the
-/// protocol fee keeper asset), fixes the terms and creates the pending offer.
+/// The borrower (the default signer) issues the NFTs and the principal asset, builds the offer
+/// for the test lender's lending key, its blinding factors derived from their shared secret, and
+/// creates the pending offer.
 pub(super) fn setup_pending_private_offer(
     context: &simplex::TestContext,
     offer_parameters: OfferParameters,
 ) -> anyhow::Result<PrivateOfferSetup> {
     let borrower = context.get_default_signer();
+    let borrower_lending_key = LendingKey::from_master_blinding_key(&[1; 32]);
+    let lender_lending_key = LendingKey::from_master_blinding_key(&[2; 32]);
 
     split_first_signer_utxo(context, vec![5000, 10000])?;
 
-    let protocol_fee_keeper_asset_id = issue_asset(context, 1)?;
     let principal_asset_id = issue_asset(context, TOTAL_PRINCIPAL_AMOUNT)?;
     let borrower_nft_asset_id = issue_asset(context, 1)?;
     let lender_nft_asset_id = issue_asset(context, 1)?;
 
-    let terms = PrivateLendingTerms::new(
+    // the lender NFT coin is input 0 of the creation transaction, the offer's first input
+    let lender_nft_utxo = borrower.get_utxos_asset(lender_nft_asset_id)?[0].clone();
+
+    let terms = OfferTerms {
+        principal_asset: principal_asset_id,
+        principal_amount: offer_parameters.principal_amount,
+        repayment_amount: offer_parameters.get_total_amount_to_repay(),
+        interest_rate_bps: offer_parameters.principal_interest_rate,
+        loan_expiration_time: offer_parameters.loan_expiration_time,
+        borrower_nft: borrower_nft_asset_id,
+        lender_nft: lender_nft_asset_id,
+    };
+    let new_offer = NewOffer::build(
+        &borrower_lending_key,
+        &lender_lending_key.x_only_public_key(),
+        &lender_nft_utxo.outpoint,
+        PrivateLendingOffer::get_program_id(),
         context.get_network().policy_asset(),
-        principal_asset_id,
-        offer_parameters,
-    );
+        offer_parameters.collateral_amount,
+        terms,
+    )?;
 
     let parameters = PrivateLendingParameters {
         borrower_nft_asset_id,
         lender_nft_asset_id,
-        protocol_fee_keeper_asset_id,
-        terms,
+        pinned: new_offer.pinned,
+        loan_expiration_time: offer_parameters.loan_expiration_time,
         network: *context.get_network(),
     };
 
@@ -252,7 +268,6 @@ pub(super) fn setup_pending_private_offer(
 
     let mut ctx = ConfidentialTransaction::new();
 
-    let lender_nft_utxo = borrower.get_utxos_asset(lender_nft_asset_id)?[0].clone();
     ctx.add_input(
         PartialInput::new(lender_nft_utxo),
         RequiredSignature::NativeEcdsa,
@@ -280,7 +295,7 @@ pub(super) fn build_acceptance(
     let parameters = setup.parameters;
 
     let pending_offer_utxo =
-        find_pinned_utxo(&setup.creation_tx, &parameters.terms.pending_collateral);
+        find_pinned_utxo(&setup.creation_tx, &parameters.pinned.pending_collateral);
     let lender_nft_utxo = find_explicit_utxo(&setup.creation_tx, parameters.lender_nft_asset_id);
 
     let mut ctx = ConfidentialTransaction::new();
@@ -308,10 +323,10 @@ pub(super) fn add_lender_principal(
     lender: &Signer,
     parameters: PrivateLendingParameters,
 ) -> anyhow::Result<()> {
-    let principal_amount = parameters.terms.principal.amount;
+    let principal_amount = parameters.pinned.principal.amount;
     let lender_principal_utxo = lender.get_utxos_filter(
         &|utxo| {
-            utxo.explicit_asset() == parameters.terms.principal.asset_id
+            utxo.explicit_asset() == parameters.pinned.principal.asset_id
                 && utxo.explicit_amount() >= principal_amount
         },
         &|_| true,
@@ -329,7 +344,7 @@ pub(super) fn add_lender_principal(
             PartialOutput::new(
                 lender.get_confidential_address().script_pubkey(),
                 principal_utxo_amount - principal_amount,
-                parameters.terms.principal.asset_id,
+                parameters.pinned.principal.asset_id,
             )
             .with_blinding_key(lender.get_blinding_public_key()),
         );
@@ -347,8 +362,8 @@ pub(super) fn accept_private_offer(
     fund_lender(
         context,
         lender,
-        setup.parameters.terms.principal.asset_id,
-        setup.parameters.terms.principal.amount,
+        setup.parameters.pinned.principal.asset_id,
+        setup.parameters.pinned.principal.amount,
     )?;
 
     let ctx = build_acceptance(context, setup, lender)?;
@@ -356,23 +371,22 @@ pub(super) fn accept_private_offer(
     broadcast(&ctx, lender)
 }
 
-/// The full repayment transaction, before finalization: the borrower repays from `principal_utxo`
-/// and takes the collateral back.
+/// The full repayment of `offer` from `active_offer_utxo`, before finalization: the borrower
+/// repays from a principal coin and takes the collateral back (output 2).
 pub(super) fn build_full_repayment(
-    setup: &PrivateOfferSetup,
-    acceptance_tx: &Transaction,
+    offer: &PrivateLendingOffer,
+    active_offer_utxo: UTXO,
     borrower: &Signer,
     lender: &Signer,
 ) -> anyhow::Result<ConfidentialTransaction> {
-    let parameters = setup.parameters;
-    let total_amount_to_repay = parameters.terms.get_total_amount_to_repay();
+    let parameters = *offer.get_parameters();
+    let repayment = parameters.pinned.repayment;
 
-    let active_offer_utxo = find_pinned_utxo(acceptance_tx, &parameters.terms.active_collateral);
     let borrower_nft_utxo = borrower.get_utxos_asset(parameters.borrower_nft_asset_id)?[0].clone();
     let borrower_principal_utxo = borrower.get_utxos_filter(
         &|utxo| {
-            utxo.explicit_asset() == parameters.terms.principal.asset_id
-                && utxo.explicit_amount() >= total_amount_to_repay
+            utxo.explicit_asset() == repayment.asset_id
+                && utxo.explicit_amount() >= repayment.amount
         },
         &|_| true,
     )?[0]
@@ -381,13 +395,11 @@ pub(super) fn build_full_repayment(
 
     let mut ctx = ConfidentialTransaction::new();
 
-    setup.offer.attach_full_repayment(
+    offer.attach_full_repayment(
         &mut ctx,
         borrower_nft_utxo,
         active_offer_utxo,
         lender.get_blinding_public_key(),
-        // the protocol fee keeper is the default signer, here the borrower
-        borrower.get_blinding_public_key(),
     );
 
     ctx.add_input(
@@ -398,18 +410,18 @@ pub(super) fn build_full_repayment(
     ctx.add_output(
         PartialOutput::new(
             borrower.get_confidential_address().script_pubkey(),
-            parameters.terms.active_collateral.amount,
-            parameters.terms.active_collateral.asset_id,
+            parameters.pinned.active_collateral.amount,
+            parameters.pinned.active_collateral.asset_id,
         )
         .with_blinding_key(borrower.get_blinding_public_key()),
     );
 
-    if principal_utxo_amount > total_amount_to_repay {
+    if principal_utxo_amount > repayment.amount {
         ctx.add_output(
             PartialOutput::new(
                 borrower.get_confidential_address().script_pubkey(),
-                principal_utxo_amount - total_amount_to_repay,
-                parameters.terms.principal.asset_id,
+                principal_utxo_amount - repayment.amount,
+                repayment.asset_id,
             )
             .with_blinding_key(borrower.get_blinding_public_key()),
         );

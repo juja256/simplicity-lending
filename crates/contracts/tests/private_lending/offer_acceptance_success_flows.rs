@@ -11,15 +11,15 @@ fn private_offer_acceptance_pins_collateral_and_principal(
     let lender = context.random_signer();
 
     let mut setup = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
-    let terms = setup.parameters.terms;
+    let pinned = setup.parameters.pinned;
 
-    let pending_offer_utxo = find_pinned_utxo(&setup.creation_tx, &terms.pending_collateral);
+    let pending_offer_utxo = find_pinned_utxo(&setup.creation_tx, &pinned.pending_collateral);
     assert_confidential(&setup.creation_tx, &pending_offer_utxo);
 
     let acceptance_tx = accept_private_offer(&context, &mut setup, &lender)?;
 
-    let active_offer_utxo = find_pinned_utxo(&acceptance_tx, &terms.active_collateral);
-    let principal_utxo = find_pinned_utxo(&acceptance_tx, &terms.principal);
+    let active_offer_utxo = find_pinned_utxo(&acceptance_tx, &pinned.active_collateral);
+    let principal_utxo = find_pinned_utxo(&acceptance_tx, &pinned.principal);
 
     assert_eq!(active_offer_utxo.outpoint.vout, 0);
     assert_eq!(principal_utxo.outpoint.vout, 1);
@@ -28,8 +28,8 @@ fn private_offer_acceptance_pins_collateral_and_principal(
 
     // the borrower decrypts the principal with its blinding key, as a wallet would
     assert_eq!(
-        unblind_with(borrower, &principal_utxo)?,
-        terms.principal.secrets()
+        unblind_with(borrower, &principal_utxo.txout)?,
+        pinned.principal.secrets()
     );
 
     // and can spend it with the borrower NFT

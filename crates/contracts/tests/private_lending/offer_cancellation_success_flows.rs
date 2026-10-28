@@ -19,7 +19,7 @@ fn private_offer_cancellation_returns_collateral(
     let parameters = setup.parameters;
 
     let pending_offer_utxo =
-        find_pinned_utxo(&setup.creation_tx, &parameters.terms.pending_collateral);
+        find_pinned_utxo(&setup.creation_tx, &parameters.pinned.pending_collateral);
     let lender_nft_utxo = find_explicit_utxo(&setup.creation_tx, parameters.lender_nft_asset_id);
     let borrower_nft_utxo = borrower.get_utxos_asset(parameters.borrower_nft_asset_id)?[0].clone();
 
@@ -36,8 +36,8 @@ fn private_offer_cancellation_returns_collateral(
     ctx.add_output(
         PartialOutput::new(
             borrower.get_confidential_address().script_pubkey(),
-            parameters.terms.pending_collateral.amount,
-            parameters.terms.pending_collateral.asset_id,
+            parameters.pinned.pending_collateral.amount,
+            parameters.pinned.pending_collateral.asset_id,
         )
         .with_blinding_key(borrower.get_blinding_public_key()),
     );
