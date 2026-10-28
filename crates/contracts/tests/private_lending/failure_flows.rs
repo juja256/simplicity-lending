@@ -6,7 +6,7 @@ use lending_contracts::programs::private_lending::{
 use lending_contracts::programs::program::SimplexProgram;
 use lending_contracts::programs::script_auth::{ScriptAuth, ScriptAuthWitnessParams};
 use lending_contracts::utils::confidential::{
-    ConfidentialTransaction, ConfidentialTransactionError, PinnedOutput,
+    ConfidentialTransaction, ConfidentialTransactionError, PinnedOutput, PinnedOutputExt,
 };
 
 use super::offer_liquidation_success_flows::build_liquidation;

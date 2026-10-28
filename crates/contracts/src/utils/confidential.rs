@@ -4,32 +4,26 @@
 //! A covenant can pin an output by the hash of its confidential asset and amount
 //! (`jet::asset_amount_hash`), so whoever builds the transaction cannot change the blinding
 //! factors, and the recipient, who chose them, can always open the output. Simplex blinds outputs
-//! with random factors only, so [`ConfidentialTransaction::finalize`] blinds the pinned outputs
-//! itself and lets `blind_last` balance the remaining ones.
+//! with random factors only, so [`ConfidentialTransaction::finalize`] blinds with
+//! [`private_lending_core::blind_pset`], which blinds the pinned outputs and lets `blind_last`
+//! balance the remaining ones.
 
 use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
 
-use ring::digest::{SHA256, digest};
+use private_lending_core::{BlindPsetError, PinnedBlinding, blind_pset};
 use simplex::program::ProgramError;
 use simplex::provider::{ProviderError, ProviderTrait};
 use simplex::signer::{Signer, SignerError, SignerTrait};
 use simplex::simplicityhl::elements::bitcoin::PublicKey;
-use simplex::simplicityhl::elements::confidential::{
-    self, AssetBlindingFactor, ValueBlindingFactor,
-};
-use simplex::simplicityhl::elements::encode::serialize;
-use simplex::simplicityhl::elements::pset::PsetBlindError;
-use simplex::simplicityhl::elements::secp256k1_zkp::{
-    Generator, PedersenCommitment, Secp256k1, SecretKey,
-};
-use simplex::simplicityhl::elements::{
-    AssetId, ConfidentialTxOutError, OutPoint, RangeProofMessage, Script, Transaction, TxOut,
-    TxOutSecrets, Txid, pset,
-};
+use simplex::simplicityhl::elements::confidential::{AssetBlindingFactor, ValueBlindingFactor};
+use simplex::simplicityhl::elements::secp256k1_zkp::SecretKey;
+use simplex::simplicityhl::elements::{AssetId, OutPoint, Script, Transaction, TxOut, Txid, pset};
 use simplex::transaction::{
     FinalTransaction, PartialInput, PartialOutput, RequiredSignature, UTXO,
 };
+
+pub use private_lending_core::PinnedOutput;
 
 /// The smallest confidential change the finalizer leaves.
 pub const MIN_CONFIDENTIAL_CHANGE: u64 = 1_000;
@@ -58,21 +52,20 @@ pub fn wait_for_confirmation(
     provider.wait(txid)
 }
 
-/// A confidential output whose asset and value blinding factors are fixed in advance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PinnedOutput {
-    pub asset_id: AssetId,
-    pub amount: u64,
-    pub asset_blinding_factor: AssetBlindingFactor,
-    pub value_blinding_factor: ValueBlindingFactor,
-}
-
-impl PinnedOutput {
+/// The parts of a [`PinnedOutput`] that need randomness or simplex types.
+pub trait PinnedOutputExt {
     /// A pinned output with fresh random blinding factors.
     ///
     /// # Panics
     /// Panics if `amount` is zero: Elements range proofs of confidential values start at 1.
-    pub fn new_random(asset_id: AssetId, amount: u64) -> Self {
+    fn new_random(asset_id: AssetId, amount: u64) -> Self;
+
+    /// The output `outpoint` created with this pinned output, ready to be spent.
+    fn to_utxo(&self, outpoint: OutPoint, txout: TxOut) -> UTXO;
+}
+
+impl PinnedOutputExt for PinnedOutput {
+    fn new_random(asset_id: AssetId, amount: u64) -> Self {
         assert!(amount > 0, "A confidential amount must be positive");
 
         let mut rng = rand::thread_rng();
@@ -85,67 +78,7 @@ impl PinnedOutput {
         }
     }
 
-    /// The same blinding factors with another amount.
-    pub fn with_amount(mut self, amount: u64) -> Self {
-        self.amount = amount;
-        self
-    }
-
-    pub fn asset_commitment(&self) -> confidential::Asset {
-        let secp = Secp256k1::new();
-        let generator = Generator::new_blinded(
-            &secp,
-            self.asset_id.into_tag(),
-            self.asset_blinding_factor.into_inner(),
-        );
-
-        confidential::Asset::Confidential(generator)
-    }
-
-    pub fn value_commitment(&self) -> confidential::Value {
-        let secp = Secp256k1::new();
-        let generator = self
-            .asset_commitment()
-            .commitment()
-            .expect("a confidential asset");
-        let commitment = PedersenCommitment::new(
-            &secp,
-            self.amount,
-            self.value_blinding_factor.into_inner(),
-            generator,
-        );
-
-        confidential::Value::Confidential(commitment)
-    }
-
-    /// SHA-256 of the consensus encodings of the asset and value commitments: what the
-    /// covenant computes with `jet::asset_amount_hash`.
-    pub fn commitment_hash(&self) -> [u8; 32] {
-        let mut bytes = serialize(&self.asset_commitment());
-        bytes.extend(serialize(&self.value_commitment()));
-
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(digest(&SHA256, &bytes).as_ref());
-
-        hash
-    }
-
-    /// Whether `txout` carries exactly this pinned asset and amount.
-    pub fn matches(&self, txout: &TxOut) -> bool {
-        txout.asset == self.asset_commitment() && txout.value == self.value_commitment()
-    }
-
-    pub fn secrets(&self) -> TxOutSecrets {
-        TxOutSecrets::new(
-            self.asset_id,
-            self.asset_blinding_factor,
-            self.amount,
-            self.value_blinding_factor,
-        )
-    }
-
-    /// The output `outpoint` created with this pinned output, ready to be spent.
-    pub fn to_utxo(&self, outpoint: OutPoint, txout: TxOut) -> UTXO {
+    fn to_utxo(&self, outpoint: OutPoint, txout: TxOut) -> UTXO {
         UTXO {
             outpoint,
             txout,
@@ -166,16 +99,10 @@ pub enum ConfidentialTransactionError {
     Program(#[from] ProgramError),
 
     #[error("Failed to blind a PST: {0}")]
-    PsetBlind(#[from] PsetBlindError),
-
-    #[error("Failed to blind a pinned output: {0}")]
-    ConfidentialTxOut(#[from] ConfidentialTxOutError),
+    BlindPset(#[from] BlindPsetError),
 
     #[error("Failed to extract a transaction from the PST: {0}")]
     Pset(#[from] pset::Error),
-
-    #[error("Pinned output {0} has no recipient blinding key")]
-    MissingBlindingKey(usize),
 
     #[error(
         "Program input {0} requires a signature, which the confidential finalizer does not inject"
@@ -189,7 +116,7 @@ pub enum ConfidentialTransactionError {
 /// A [`FinalTransaction`] with the pinned outputs it contains.
 pub struct ConfidentialTransaction {
     ft: FinalTransaction,
-    pinned_outputs: Vec<(usize, PinnedOutput)>,
+    pinned_outputs: Vec<PinnedBlinding>,
 }
 
 impl ConfidentialTransaction {
@@ -208,17 +135,58 @@ impl ConfidentialTransaction {
         pinned: PinnedOutput,
         recipient_blinding_key: PublicKey,
     ) {
-        let index = self.ft.n_outputs();
+        self.push_pinned_output(
+            script_pubkey,
+            pinned,
+            recipient_blinding_key,
+            None,
+            Vec::new(),
+        );
+    }
+
+    /// [`Self::add_pinned_output`] with the nonce `ephemeral_sk·G` and `extra_data` in the range
+    /// proof's message (see [`PinnedBlinding`]).
+    pub fn add_pinned_output_with(
+        &mut self,
+        script_pubkey: Script,
+        pinned: PinnedOutput,
+        recipient_blinding_key: PublicKey,
+        ephemeral_sk: SecretKey,
+        extra_data: Vec<u8>,
+    ) {
+        self.push_pinned_output(
+            script_pubkey,
+            pinned,
+            recipient_blinding_key,
+            Some(ephemeral_sk),
+            extra_data,
+        );
+    }
+
+    pub fn pinned_outputs(&self) -> &[PinnedBlinding] {
+        &self.pinned_outputs
+    }
+
+    fn push_pinned_output(
+        &mut self,
+        script_pubkey: Script,
+        pinned: PinnedOutput,
+        recipient_blinding_key: PublicKey,
+        ephemeral_sk: Option<SecretKey>,
+        extra_data: Vec<u8>,
+    ) {
+        let output_index = self.ft.n_outputs();
 
         self.ft.add_output(
             PartialOutput::new(script_pubkey, pinned.amount, pinned.asset_id)
                 .with_blinding_key(recipient_blinding_key),
         );
-        self.pinned_outputs.push((index, pinned));
-    }
-
-    pub fn pinned_outputs(&self) -> &[(usize, PinnedOutput)] {
-        &self.pinned_outputs
+        self.pinned_outputs.push(PinnedBlinding {
+            output_index,
+            pinned,
+            ephemeral_sk,
+            extra_data,
+        });
     }
 
     /// Selects `signer`'s policy-asset coins for the fee, adds a confidential change to `signer`
@@ -300,60 +268,12 @@ impl ConfidentialTransaction {
         ft.add_output(PartialOutput::new(Script::new(), fee, policy_asset));
 
         let (mut pst, input_secrets) = ft.extract_pst();
-        let secp = Secp256k1::new();
-        let mut rng = rand::thread_rng();
-        let surjection_inputs = pst.surjection_inputs(&input_secrets)?;
-
-        for (index, pinned) in &self.pinned_outputs {
-            let output = &mut pst.outputs_mut()[*index];
-            let recipient_blinding_key = output
-                .blinding_key
-                .ok_or(ConfidentialTransactionError::MissingBlindingKey(*index))?;
-
-            let (asset, surjection_proof) = confidential::Asset::Explicit(pinned.asset_id).blind(
-                &mut rng,
-                &secp,
-                pinned.asset_blinding_factor,
-                &surjection_inputs,
-            )?;
-            let message = RangeProofMessage {
-                asset: pinned.asset_id,
-                bf: pinned.asset_blinding_factor,
-            };
-            let (value, nonce, rangeproof) = confidential::Value::Explicit(pinned.amount).blind(
-                &secp,
-                pinned.value_blinding_factor,
-                recipient_blinding_key.inner,
-                SecretKey::new(&mut rng),
-                &output.script_pubkey,
-                &message,
-            )?;
-
-            output.asset_comm = asset.commitment();
-            output.amount_comm = value.commitment();
-            output.asset_surjection_proof = Some(Box::new(surjection_proof));
-            output.value_rangeproof = Some(Box::new(rangeproof));
-            output.ecdh_pubkey = nonce.commitment().map(|inner| PublicKey {
-                inner,
-                compressed: true,
-            });
-            // already blinded: `blind_last` must leave it alone
-            output.blinder_index = None;
-
-            // `blind_last` balances as if this output had zero blinding factors; the scalar
-            // corrects for its `amount * abf + vbf`
-            let mut correction = ValueBlindingFactor::last(
-                &secp,
-                pinned.amount,
-                pinned.asset_blinding_factor,
-                &[],
-                &[],
-            );
-            correction += -pinned.value_blinding_factor;
-            pst.global.scalars.push(correction.into_inner());
-        }
-
-        pst.blind_last(&mut rng, &secp, &input_secrets)?;
+        blind_pset(
+            &mut pst,
+            &input_secrets,
+            &self.pinned_outputs,
+            &mut rand::thread_rng(),
+        )?;
 
         for (index, input) in ft.inputs().iter().enumerate() {
             let final_script_witness = match &input.program_input {
@@ -410,7 +330,7 @@ impl DerefMut for ConfidentialTransaction {
 
 #[cfg(test)]
 mod tests {
-    use super::PinnedOutput;
+    use super::{PinnedOutput, PinnedOutputExt};
     use simplex::simplicityhl::elements::AssetId;
 
     #[test]
