@@ -230,11 +230,11 @@ impl Reader<'_> {
 mod tests {
     use std::sync::LazyLock;
 
-    use elements::secp256k1_zkp::{Message, SECP256K1};
+    use elements::hex::ToHex;
     use elements::{AssetId, Txid};
 
     use super::*;
-    use crate::tagged_hash;
+    use crate::test_util::sequence;
 
     static BORROWER: LazyLock<LendingKey> =
         LazyLock::new(|| LendingKey::from_master_blinding_key(&[1; 32]));
@@ -242,20 +242,22 @@ mod tests {
         LazyLock::new(|| LendingKey::from_master_blinding_key(&[2; 32]).x_only_public_key());
     static OTHER_LENDER: LazyLock<XOnlyPublicKey> =
         LazyLock::new(|| LendingKey::from_master_blinding_key(&[3; 32]).x_only_public_key());
+    /// The txid bytes 0x00..=0x1f in internal order and a vout whose bytes differ, so a byte
+    /// order mistake changes the signed message.
     static OUTPOINT_A: LazyLock<OutPoint> =
-        LazyLock::new(|| OutPoint::new(Txid::from_byte_array([0xaa; 32]), 0));
+        LazyLock::new(|| OutPoint::new(Txid::from_byte_array(sequence(0x00)), 0x0102_0304));
     static OUTPOINT_B: LazyLock<OutPoint> =
-        LazyLock::new(|| OutPoint::new(Txid::from_byte_array([0xaa; 32]), 1));
+        LazyLock::new(|| OutPoint::new(Txid::from_byte_array(sequence(0x00)), 0x0102_0305));
 
     fn sample_terms() -> OfferTerms {
         OfferTerms {
-            principal_asset: AssetId::from_slice(&[0x11; 32]).unwrap(),
+            principal_asset: AssetId::from_slice(&sequence(0xa0)).unwrap(),
             principal_amount: 0x0102_0304_0506_0708,
             repayment_amount: 0x1112_1314_1516_1718,
             interest_rate_bps: 0x2122,
             loan_expiration_time: 0x3132_3334,
-            borrower_nft: AssetId::from_slice(&[0x44; 32]).unwrap(),
-            lender_nft: AssetId::from_slice(&[0x55; 32]).unwrap(),
+            borrower_nft: AssetId::from_slice(&sequence(0x40)).unwrap(),
+            lender_nft: AssetId::from_slice(&sequence(0x60)).unwrap(),
         }
     }
 
@@ -317,7 +319,7 @@ mod tests {
         let bytes = signed.encode();
 
         assert_eq!(bytes[0..3], [1, 0, 214]);
-        assert_eq!(bytes[3..35], [0x11; 32]);
+        assert_eq!(bytes[3..35], sequence(0xa0));
         assert_eq!(bytes[35..43], [1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(
             bytes[43..51],
@@ -325,8 +327,8 @@ mod tests {
         );
         assert_eq!(bytes[51..53], [0x21, 0x22]);
         assert_eq!(bytes[53..57], [0x31, 0x32, 0x33, 0x34]);
-        assert_eq!(bytes[57..89], [0x44; 32]);
-        assert_eq!(bytes[89..121], [0x55; 32]);
+        assert_eq!(bytes[57..89], sequence(0x40));
+        assert_eq!(bytes[89..121], sequence(0x60));
         assert_eq!(bytes[121..153], BORROWER.x_only_public_key().serialize());
 
         // the signature covers lender_pk ‖ txid ‖ vout_le32 ‖ bytes 0..153
@@ -334,8 +336,8 @@ mod tests {
             "simplicity-lending/private/v1/offer",
             &[
                 &LENDER.serialize(),
-                &[0xaa; 32],
-                &[0, 0, 0, 0],
+                &sequence(0x00),
+                &[0x04, 0x03, 0x02, 0x01],
                 &bytes[..153],
             ],
         );
@@ -366,5 +368,18 @@ mod tests {
             SignedTerms::decode(&bytes),
             Err(TermsError::Malformed)
         ));
+    }
+
+    /// The frozen message the borrower signs for the sample terms, so a change of tag, field
+    /// order or byte order fails.
+    #[test]
+    fn signing_digest_known_answer() {
+        let prefix = signed_prefix(&sample_terms(), &BORROWER.x_only_public_key());
+        let message = signed_message(&prefix, &LENDER, &OUTPOINT_A);
+
+        assert_eq!(
+            message.as_ref().to_hex(),
+            "70152c23e402f701746e18e083a83d4c5143617f0ccd9ca16e4242c6eb2cc3ee"
+        );
     }
 }

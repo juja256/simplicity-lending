@@ -122,6 +122,7 @@ mod tests {
 
     use elements::Txid;
     use elements::hashes::Hash;
+    use elements::hex::ToHex;
 
     use super::*;
     use crate::test_util::sequence;
@@ -234,5 +235,16 @@ mod tests {
         let lender = LENDER.serialize();
         let encrypted: [u8; 32] = std::array::from_fn(|i| lender[i] ^ pad[i]);
         assert_eq!(bytes[5..37], encrypted);
+    }
+
+    /// The frozen pad of the sample offer, so a change of tag, byte order or data fails.
+    #[test]
+    fn lender_key_pad_known_answer() {
+        let pad = lender_key_pad(&BORROWER, &FIRST_INPUT, *BORROWER_NFT, *LENDER_NFT);
+
+        assert_eq!(
+            pad.to_hex(),
+            "bb03eeca8390ac9bd09f3161e932d46f04dea78f2d488510d2d0e8fa3a899493"
+        );
     }
 }

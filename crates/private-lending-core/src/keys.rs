@@ -102,6 +102,7 @@ pub(crate) fn borrower_tagged_hash(
 
 #[cfg(test)]
 mod tests {
+    use elements::hex::ToHex;
     use elements::{AssetId, Txid};
 
     use super::*;
@@ -154,5 +155,45 @@ mod tests {
         for other in others {
             assert_ne!(key, other);
         }
+    }
+
+    /// Frozen outputs of the derivation, so a change of tag, byte order or normalization fails.
+    #[test]
+    fn lending_key_known_answers() {
+        // the raw tagged hash of this key has an even-Y public key
+        let even = LendingKey::from_master_blinding_key(&sequence(0x00));
+        assert_eq!(
+            even.secret_key().secret_bytes().to_hex(),
+            "105b316a8e0d29e3e05d8deb7ebf12f8172315d73d27d215c7c7e8922a0d60af"
+        );
+        assert_eq!(
+            even.x_only_public_key().serialize().to_hex(),
+            "0eaa63124e90a7013df81e579a7524064f2d4a60b10eb53c4ea5cbd6de32dd64"
+        );
+
+        // the raw tagged hash of this key has an odd-Y public key, so it is negated
+        let negated = LendingKey::from_master_blinding_key(&[1; 32]);
+        assert_eq!(
+            negated.secret_key().secret_bytes().to_hex(),
+            "271ac40b16d9f0bd310a6f1404e207fca2fe206630b308b17e0871e809043f4b"
+        );
+        assert_eq!(
+            negated.x_only_public_key().serialize().to_hex(),
+            "a9ddbd65b7c05e2f4317706cd0edd6a139b8b6ad44c0772d9805e87843ae9762"
+        );
+    }
+
+    /// The frozen ephemeral key of fixed inputs, so a change of tag, byte order or data fails.
+    #[test]
+    fn ephemeral_key_known_answer() {
+        let borrower = LendingKey::from_master_blinding_key(&[1; 32]);
+        let borrower_nft = AssetId::from_slice(&sequence(0x40)).unwrap();
+        let lender_nft = AssetId::from_slice(&sequence(0x60)).unwrap();
+        let key = ephemeral_key(&borrower, &first_input(), borrower_nft, lender_nft);
+
+        assert_eq!(
+            key.secret_bytes().to_hex(),
+            "9e4fa154e4e6c26b764e128148af50f4cf2a105cb2c89433d05fc58df8f75a4e"
+        );
     }
 }
