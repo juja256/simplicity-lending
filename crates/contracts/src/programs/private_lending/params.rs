@@ -1,4 +1,4 @@
-use private_lending_core::OfferPinned;
+use private_lending_core::{OfferPinned, OfferTerms};
 use simplex::{provider::SimplicityNetwork, simplicityhl::elements::AssetId};
 
 use crate::{
@@ -11,7 +11,10 @@ use crate::{
 
 /// The parameters of a private offer: its NFTs, its expiration and the pinned outputs that carry
 /// its terms. The program sees only the commitments of the pinned outputs.
-#[derive(Debug, Clone, Copy)]
+///
+/// Build them with [`PrivateLendingParameters::from_terms`], so the NFTs and the expiration are
+/// those of the signed terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrivateLendingParameters {
     pub borrower_nft_asset_id: AssetId,
     pub lender_nft_asset_id: AssetId,
@@ -22,6 +25,23 @@ pub struct PrivateLendingParameters {
 }
 
 impl PrivateLendingParameters {
+    /// The parameters of the offer of `terms` whose outputs `pinned` pins: the NFTs and the
+    /// expiration come from the terms. The borrower creates the offer with them and the lender
+    /// verifies it with them, so both reach the same address.
+    pub fn from_terms(
+        terms: &OfferTerms,
+        pinned: OfferPinned,
+        network: SimplicityNetwork,
+    ) -> PrivateLendingParameters {
+        PrivateLendingParameters {
+            borrower_nft_asset_id: terms.borrower_nft,
+            lender_nft_asset_id: terms.lender_nft,
+            pinned,
+            loan_expiration_time: terms.loan_expiration_time,
+            network,
+        }
+    }
+
     /// The principal, unlocked by the borrower NFT (kept).
     pub fn get_principal_output_asset_auth(&self) -> AssetAuth {
         AssetAuth::new(AssetAuthParameters {

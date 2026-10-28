@@ -1,19 +1,25 @@
+use std::collections::HashMap;
+
 use simplex::provider::SimplicityNetwork;
-use simplex::simplicityhl::elements::hashes::{Hash, sha256};
-use simplex::simplicityhl::elements::secp256k1_zkp::{Tweak, ZERO_TWEAK};
+use simplex::simplicityhl::elements::confidential::{AssetBlindingFactor, ValueBlindingFactor};
+use simplex::simplicityhl::elements::hashes::Hash;
+use simplex::simplicityhl::elements::pset::{Input, Output, PartiallySignedTransaction};
 use simplex::simplicityhl::elements::{
-    AssetId, AssetIssuance, ContractHash, LockTime, OutPoint, Transaction, TxIn, TxOut, Txid,
+    AssetId, ContractHash, OutPoint, Script, Transaction, TxOut, TxOutSecrets, Txid, bitcoin,
     confidential,
 };
+use simplex::transaction::UTXO;
 
 use lending_contracts::programs::private_lending::{
-    PrivateLendingOffer, PrivateLendingParameters, VerifyError, find_private_offer,
-    verify_pending_offer,
+    PrivateLendingOffer, PrivateLendingParameters, VerifyError, add_nft_issuances,
+    verify_offer_as_borrower, verify_offer_as_lender,
 };
 use lending_contracts::programs::program::SimplexProgram;
 use lending_contracts::programs::script_auth::ScriptAuth;
+use lending_contracts::utils::confidential::ConfidentialTransaction;
 use private_lending_core::{
-    LendingKey, NewOffer, OfferTerms, OpenedOffer, open_as_borrower, open_as_lender,
+    CreationError, LendingKey, NewOffer, OfferTerms, OpenError, blind_pset, find_offer,
+    lift_lending_key,
 };
 
 use super::setup::{
@@ -23,114 +29,180 @@ use super::setup::{
 
 /// The principal and 10% interest.
 const REPAYMENT_AMOUNT: u64 = 11_000;
-/// The contract hash of the lender NFT issuance in [`offer_off_chain`].
-const LENDER_NFT_CONTRACT_HASH: [u8; 32] = [0x11; 32];
+/// The contract hashes of the NFT issuances in [`OffChainOffer`].
+const BORROWER_NFT_CONTRACT_HASH: [u8; 32] = [0x21; 32];
+const LENDER_NFT_CONTRACT_HASH: [u8; 32] = [0x22; 32];
 
-/// The coin that issues the lender NFT in [`offer_off_chain`], its input 1.
+fn borrower_key() -> LendingKey {
+    LendingKey::from_master_blinding_key(&[1; 32])
+}
+
+fn lender_key() -> LendingKey {
+    LendingKey::from_master_blinding_key(&[2; 32])
+}
+
+/// Input 0 of the creation transaction in [`OffChainOffer`], which issues the borrower NFT.
+fn first_input() -> OutPoint {
+    OutPoint::new(Txid::from_byte_array([0xee; 32]), 0)
+}
+
+/// Input 1 of the creation transaction in [`OffChainOffer`], which issues the lender NFT.
 fn lender_nft_coin() -> OutPoint {
     OutPoint::new(Txid::from_byte_array([0xee; 32]), 1)
 }
 
-/// The entropy of the lender NFT issued in [`offer_off_chain`].
-fn lender_nft_entropy() -> sha256::Midstate {
-    AssetId::generate_asset_entropy(
-        lender_nft_coin(),
-        ContractHash::from_byte_array(LENDER_NFT_CONTRACT_HASH),
-    )
+/// The asset that `coin` issues with `contract_hash`.
+fn issued_asset(coin: OutPoint, contract_hash: [u8; 32]) -> AssetId {
+    AssetId::from_entropy(AssetId::generate_asset_entropy(
+        coin,
+        ContractHash::from_byte_array(contract_hash),
+    ))
 }
 
 /// An offer made up without a chain.
 struct OffChainOffer {
-    /// Input 1 issues one lender NFT without reissuance token, output 3 is at the offer's
-    /// address; nothing else is filled in.
-    creation_tx: Transaction,
-    /// The offer as its lender opens it from output 3.
-    opened: OpenedOffer,
+    new_offer: NewOffer,
     /// The parameters the borrower builds the offer with.
     parameters: PrivateLendingParameters,
 }
 
-fn offer_off_chain(network: SimplicityNetwork) -> OffChainOffer {
-    let borrower = LendingKey::from_master_blinding_key(&[1; 32]);
-    let lender = LendingKey::from_master_blinding_key(&[2; 32]);
-    let asset = |byte| AssetId::from_slice(&[byte; 32]).unwrap();
-    let first_input = OutPoint::new(Txid::from_byte_array([0xee; 32]), 0);
+impl OffChainOffer {
+    fn new(network: SimplicityNetwork) -> OffChainOffer {
+        let terms = OfferTerms {
+            principal_asset: AssetId::from_slice(&[0xaa; 32]).unwrap(),
+            principal_amount: PRINCIPAL_AMOUNT,
+            repayment_amount: REPAYMENT_AMOUNT,
+            interest_rate_bps: PRINCIPAL_INTEREST_RATE,
+            loan_expiration_time: 1_000,
+            borrower_nft: issued_asset(first_input(), BORROWER_NFT_CONTRACT_HASH),
+            lender_nft: issued_asset(lender_nft_coin(), LENDER_NFT_CONTRACT_HASH),
+        };
+        let new_offer = NewOffer::build(
+            &borrower_key(),
+            &lender_key().x_only_public_key(),
+            &first_input(),
+            PrivateLendingOffer::get_program_id(),
+            network.policy_asset(),
+            COLLATERAL_AMOUNT,
+            terms,
+        )
+        .unwrap();
+        let parameters = PrivateLendingParameters::from_terms(&terms, new_offer.pinned, network);
 
-    let terms = OfferTerms {
-        principal_asset: asset(0xaa),
-        principal_amount: PRINCIPAL_AMOUNT,
-        repayment_amount: REPAYMENT_AMOUNT,
-        interest_rate_bps: PRINCIPAL_INTEREST_RATE,
-        loan_expiration_time: 1_000,
-        borrower_nft: asset(0x44),
-        lender_nft: AssetId::from_entropy(lender_nft_entropy()),
-    };
-    let new_offer = NewOffer::build(
-        &borrower,
-        &lender.x_only_public_key(),
-        &first_input,
-        PrivateLendingOffer::get_program_id(),
-        network.policy_asset(),
-        COLLATERAL_AMOUNT,
-        terms,
-    )
-    .unwrap();
+        OffChainOffer {
+            new_offer,
+            parameters,
+        }
+    }
 
-    let opened = OpenedOffer {
-        signed_terms: new_offer.signed_terms,
-        lender: lender.x_only_public_key(),
-        collateral: new_offer.pinned.pending_collateral.secrets(),
-        secrets: new_offer.secrets,
-        pinned: new_offer.pinned,
-    };
-    let parameters = PrivateLendingParameters {
-        borrower_nft_asset_id: terms.borrower_nft,
-        lender_nft_asset_id: terms.lender_nft,
-        pinned: new_offer.pinned,
-        loan_expiration_time: terms.loan_expiration_time,
-        network,
-    };
+    /// The honest creation transaction, unsigned.
+    fn creation_tx(&self) -> Transaction {
+        self.creation_tx_with(self.parameters)
+    }
 
-    let lender_nft_issuance = AssetIssuance {
-        asset_blinding_nonce: ZERO_TWEAK,
-        asset_entropy: LENDER_NFT_CONTRACT_HASH,
-        amount: confidential::Value::Explicit(1),
-        inflation_keys: confidential::Value::Null,
-    };
-    let creation_tx = Transaction {
-        version: 2,
-        lock_time: LockTime::ZERO,
-        input: vec![
-            TxIn {
-                previous_output: first_input,
-                ..TxIn::default()
-            },
-            TxIn {
-                previous_output: lender_nft_coin(),
-                asset_issuance: lender_nft_issuance,
-                ..TxIn::default()
-            },
-        ],
-        output: vec![
-            TxOut::default(),
-            TxOut::default(),
-            TxOut::default(),
-            offer_output(parameters),
-        ],
-    };
+    /// The creation transaction, unsigned, whose output 3 is at the pending offer address of
+    /// `parameters` and whose output 1 locks the lender NFT to that offer: inputs 0 and 1 issue
+    /// the NFTs, output 2 carries the marker, output 3 the collateral blinded as
+    /// `attach_creation` blinds it; a confidential change and an explicit fee follow.
+    fn creation_tx_with(&self, parameters: PrivateLendingParameters) -> Transaction {
+        let new_offer = &self.new_offer;
+        let terms = new_offer.signed_terms.terms;
+        let offer = PrivateLendingOffer::new_pending(parameters);
+        let policy_asset = parameters.network.policy_asset();
 
-    OffChainOffer {
-        creation_tx,
-        opened,
-        parameters,
+        let mut pset = PartiallySignedTransaction::new_v2();
+        let mut input_secrets = HashMap::new();
+        let coins = [
+            (first_input(), BORROWER_NFT_CONTRACT_HASH, COLLATERAL_AMOUNT),
+            (lender_nft_coin(), LENDER_NFT_CONTRACT_HASH, 1_000),
+        ];
+        for (index, (coin, contract_hash, amount)) in coins.into_iter().enumerate() {
+            pset.add_input(Input {
+                previous_txid: coin.txid,
+                previous_output_index: coin.vout,
+                witness_utxo: Some(TxOut::new_fee(amount, policy_asset)),
+                issuance_value_amount: Some(1),
+                issuance_asset_entropy: Some(contract_hash),
+                // an explicit issuance, which the PSET blinder leaves alone
+                blinded_issuance: Some(0),
+                ..Default::default()
+            });
+            input_secrets.insert(
+                index,
+                TxOutSecrets::new(
+                    policy_asset,
+                    AssetBlindingFactor::zero(),
+                    amount,
+                    ValueBlindingFactor::zero(),
+                ),
+            );
+        }
+
+        let lender_blinding_key = bitcoin::PublicKey::new(lift_lending_key(&new_offer.lender));
+        let change_blinding_key =
+            bitcoin::PublicKey::new(lift_lending_key(&borrower_key().x_only_public_key()));
+        let mut change = Output::new_explicit(
+            Script::from(vec![0x51, 0x14]),
+            900,
+            policy_asset,
+            Some(change_blinding_key),
+        );
+        change.blinder_index = Some(1);
+        for output in [
+            Output::new_explicit(Script::from(vec![0x51, 0x10]), 1, terms.borrower_nft, None),
+            Output::new_explicit(
+                ScriptAuth::from_simplex_program(&offer).get_script_pubkey(),
+                1,
+                terms.lender_nft,
+                None,
+            ),
+            Output::new_explicit(
+                Script::new_op_return(&new_offer.marker.encode()),
+                0,
+                policy_asset,
+                None,
+            ),
+            Output::new_explicit(
+                offer.get_script_pubkey(),
+                COLLATERAL_AMOUNT,
+                policy_asset,
+                Some(lender_blinding_key),
+            ),
+            change,
+            Output::new_explicit(Script::new(), 100, policy_asset, None),
+        ] {
+            pset.add_output(output);
+        }
+
+        blind_pset(
+            &mut pset,
+            &input_secrets,
+            &[new_offer.collateral_blinding(3)],
+            &mut rand::thread_rng(),
+        )
+        .unwrap();
+
+        pset.extract_tx().unwrap()
     }
 }
 
-/// An output at the pending offer address of `parameters`.
-fn offer_output(parameters: PrivateLendingParameters) -> TxOut {
-    TxOut {
-        script_pubkey: PrivateLendingOffer::new_pending(parameters).get_script_pubkey(),
-        ..TxOut::default()
+/// Both sides' verification of `creation_tx`.
+fn verify_both(
+    creation_tx: &Transaction,
+    network: SimplicityNetwork,
+) -> [Result<PrivateLendingParameters, VerifyError>; 2] {
+    [
+        verify_offer_as_lender(&lender_key(), creation_tx, network).map(|(_, p)| p),
+        verify_offer_as_borrower(&borrower_key(), creation_tx, network).map(|(_, p)| p),
+    ]
+}
+
+/// An explicit policy coin at `outpoint`, as the creation's issuance inputs spend.
+fn coin(outpoint: OutPoint, network: SimplicityNetwork) -> UTXO {
+    UTXO {
+        outpoint,
+        txout: TxOut::new_fee(1_000, network.policy_asset()),
+        secrets: None,
     }
 }
 
@@ -185,23 +257,24 @@ fn creation_issues_nfts_in_the_creation_layout(
 }
 
 #[simplex::test]
-fn lender_finds_opens_and_verifies_offer(context: simplex::TestContext) -> anyhow::Result<()> {
+fn lender_finds_and_verifies_offer(context: simplex::TestContext) -> anyhow::Result<()> {
     let setup = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
     let creation_tx = &setup.creation_tx;
 
-    let (marker, offer_outpoint, offer, first_input) =
-        find_private_offer(creation_tx).expect("the creation transaction carries an offer");
+    // what the indexer finds
+    let found = find_offer(creation_tx, PrivateLendingOffer::get_program_id())
+        .expect("the creation transaction carries an offer");
+    assert_eq!(found.offer_outpoint, OutPoint::new(creation_tx.txid(), 3));
+    assert_eq!(found.first_input, creation_tx.input[0].previous_output);
 
-    assert_eq!(offer_outpoint, OutPoint::new(creation_tx.txid(), 3));
-    assert_eq!(first_input, creation_tx.input[0].previous_output);
+    let (opened, parameters) = verify_offer_as_lender(
+        &setup.lender_lending_key,
+        creation_tx,
+        *context.get_network(),
+    )?;
 
-    let opened = open_as_lender(&setup.lender_lending_key, &offer, &first_input, &marker)?;
-    let parameters = verify_pending_offer(&opened, creation_tx, *context.get_network())?;
-
-    assert_eq!(
-        parameters.build_arguments(),
-        setup.parameters.build_arguments()
-    );
+    assert_eq!(parameters, setup.parameters);
+    assert_eq!(opened.lender, setup.lender_lending_key.x_only_public_key());
 
     Ok(())
 }
@@ -210,16 +283,17 @@ fn lender_finds_opens_and_verifies_offer(context: simplex::TestContext) -> anyho
 fn borrower_recovers_offer_from_chain(context: simplex::TestContext) -> anyhow::Result<()> {
     let setup = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
 
-    let (marker, _, offer, first_input) =
-        find_private_offer(&setup.creation_tx).expect("the creation transaction carries an offer");
-
-    let recovered = open_as_borrower(&setup.borrower_lending_key, &offer, &first_input, &marker)?;
+    let (recovered, parameters) = verify_offer_as_borrower(
+        &setup.borrower_lending_key,
+        &setup.creation_tx,
+        *context.get_network(),
+    )?;
 
     assert_eq!(
         recovered.lender,
         setup.lender_lending_key.x_only_public_key()
     );
-    assert_eq!(recovered.pinned, setup.parameters.pinned);
+    assert_eq!(parameters, setup.parameters);
 
     Ok(())
 }
@@ -227,110 +301,110 @@ fn borrower_recovers_offer_from_chain(context: simplex::TestContext) -> anyhow::
 #[simplex::test]
 fn dishonest_repayment_fails_verification(context: simplex::TestContext) -> anyhow::Result<()> {
     let network = *context.get_network();
-    let OffChainOffer {
-        mut creation_tx,
-        opened,
-        parameters,
-    } = offer_off_chain(network);
+    let offer = OffChainOffer::new(network);
 
     // the address the terms give passes
-    assert!(verify_pending_offer(&opened, &creation_tx, network).is_ok());
+    assert_eq!(
+        verify_both(&offer.creation_tx(), network),
+        [Ok(offer.parameters); 2]
+    );
 
     // the borrower pins one unit less of repayment than the terms show
-    let mut dishonest = parameters;
-    dishonest.pinned.repayment = parameters
-        .pinned
-        .repayment
-        .with_amount(REPAYMENT_AMOUNT - 1);
-    creation_tx.output[3] = offer_output(dishonest);
+    let mut dishonest = offer.parameters;
+    dishonest.pinned.repayment = dishonest.pinned.repayment.with_amount(REPAYMENT_AMOUNT - 1);
+    let creation_tx = offer.creation_tx_with(dishonest);
 
     assert_eq!(
-        verify_pending_offer(&opened, &creation_tx, network).err(),
-        Some(VerifyError::AddressMismatch)
+        verify_both(&creation_tx, network),
+        [Err(VerifyError::AddressMismatch); 2]
     );
 
     Ok(())
 }
 
 #[simplex::test]
-fn invalid_terms_fail_verification(context: simplex::TestContext) -> anyhow::Result<()> {
+fn unlocked_lender_nft_fails_verification(context: simplex::TestContext) -> anyhow::Result<()> {
     let network = *context.get_network();
-    let offer = offer_off_chain(network);
-    let verify_with = |change: fn(&mut OfferTerms)| {
-        let mut opened = offer.opened;
-        change(&mut opened.signed_terms.terms);
+    let offer = OffChainOffer::new(network);
 
-        verify_pending_offer(&opened, &offer.creation_tx, network).err()
-    };
+    // the lender NFT goes elsewhere than to the offer: nobody could accept it
+    let mut creation_tx = offer.creation_tx();
+    creation_tx.output[1].script_pubkey = creation_tx.output[0].script_pubkey.clone();
 
     assert_eq!(
-        verify_with(|terms| terms.principal_amount = 0),
-        Some(VerifyError::InvalidTerms)
-    );
-    assert_eq!(
-        verify_with(|terms| terms.repayment_amount = PRINCIPAL_AMOUNT - 1),
-        Some(VerifyError::InvalidTerms)
-    );
-
-    // a lock time from 500_000_000 on is a timestamp: the lender could never liquidate
-    assert_eq!(
-        verify_with(|terms| terms.loan_expiration_time = 500_000_000),
-        Some(VerifyError::InvalidTerms)
-    );
-    // the last height passes the terms, then fails the address, built for another expiration
-    assert_eq!(
-        verify_with(|terms| terms.loan_expiration_time = 499_999_999),
-        Some(VerifyError::AddressMismatch)
+        verify_both(&creation_tx, network),
+        [Err(VerifyError::LenderNftNotLocked); 2]
     );
 
     Ok(())
 }
 
 #[simplex::test]
-fn non_unique_lender_nft_fails_verification(context: simplex::TestContext) -> anyhow::Result<()> {
+fn core_checks_fail_verification(context: simplex::TestContext) -> anyhow::Result<()> {
     let network = *context.get_network();
-    let offer = offer_off_chain(network);
-    let verify_with = |change: fn(&mut AssetIssuance)| {
-        let mut creation_tx = offer.creation_tx.clone();
-        change(&mut creation_tx.input[1].asset_issuance);
+    let offer = OffChainOffer::new(network);
 
-        verify_pending_offer(&offer.opened, &creation_tx, network).err()
-    };
-
-    // a second unit
+    // a second unit of the lender NFT
+    let mut creation_tx = offer.creation_tx();
+    creation_tx.input[1].asset_issuance.amount = confidential::Value::Explicit(2);
     assert_eq!(
-        verify_with(|issuance| issuance.amount = confidential::Value::Explicit(2)),
-        Some(VerifyError::LenderNftNotUnique)
-    );
-    // a reissuance token
-    assert_eq!(
-        verify_with(|issuance| issuance.inflation_keys = confidential::Value::Explicit(1)),
-        Some(VerifyError::LenderNftNotUnique)
+        verify_both(&creation_tx, network),
+        [Err(VerifyError::Creation(CreationError::LenderNftNotUnique)); 2]
     );
 
-    // a reissuance of the NFT: input 1 gives the NFT's asset id, but the NFT exists already
-    let mut reissuance_tx = offer.creation_tx.clone();
-    let reissuance = &mut reissuance_tx.input[1].asset_issuance;
-    reissuance.asset_blinding_nonce = Tweak::from_slice(&[1; 32])?;
-    reissuance.asset_entropy = lender_nft_entropy().to_byte_array();
-
+    // another borrower's key does not open the offer
+    let stranger = LendingKey::from_master_blinding_key(&[3; 32]);
     assert_eq!(
-        reissuance_tx.input[1].issuance_ids().0,
-        offer.parameters.lender_nft_asset_id
-    );
-    assert_eq!(
-        verify_pending_offer(&offer.opened, &reissuance_tx, network).err(),
-        Some(VerifyError::LenderNftNotUnique)
-    );
-
-    // terms that name another asset than the one input 1 issues
-    let mut other_nft = offer.opened;
-    other_nft.signed_terms.terms.lender_nft = AssetId::from_slice(&[0x55; 32])?;
-
-    assert_eq!(
-        verify_pending_offer(&other_nft, &offer.creation_tx, network).err(),
-        Some(VerifyError::LenderNftNotUnique)
+        verify_offer_as_borrower(&stranger, &offer.creation_tx(), network).err(),
+        Some(VerifyError::Creation(CreationError::Open(
+            OpenError::NotMine
+        )))
     );
 
     Ok(())
+}
+
+#[simplex::test]
+#[should_panic(expected = "The offer's parameters are not those of the new offer's terms")]
+fn creation_with_other_parameters_panics(context: simplex::TestContext) {
+    let network = *context.get_network();
+    let offer = OffChainOffer::new(network);
+
+    // parameters that do not come from the terms: another expiration
+    let mut other = offer.parameters;
+    other.loan_expiration_time += 1;
+
+    let mut ctx = ConfidentialTransaction::new();
+    add_nft_issuances(
+        &mut ctx,
+        coin(first_input(), network),
+        coin(lender_nft_coin(), network),
+    );
+
+    PrivateLendingOffer::new_pending(other).attach_creation(
+        &mut ctx,
+        &offer.new_offer,
+        Script::new(),
+    );
+}
+
+#[simplex::test]
+#[should_panic(expected = "Input 0 is not the new offer's first input")]
+fn creation_from_another_first_input_panics(context: simplex::TestContext) {
+    let network = *context.get_network();
+    let offer = OffChainOffer::new(network);
+
+    // the new offer was built for input 0 = first_input()
+    let mut ctx = ConfidentialTransaction::new();
+    add_nft_issuances(
+        &mut ctx,
+        coin(lender_nft_coin(), network),
+        coin(first_input(), network),
+    );
+
+    PrivateLendingOffer::new_pending(offer.parameters).attach_creation(
+        &mut ctx,
+        &offer.new_offer,
+        Script::new(),
+    );
 }

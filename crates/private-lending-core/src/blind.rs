@@ -1,7 +1,7 @@
 //! Blinding a PSET whose pinned outputs carry extra data in their range proofs, and rewinding
 //! such an output.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use elements::confidential::{self, AssetBlindingFactor, Nonce, ValueBlindingFactor};
@@ -35,6 +35,8 @@ pub struct PinnedBlinding {
 pub enum BlindPsetError {
     /// The pinned output's index is past the PSET's outputs.
     MissingOutput(usize),
+    /// Two pinned blindings name the same output.
+    DuplicateOutput(usize),
     /// The output has no recipient blinding key.
     MissingBlindingKey(usize),
     /// The output's explicit asset or amount is not the pinned one.
@@ -51,6 +53,7 @@ impl fmt::Display for BlindPsetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingOutput(index) => write!(f, "pinned output {index} is not in the PSET"),
+            Self::DuplicateOutput(index) => write!(f, "output {index} is pinned twice"),
             Self::MissingBlindingKey(index) => {
                 write!(f, "pinned output {index} has no recipient blinding key")
             }
@@ -73,7 +76,10 @@ impl std::error::Error for BlindPsetError {
             Self::Asset(_, e) => Some(e),
             Self::Proof(_, e) => Some(e),
             Self::Pset(e) => Some(e),
-            Self::MissingOutput(_) | Self::MissingBlindingKey(_) | Self::PinnedMismatch(_) => None,
+            Self::MissingOutput(_)
+            | Self::DuplicateOutput(_)
+            | Self::MissingBlindingKey(_)
+            | Self::PinnedMismatch(_) => None,
         }
     }
 }
@@ -130,14 +136,24 @@ const MESSAGE_PREFIX_LENGTH: usize = 64;
 /// key and the blinder index of an input with secrets).
 ///
 /// # Errors
-/// Returns an error if a pinned output is missing, has no blinding key or another explicit asset
-/// or amount than the pinned one, or if blinding or a proof fails.
+/// Returns an error if two pinned blindings name the same output (checked before anything is
+/// blinded), a pinned output is missing, has no blinding key or another explicit asset or amount
+/// than the pinned one, or if blinding or a proof fails.
 pub fn blind_pset<R: RngCore + CryptoRng>(
     pset: &mut PartiallySignedTransaction,
     input_secrets: &HashMap<usize, TxOutSecrets>,
     pinned: &[PinnedBlinding],
     rng: &mut R,
 ) -> Result<(), BlindPsetError> {
+    // blinding one output twice would push two balancing scalars for it
+    let mut indices = HashSet::new();
+    if let Some(duplicate) = pinned
+        .iter()
+        .find(|blinding| !indices.insert(blinding.output_index))
+    {
+        return Err(BlindPsetError::DuplicateOutput(duplicate.output_index));
+    }
+
     let surjection_inputs = pset.surjection_inputs(input_secrets)?;
 
     for blinding in pinned {
@@ -240,6 +256,11 @@ fn blind_pinned_output<R: RngCore + CryptoRng>(
 ///
 /// Returns the output's secrets and the extra data of the range proof's message, followed by
 /// zeros: rewinding returns the whole message buffer of the proof.
+///
+/// The amount and the value blinder are proven by the range proof, but the returned asset id and
+/// asset blinder are only what the message claims: nothing checks them against the output's asset
+/// commitment. A caller that relies on them compares the commitments itself, as opening an offer
+/// does (see [`PinnedOutput::matches`]).
 ///
 /// # Errors
 /// Returns an error if the output is not confidential, has no range proof, its range proof does
@@ -525,6 +546,38 @@ mod tests {
         tx.verify_tx_amt_proofs(SECP256K1, &spent).unwrap();
         assert!(pinned[0].matches(&tx.output[0]));
         assert!(pinned[1].matches(&tx.output[1]));
+    }
+
+    #[test]
+    fn duplicate_output_index_is_rejected() {
+        let coin = explicit_coin(policy_asset(), 100_000);
+        let pinned = random_pinned(policy_asset(), 60_000);
+        let recipient = lift_lending_key(&lender().x_only_public_key());
+        let (mut pset, input_secrets) = pset(
+            std::slice::from_ref(&coin),
+            vec![
+                blinded_output(script(1), pinned.amount, pinned.asset_id, recipient),
+                blinded_output(script(2), 39_500, policy_asset(), change_blinding_key()),
+                fee_output(500),
+            ],
+        );
+        let blinding = PinnedBlinding {
+            output_index: 0,
+            pinned,
+            ephemeral_sk: None,
+            extra_data: Vec::new(),
+        };
+        let unblinded = pset.clone();
+
+        let result = blind_pset(
+            &mut pset,
+            &input_secrets,
+            &[blinding.clone(), blinding],
+            &mut thread_rng(),
+        );
+
+        assert!(matches!(result, Err(BlindPsetError::DuplicateOutput(0))));
+        assert_eq!(pset, unblinded);
     }
 
     #[test]
