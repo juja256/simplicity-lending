@@ -5,7 +5,7 @@ use super::setup::{
 };
 
 #[simplex::test]
-fn private_offer_full_repayment_pays_pinned_outputs(
+fn private_offer_full_repayment_pays_pinned_repayment(
     context: simplex::TestContext,
 ) -> anyhow::Result<()> {
     let borrower = context.get_default_signer();
@@ -13,49 +13,54 @@ fn private_offer_full_repayment_pays_pinned_outputs(
 
     let mut setup = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
     let parameters = setup.parameters;
-    let terms = parameters.terms;
+    let pinned = parameters.pinned;
 
     let acceptance_tx = accept_private_offer(&context, &mut setup, &lender)?;
 
     setup.offer = get_active_offer(&setup);
 
+    let active_offer_utxo = find_pinned_utxo(&acceptance_tx, &pinned.active_collateral);
     let repayment_tx = broadcast(
-        &build_full_repayment(&setup, &acceptance_tx, borrower, &lender)?,
+        &build_full_repayment(&setup.offer, active_offer_utxo, borrower, &lender)?,
         borrower,
     )?;
 
-    let repayment_utxo = find_pinned_utxo(&repayment_tx, &terms.repayment);
-    let protocol_fee_utxo = find_pinned_utxo(&repayment_tx, &terms.protocol_fee);
+    let repayment_utxo = find_pinned_utxo(&repayment_tx, &pinned.repayment);
 
     assert_eq!(repayment_utxo.outpoint.vout, 1);
-    assert_eq!(protocol_fee_utxo.outpoint.vout, 2);
     assert_confidential(&repayment_tx, &repayment_utxo);
-    assert_confidential(&repayment_tx, &protocol_fee_utxo);
 
-    // principal and interest, minus the protocol's 10% of the interest
-    assert_eq!(terms.repayment.amount, 10_900);
-    assert_eq!(terms.protocol_fee.amount, 100);
+    // principal and interest, all of it to the lender
+    assert_eq!(pinned.repayment.amount, 10_000 + 1_000);
 
-    // the lender decrypts its repayment with its blinding key, and the fee keeper its fee
+    // no protocol fee output: the collateral returns to the borrower right after the repayment
+    let collateral_return = &repayment_tx.output[2];
+    let collateral_return_secrets = unblind_with(borrower, collateral_return)?;
+
     assert_eq!(
-        unblind_with(&lender, &repayment_utxo)?,
-        terms.repayment.secrets()
+        collateral_return.script_pubkey,
+        borrower.get_address().script_pubkey()
     );
     assert_eq!(
-        unblind_with(borrower, &protocol_fee_utxo)?,
-        terms.protocol_fee.secrets()
+        collateral_return_secrets.asset,
+        pinned.active_collateral.asset_id
+    );
+    assert_eq!(
+        collateral_return_secrets.value,
+        pinned.active_collateral.amount
     );
 
-    // both can spend what they were paid
+    // the lender decrypts its repayment with its blinding key
+    assert_eq!(
+        unblind_with(&lender, &repayment_utxo.txout)?,
+        pinned.repayment.secrets()
+    );
+
+    // and can spend it by burning the lender NFT
     claim_asset_auth_output(
         &lender,
         &parameters.get_repayment_output_asset_auth(),
         repayment_utxo,
-    )?;
-    claim_asset_auth_output(
-        borrower,
-        &parameters.get_protocol_fee_output_asset_auth(),
-        protocol_fee_utxo,
     )?;
 
     assert!(
@@ -65,9 +70,9 @@ fn private_offer_full_repayment_pays_pinned_outputs(
     );
     assert!(
         lender
-            .get_utxos_asset(terms.repayment.asset_id)?
+            .get_utxos_asset(pinned.repayment.asset_id)?
             .iter()
-            .any(|utxo| utxo.amount() == terms.repayment.amount)
+            .any(|utxo| utxo.amount() == pinned.repayment.amount)
     );
 
     Ok(())

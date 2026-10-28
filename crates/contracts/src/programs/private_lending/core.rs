@@ -15,8 +15,9 @@ use crate::{
     utils::confidential::ConfidentialTransaction,
 };
 
-/// A private lending offer. Its storage holds the status only: the debt is either whole (active)
-/// or repaid at once.
+/// A private lending offer. Its storage holds the status (slot 0) and the outstanding debt as the
+/// hash of its commitment (slot 1). Without partial repayment, the debt is the pinned repayment
+/// from creation until the full repayment.
 pub struct PrivateLendingOffer {
     program: PrivateLendingProgram,
     parameters: PrivateLendingParameters,
@@ -25,19 +26,36 @@ pub struct PrivateLendingOffer {
 
 impl PrivateLendingOffer {
     pub fn new_pending(parameters: PrivateLendingParameters) -> Self {
-        Self::new(parameters, false)
+        Self::new_with_storage(
+            parameters,
+            false,
+            parameters.pinned.repayment.commitment_hash(),
+        )
     }
 
     pub fn new_active(parameters: PrivateLendingParameters) -> Self {
-        Self::new(parameters, true)
+        Self::new_with_storage(
+            parameters,
+            true,
+            parameters.pinned.repayment.commitment_hash(),
+        )
     }
 
-    fn new(parameters: PrivateLendingParameters, is_active: bool) -> Self {
+    /// The offer whose storage holds `is_active` and `debt_slot`. The program only accepts
+    /// `debt_slot` equal to the repayment's commitment hash, as in [`Self::new_pending`] and
+    /// [`Self::new_active`].
+    pub fn new_with_storage(
+        parameters: PrivateLendingParameters,
+        is_active: bool,
+        debt_slot: [u8; 32],
+    ) -> Self {
         let mut program =
-            PrivateLendingProgram::new(parameters.build_arguments()).with_storage_capacity(1);
+            PrivateLendingProgram::new(parameters.build_arguments()).with_storage_capacity(2);
 
         #[allow(unused_must_use)]
         program.set_storage_at(0, Self::get_is_active_slot_value(is_active));
+        #[allow(unused_must_use)]
+        program.set_storage_at(1, debt_slot);
 
         Self {
             program,
@@ -64,9 +82,9 @@ impl PrivateLendingOffer {
     /// The collateral this offer holds in its current state.
     pub fn get_collateral(&self) -> crate::utils::confidential::PinnedOutput {
         if self.is_active {
-            self.parameters.terms.active_collateral
+            self.parameters.pinned.active_collateral
         } else {
-            self.parameters.terms.pending_collateral
+            self.parameters.pinned.pending_collateral
         }
     }
 
@@ -125,7 +143,7 @@ impl PrivateLendingOffer {
             self.parameters
                 .get_principal_output_asset_auth()
                 .get_script_pubkey(),
-            self.parameters.terms.principal,
+            self.parameters.pinned.principal,
             borrower_blinding_key,
         );
     }
@@ -168,8 +186,8 @@ impl PrivateLendingOffer {
     }
 
     /// Burns the borrower NFT (input 0, output 0), spends the active offer (input 1) and pays
-    /// the pinned repayment (output 1) and protocol fee (output 2). The caller adds the
-    /// principal to repay and takes the collateral.
+    /// the pinned repayment (output 1). The caller adds the principal to repay and takes the
+    /// collateral.
     ///
     /// # Panics
     /// Panics if the offer is pending or the transaction already has inputs or outputs.
@@ -179,7 +197,6 @@ impl PrivateLendingOffer {
         borrower_nft_utxo: UTXO,
         active_offer_utxo: UTXO,
         lender_blinding_key: PublicKey,
-        protocol_fee_blinding_key: PublicKey,
     ) {
         assert!(self.is_active, "Only an active offer can be repaid");
         assert!(
@@ -207,15 +224,8 @@ impl PrivateLendingOffer {
             self.parameters
                 .get_repayment_output_asset_auth()
                 .get_script_pubkey(),
-            self.parameters.terms.repayment,
+            self.parameters.pinned.repayment,
             lender_blinding_key,
-        );
-        ctx.add_pinned_output(
-            self.parameters
-                .get_protocol_fee_output_asset_auth()
-                .get_script_pubkey(),
-            self.parameters.terms.protocol_fee,
-            protocol_fee_blinding_key,
         );
     }
 
@@ -231,9 +241,7 @@ impl PrivateLendingOffer {
             "Liquidation must be the first attachment"
         );
 
-        let locktime =
-            LockTime::from_height(self.parameters.terms.offer_parameters.loan_expiration_time)
-                .unwrap();
+        let locktime = LockTime::from_height(self.parameters.loan_expiration_time).unwrap();
 
         let active_offer_input = PartialInput::new(active_offer_utxo)
             .with_sequence(Sequence::ENABLE_LOCKTIME_NO_RBF)
