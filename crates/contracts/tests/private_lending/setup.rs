@@ -7,7 +7,9 @@ use simplex::transaction::{
 
 use lending_contracts::programs::asset_auth::{AssetAuth, AssetAuthWitnessParams};
 use lending_contracts::programs::lending::OfferParameters;
-use lending_contracts::programs::private_lending::{PrivateLendingOffer, PrivateLendingParameters};
+use lending_contracts::programs::private_lending::{
+    PrivateLendingOffer, PrivateLendingParameters, add_nft_issuances,
+};
 use lending_contracts::programs::program::SimplexProgram;
 use lending_contracts::utils::confidential::{
     ConfidentialTransaction, PinnedOutput, PinnedOutputExt,
@@ -29,6 +31,8 @@ pub(super) struct PrivateOfferSetup {
     pub offer: PrivateLendingOffer,
     pub parameters: PrivateLendingParameters,
     pub creation_tx: Transaction,
+    pub borrower_lending_key: LendingKey,
+    pub lender_lending_key: LendingKey,
 }
 
 pub(super) fn default_offer_parameters(
@@ -217,25 +221,39 @@ fn issue_asset(context: &simplex::TestContext, asset_amount: u64) -> anyhow::Res
     Ok(issuance_details.asset_id)
 }
 
-/// The borrower (the default signer) issues the NFTs and the principal asset, builds the offer
-/// for the test lender's lending key, its blinding factors derived from their shared secret, and
-/// creates the pending offer.
+/// The borrower (the default signer) issues the principal asset, then creates the pending offer
+/// for the test lender's lending key: the creation transaction issues both NFTs from two of the
+/// borrower's coins, and the offer's blinding factors derive from the borrower and lender's
+/// shared secret.
 pub(super) fn setup_pending_private_offer(
     context: &simplex::TestContext,
     offer_parameters: OfferParameters,
 ) -> anyhow::Result<PrivateOfferSetup> {
     let borrower = context.get_default_signer();
+    let network = *context.get_network();
+    let policy_asset = network.policy_asset();
     let borrower_lending_key = LendingKey::from_master_blinding_key(&[1; 32]);
     let lender_lending_key = LendingKey::from_master_blinding_key(&[2; 32]);
+    let lender = lender_lending_key.x_only_public_key();
 
     split_first_signer_utxo(context, vec![5000, 10000])?;
 
     let principal_asset_id = issue_asset(context, TOTAL_PRINCIPAL_AMOUNT)?;
-    let borrower_nft_asset_id = issue_asset(context, 1)?;
-    let lender_nft_asset_id = issue_asset(context, 1)?;
 
-    // the lender NFT coin is input 0 of the creation transaction, the offer's first input
-    let lender_nft_utxo = borrower.get_utxos_asset(lender_nft_asset_id)?[0].clone();
+    // the two smallest explicit coins issue the NFTs: fund_lender takes the largest one
+    let mut coins =
+        borrower.get_utxos_filter(&|utxo| utxo.explicit_asset() == policy_asset, &|_| false)?;
+    coins.sort_by_key(UTXO::explicit_amount);
+    let [borrower_coin, lender_coin, ..] = coins.as_slice() else {
+        anyhow::bail!("the borrower needs two explicit coins to issue the NFTs");
+    };
+    // input 0 of the creation transaction, the offer's first input
+    let first_input = borrower_coin.outpoint;
+
+    let mut ctx = ConfidentialTransaction::new();
+
+    let (borrower_nft_asset_id, lender_nft_asset_id) =
+        add_nft_issuances(&mut ctx, borrower_coin.clone(), lender_coin.clone());
 
     let terms = OfferTerms {
         principal_asset: principal_asset_id,
@@ -248,10 +266,10 @@ pub(super) fn setup_pending_private_offer(
     };
     let new_offer = NewOffer::build(
         &borrower_lending_key,
-        &lender_lending_key.x_only_public_key(),
-        &lender_nft_utxo.outpoint,
+        &lender,
+        &first_input,
         PrivateLendingOffer::get_program_id(),
-        context.get_network().policy_asset(),
+        policy_asset,
         offer_parameters.collateral_amount,
         terms,
     )?;
@@ -261,20 +279,18 @@ pub(super) fn setup_pending_private_offer(
         lender_nft_asset_id,
         pinned: new_offer.pinned,
         loan_expiration_time: offer_parameters.loan_expiration_time,
-        network: *context.get_network(),
+        network,
     };
 
     let offer = PrivateLendingOffer::new_pending(parameters);
 
-    let mut ctx = ConfidentialTransaction::new();
-
-    ctx.add_input(
-        PartialInput::new(lender_nft_utxo),
-        RequiredSignature::NativeEcdsa,
-    );
-
     // the collateral comes from the finalizer's coin selection
-    offer.attach_creation(&mut ctx, borrower.get_blinding_public_key());
+    offer.attach_creation(
+        &mut ctx,
+        &new_offer,
+        &lender,
+        borrower.get_address().script_pubkey(),
+    );
 
     let creation_tx = broadcast(&ctx, borrower)?;
 
@@ -282,6 +298,8 @@ pub(super) fn setup_pending_private_offer(
         offer,
         parameters,
         creation_tx,
+        borrower_lending_key,
+        lender_lending_key,
     })
 }
 

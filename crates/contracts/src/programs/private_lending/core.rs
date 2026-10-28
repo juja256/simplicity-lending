@@ -1,8 +1,13 @@
+use private_lending_core::{NewOffer, OfferSecrets, lift_lending_key};
 use simplex::{
     program::Program,
     provider::SimplicityNetwork,
-    simplicityhl::elements::{LockTime, Script, Sequence, bitcoin::PublicKey},
-    transaction::{PartialInput, PartialOutput, RequiredSignature, UTXO},
+    simplicityhl::elements::{
+        AssetId, LockTime, Script, Sequence, bitcoin::PublicKey, secp256k1_zkp::XOnlyPublicKey,
+    },
+    transaction::{
+        PartialInput, PartialOutput, RequiredSignature, UTXO, partial_input::IssuanceInput,
+    },
 };
 
 use crate::{
@@ -12,8 +17,39 @@ use crate::{
         program::SimplexProgram,
         script_auth::{ScriptAuth, ScriptAuthWitnessParams},
     },
-    utils::confidential::ConfidentialTransaction,
+    utils::{confidential::ConfidentialTransaction, get_random_seed},
 };
+
+/// Adds the issuance inputs of an offer's creation transaction: `borrower_coin` (input 0, the
+/// offer's first input) issues the borrower NFT and `lender_coin` (input 1) the lender NFT, one
+/// unit each and no reissuance token. Returns the asset ids of the borrower NFT and of the lender
+/// NFT.
+///
+/// The issuance entropy is random: the asset ids travel in the offer's terms.
+///
+/// # Panics
+/// Panics if the transaction already has inputs.
+pub fn add_nft_issuances(
+    ctx: &mut ConfidentialTransaction,
+    borrower_coin: UTXO,
+    lender_coin: UTXO,
+) -> (AssetId, AssetId) {
+    assert!(
+        ctx.n_inputs() == 0,
+        "The NFT issuances must be the first inputs"
+    );
+
+    let mut issue_nft = |coin| {
+        ctx.add_issuance_input(
+            PartialInput::new(coin),
+            IssuanceInput::new_issuance(1, 0, get_random_seed()),
+            RequiredSignature::NativeEcdsa,
+        )
+        .asset_id
+    };
+
+    (issue_nft(borrower_coin), issue_nft(lender_coin))
+}
 
 /// A private lending offer. Its storage holds the status (slot 0) and the outstanding debt as the
 /// hash of its commitment (slot 1). Without partial repayment, the debt is the pinned repayment
@@ -88,24 +124,61 @@ impl PrivateLendingOffer {
         }
     }
 
-    /// Locks the lender NFT to this offer (pending offers) and adds the pinned collateral,
-    /// rewindable with `collateral_blinding_key`. No creation metadata: the terms reach the
-    /// lender off chain.
+    /// Adds the outputs of the offer's creation transaction: the borrower NFT to
+    /// `borrower_nft_receiver` (output 0), the lender NFT locked to this offer (output 1), the
+    /// marker (output 2) and the pending collateral (output 3). The collateral is blinded to
+    /// `lender`'s lending key, with the ephemeral public key of `new_offer` as its nonce and the
+    /// signed terms in its range proof, so the lender and the borrower can open it from the chain.
+    ///
+    /// The inputs come first from [`add_nft_issuances`]; the collateral, the change and the fee
+    /// follow.
+    ///
+    /// # Panics
+    /// Panics if the offer is active, the transaction already has outputs, or `new_offer` was not
+    /// built for this offer's pinned outputs and `lender`.
     pub fn attach_creation(
         &self,
         ctx: &mut ConfidentialTransaction,
-        collateral_blinding_key: PublicKey,
+        new_offer: &NewOffer,
+        lender: &XOnlyPublicKey,
+        borrower_nft_receiver: Script,
     ) {
-        if !self.is_active {
-            let lender_nft_script_auth = ScriptAuth::from_simplex_program(self);
+        assert!(!self.is_active, "Only a pending offer can be created");
+        assert!(
+            ctx.n_outputs() == 0,
+            "The creation outputs must be the first outputs"
+        );
+        // with other pinned outputs the collateral would be unspendable, with another lender
+        // nobody could rewind it
+        assert!(
+            new_offer.pinned == self.parameters.pinned,
+            "The new offer pins other outputs than this offer"
+        );
+        assert!(
+            OfferSecrets::for_borrower(&new_offer.ephemeral_sk, lender) == new_offer.secrets,
+            "The new offer is for another lender"
+        );
 
-            lender_nft_script_auth.attach_creation(ctx, self.parameters.lender_nft_asset_id, 1);
-        }
+        ctx.add_output(PartialOutput::new(
+            borrower_nft_receiver,
+            1,
+            self.parameters.borrower_nft_asset_id,
+        ));
 
-        ctx.add_pinned_output(
+        ScriptAuth::from_simplex_program(self).attach_creation(
+            ctx,
+            self.parameters.lender_nft_asset_id,
+            1,
+        );
+
+        ctx.add_output(PartialOutput::new_metadata(&new_offer.marker.encode()));
+
+        ctx.add_pinned_output_with(
             self.get_script_pubkey(),
-            self.get_collateral(),
-            collateral_blinding_key,
+            self.parameters.pinned.pending_collateral,
+            PublicKey::new(lift_lending_key(lender)),
+            new_offer.ephemeral_sk,
+            new_offer.signed_terms.encode(),
         );
     }
 
@@ -137,7 +210,11 @@ impl PrivateLendingOffer {
 
         *self = Self::new_active(self.parameters);
 
-        self.attach_creation(ctx, borrower_blinding_key);
+        ctx.add_pinned_output(
+            self.get_script_pubkey(),
+            self.parameters.pinned.active_collateral,
+            borrower_blinding_key,
+        );
 
         ctx.add_pinned_output(
             self.parameters
