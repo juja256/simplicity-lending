@@ -45,10 +45,10 @@
   - `pub fn tagged_hash(tag: &str, data: &[&[u8]]) -> [u8; 32]` (`lib.rs`)
   - `pub struct LendingKey` with `from_master_blinding_key(mbk: &[u8; 32]) -> LendingKey`, `secret_key(&self) -> SecretKey`, `x_only_public_key(&self) -> XOnlyPublicKey`
   - `pub fn lift_lending_key(key: &XOnlyPublicKey) -> PublicKey` (even Y)
-  - `pub fn ephemeral_key(borrower: &LendingKey, first_input: &OutPoint) -> SecretKey`
+  - `pub fn ephemeral_key(borrower: &LendingKey, first_input: &OutPoint, borrower_nft: AssetId, lender_nft: AssetId) -> SecretKey` — `tagged_hash("simplicity-lending/private/v1/ephemeral", borrower_sk ‖ txid ‖ vout_le32 ‖ borrower_nft ‖ lender_nft)`, txid and asset ids in internal byte order (final-review Ruling F1)
   - `pub struct OfferSecrets` with `for_borrower(ephemeral_sk: &SecretKey, lender: &XOnlyPublicKey) -> OfferSecrets`, `for_lender(lender: &LendingKey, nonce: &PublicKey) -> OfferSecrets`, `shared_secret(&self) -> SecretKey`, `view_tag(&self) -> u8`, `blinders(&self, role: PinnedRole) -> (AssetBlindingFactor, ValueBlindingFactor)`, `derive(&self, label: &str) -> [u8; 32]`
   - `pub enum PinnedRole { PendingCollateral, ActiveCollateral, Principal, Repayment }`
-  - Types are elements 0.25's (`elements::secp256k1_zkp::{SecretKey, PublicKey, XOnlyPublicKey}`, `elements::{OutPoint, confidential::{AssetBlindingFactor, ValueBlindingFactor}}`).
+  - Types are elements 0.25's (`elements::secp256k1_zkp::{SecretKey, PublicKey, XOnlyPublicKey}`, `elements::{AssetId, OutPoint, confidential::{AssetBlindingFactor, ValueBlindingFactor}}`).
 
 - [ ] **Step 1: Write the failing tests** in `src/keys.rs` and `src/secrets.rs` (`#[cfg(test)]`):
 
@@ -175,7 +175,7 @@ fn unknown_version_and_short_input_are_rejected() {
 
 **Interfaces:**
 - Consumes: `tagged_hash`, `LendingKey`, `OfferSecrets` (Task 1).
-- Produces: `pub struct Marker { pub program_id: [u8; 4], pub view_tag: u8, pub encrypted_lender_key: [u8; 32] }` with `Marker::new(program_id: [u8; 4], secrets: &OfferSecrets, lender: &XOnlyPublicKey, borrower: &LendingKey, first_input: &OutPoint) -> Marker`, `encode(&self) -> [u8; 37]`, `decode(bytes: &[u8]) -> Option<Marker>` (exactly 37 bytes), `decrypt_lender_key(&self, borrower: &LendingKey, first_input: &OutPoint) -> Option<XOnlyPublicKey>`.
+- Produces: `pub struct Marker { pub program_id: [u8; 4], pub view_tag: u8, pub encrypted_lender_key: [u8; 32] }` with `Marker::new(program_id: [u8; 4], secrets: &OfferSecrets, lender: &XOnlyPublicKey, borrower: &LendingKey, first_input: &OutPoint, borrower_nft: AssetId, lender_nft: AssetId) -> Marker`, `encode(&self) -> [u8; 37]`, `decode(bytes: &[u8]) -> Option<Marker>` (exactly 37 bytes), `decrypt_lender_key(&self, borrower: &LendingKey, first_input: &OutPoint, borrower_nft: AssetId, lender_nft: AssetId) -> Option<XOnlyPublicKey>`. The pad is `tagged_hash("simplicity-lending/private/v1/lender-key-pad", borrower_sk ‖ txid ‖ vout_le32 ‖ borrower_nft ‖ lender_nft)` (Rulings P2, F1).
 
 - [ ] **Step 1: Write the failing tests:** `marker_round_trips` (encode → decode equal; `decode` of 36 or 38 bytes is `None`); `borrower_decrypts_lender_key` (equals the lender's x-only key); `other_borrower_gets_another_key` (a different borrower key yields `None` or a different key, never the lender's); `view_tag_matches_secrets` (`marker.view_tag == secrets.view_tag()`).
 - [ ] **Step 2: Run** `cargo test -p private-lending-core marker` — Expected: FAIL.
@@ -217,13 +217,12 @@ fn unknown_version_and_short_input_are_rejected() {
 - Consumes: Tasks 1–4.
 - Produces:
   - `pub struct OfferPinned { pub pending_collateral: PinnedOutput, pub active_collateral: PinnedOutput, pub principal: PinnedOutput, pub repayment: PinnedOutput }` with `OfferPinned::derive(secrets: &OfferSecrets, collateral_asset: AssetId, collateral_amount: u64, terms: &OfferTerms) -> OfferPinned`
-  - `pub struct NewOffer { pub ephemeral_sk: SecretKey, pub secrets: OfferSecrets, pub signed_terms: SignedTerms, pub pinned: OfferPinned, pub marker: Marker }`
-  - `NewOffer::build(borrower: &LendingKey, lender: &XOnlyPublicKey, first_input: &OutPoint, program_id: [u8; 4], collateral_asset: AssetId, collateral_amount: u64, terms: OfferTerms) -> Result<NewOffer, OfferError>`
-  - `NewOffer::collateral_blinding(&self, output_index: usize) -> PinnedBlinding` (pending collateral, `ephemeral_sk`, `extra_data = signed_terms.encode()`)
+  - `pub struct NewOffer { pub lender: XOnlyPublicKey, pub first_input: OutPoint, pub ephemeral_sk: SecretKey, pub secrets: OfferSecrets, pub signed_terms: SignedTerms, pub pinned: OfferPinned, pub marker: Marker }`
+  - `NewOffer::build(borrower: &LendingKey, lender: &XOnlyPublicKey, first_input: &OutPoint, program_id: [u8; 4], collateral_asset: AssetId, collateral_amount: u64, terms: OfferTerms) -> Result<NewOffer, OfferError>` — the ephemeral key and the pad use the terms' NFT ids; the NFT issuance entropy must be fresh randomness for every build, and a retry rebroadcasts the byte-identical transaction
+  - `NewOffer::collateral_blinding(&self, output_index: usize) -> PinnedBlinding` (pending collateral, `ephemeral_sk`, `extra_data = signed_terms.encode()`); the PSET output's `blinding_key` must be `lift_lending_key(&self.lender)`
   - `pub struct OpenedOffer { pub signed_terms: SignedTerms, pub lender: XOnlyPublicKey, pub collateral: TxOutSecrets, pub secrets: OfferSecrets, pub pinned: OfferPinned }`
-  - `pub fn open_as_lender(lender: &LendingKey, offer: &TxOut, first_input: &OutPoint, marker: &Marker) -> Result<OpenedOffer, OpenError>`
-  - `pub fn open_as_borrower(borrower: &LendingKey, offer: &TxOut, first_input: &OutPoint, marker: &Marker) -> Result<OpenedOffer, OpenError>`
-  - `pub enum OfferError { ZeroAmount, RepaymentBelowPrincipal }`, `pub enum OpenError { ViewTagMismatch, NotMine, Rewind(RewindError), Terms(TermsError), CollateralMismatch }`
+  - opening as the lender or the borrower is crate-private (`open_as_lender(lender, &FoundOffer)`, `open_as_borrower(borrower, &FoundOffer)`); callers use Task 7's `open_creation_as_lender` / `open_creation_as_borrower`, which also run the creation checks
+  - `pub enum OfferError { ZeroAmount, RepaymentBelowPrincipal, ExpirationNotBlockHeight }` (expiration ≥ 500 000 000), `pub enum OpenError { ViewTagMismatch, NotMine, Rewind(RewindError), Terms(TermsError), CollateralMismatch }`
 
 - [ ] **Step 1: Write the failing tests** (blinding a real output via `blind_pset` from Task 4 inside a test helper `blinded_offer_output(&NewOffer) -> TxOut`):
   - `lender_opens_offer`: `open_as_lender` returns terms equal to the built ones, `collateral` equal to `(collateral_asset, collateral_amount)`, and `pinned` equal to `new.pinned`.
@@ -247,7 +246,7 @@ fn unknown_version_and_short_input_are_rejected() {
 **Interfaces:**
 - Consumes: `OfferPinned`, `OfferTerms`, `NewOffer` (Task 5).
 - Produces:
-  - `pub struct PrivateLendingParameters { pub borrower_nft_asset_id: AssetId, pub lender_nft_asset_id: AssetId, pub pinned: OfferPinned, pub loan_expiration_time: u32, pub network: SimplicityNetwork }` with `get_principal_output_asset_auth`, `get_repayment_output_asset_auth`, `build_arguments` (no fee getters or arguments)
+  - `pub struct PrivateLendingParameters { pub borrower_nft_asset_id: AssetId, pub lender_nft_asset_id: AssetId, pub pinned: OfferPinned, pub loan_expiration_time: u32, pub network: SimplicityNetwork }` (`PartialEq, Eq`) with `from_terms(terms: &OfferTerms, pinned: OfferPinned, network: SimplicityNetwork) -> PrivateLendingParameters` (NFTs and expiration from the terms; creation and verification both use it), `get_principal_output_asset_auth`, `get_repayment_output_asset_auth`, `build_arguments` (no fee getters or arguments)
   - `PrivateLendingWitnessBranch::{OfferAcceptance, OfferCancellation, PartialRepayment, FullRepayment, Liquidation}` mapping to `Left(Left(()))`, `Left(Right(()))`, `Right(Left(Left(())))`, `Right(Left(Right(())))`, `Right(Right(()))`
   - `PrivateLendingOffer` storage capacity 2: slot 0 `is_active`, slot 1 `pinned.repayment.commitment_hash()`
   - `attach_full_repayment(ctx, borrower_nft_utxo, active_offer_utxo, lender_blinding_key)` (no fee key)
@@ -270,10 +269,16 @@ fn unknown_version_and_short_input_are_rejected() {
 **Interfaces:**
 - Consumes: Tasks 5–6.
 - Produces:
-  - `PrivateLendingOffer::attach_creation(&self, ctx: &mut ConfidentialTransaction, new_offer: &NewOffer, borrower_nft_receiver: Script)` — outputs 0–3 in the creation layout; output 3 via `add_pinned_output_with(.., new_offer.ephemeral_sk, new_offer.signed_terms.encode())` blinded to `lift_lending_key(lender)`
-  - `pub fn add_nft_issuances(ctx: &mut ConfidentialTransaction, borrower_coin: UTXO, lender_coin: UTXO) -> (AssetId, AssetId)` — inputs 0 and 1, returns (borrower NFT, lender NFT)
-  - `pub fn verify_pending_offer(opened: &OpenedOffer, offer: &TxOut, network: SimplicityNetwork) -> Result<PrivateLendingParameters, VerifyError>` — rebuilds parameters from the opened terms and pinned outputs; `Err(VerifyError::AddressMismatch)` unless `PrivateLendingOffer::new_pending(params).get_script_pubkey() == offer.script_pubkey`
-  - `pub fn find_private_offer(tx: &Transaction) -> Option<(Marker, OutPoint, TxOut, OutPoint)>` — marker at output 2, offer at output 3, returns (marker, offer outpoint, offer txout, first input)
+  - `PrivateLendingOffer::attach_creation(&self, ctx: &mut ConfidentialTransaction, new_offer: &NewOffer, borrower_nft_receiver: Script)` — outputs 0–3 in the creation layout; output 3 via `add_pinned_output_with(.., new_offer.ephemeral_sk, new_offer.signed_terms.encode())` blinded to `lift_lending_key(&new_offer.lender)`; panics unless input 0 is `new_offer.first_input` and the offer's parameters equal `PrivateLendingParameters::from_terms(&new_offer.signed_terms.terms, new_offer.pinned, network)`
+  - `pub fn add_nft_issuances(ctx: &mut ConfidentialTransaction, borrower_coin: UTXO, lender_coin: UTXO) -> (AssetId, AssetId)` — inputs 0 and 1, returns (borrower NFT, lender NFT); fresh random issuance entropy on every call
+  - private-lending-core (`src/creation.rs`), the checks without addresses, shared with the wasm module:
+    - `pub struct FoundOffer { pub marker: Marker, pub offer: TxOut, pub offer_outpoint: OutPoint, pub first_input: OutPoint, pub borrower_nft: AssetId, pub lender_nft: AssetId }`
+    - `pub fn find_offer(creation_tx: &Transaction, program_id: [u8; 4]) -> Option<FoundOffer>` — marker of `program_id` at output 2, offer at output 3, first input = input 0's outpoint, NFT ids = the explicit assets of outputs 0 and 1; for the indexer
+    - `pub fn open_creation_as_lender(lender: &LendingKey, creation_tx: &Transaction, program_id: [u8; 4]) -> Result<OpenedOffer, CreationError>` and `pub fn open_creation_as_borrower(borrower: &LendingKey, creation_tx: &Transaction, program_id: [u8; 4]) -> Result<OpenedOffer, CreationError>` — find, open, then check principal ≥ 1, repayment ≥ principal, expiration < 500 000 000, a new issuance at input 1 of exactly one explicit unit of `terms.lender_nft` without reissuance token, and outputs 0 and 1 holding one explicit unit each of `terms.borrower_nft` and `terms.lender_nft`
+    - `pub enum CreationError { NotFound, Open(OpenError), InvalidTerms, LenderNftNotUnique, NftOutputMismatch }`
+  - contracts (`verify.rs`), the address checks:
+    - `pub fn verify_offer_as_lender(lender: &LendingKey, creation_tx: &Transaction, network: SimplicityNetwork) -> Result<(OpenedOffer, PrivateLendingParameters), VerifyError>` and `pub fn verify_offer_as_borrower(borrower: &LendingKey, creation_tx: &Transaction, network: SimplicityNetwork) -> Result<(OpenedOffer, PrivateLendingParameters), VerifyError>` — the core entry point with `PrivateLendingOffer::get_program_id()`, parameters from `from_terms`, output 3 at `PrivateLendingOffer::new_pending(params).get_script_pubkey()` and output 1 at `ScriptAuth::from_simplex_program(&offer).get_script_pubkey()`; the borrower runs `verify_offer_as_borrower` on its finished creation transaction before broadcasting it
+    - `pub enum VerifyError { Creation(CreationError), AddressMismatch, LenderNftNotLocked }`
 
 - [ ] **Step 1: Write the failing tests** in `offer_creation_flows.rs`:
   - `lender_finds_opens_and_verifies_offer`: after creation, `find_private_offer(&creation_tx)` → `open_as_lender` → `verify_pending_offer` returns parameters whose `build_arguments()` equal the borrower's.
