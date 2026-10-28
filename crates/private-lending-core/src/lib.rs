@@ -5,11 +5,13 @@
 
 mod keys;
 mod secrets;
+mod terms;
 
 use elements::hashes::{Hash, HashEngine, sha256};
 
 pub use keys::{LendingKey, ephemeral_key, lift_lending_key};
 pub use secrets::{OfferSecrets, PinnedRole};
+pub use terms::{OfferTerms, SignedTerms, TERMS_VERSION, TermsError};
 
 /// The BIP340-style tagged hash `SHA256(SHA256(tag) ‖ SHA256(tag) ‖ data)`, where `data` is the
 /// concatenation of the given parts.
