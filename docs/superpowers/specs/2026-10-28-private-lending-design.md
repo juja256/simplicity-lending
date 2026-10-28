@@ -141,8 +141,11 @@ from the decrypted terms and the derived blinders (commitment hashes, expiry, NF
 principal and repayment output script hashes) and checks that the resulting pending offer
 address equals the offer output's script pubkey. It also checks that the rewound collateral
 matches the terms, and the borrower's signature. Without this, a borrower could pin a repayment commitment that differs from
-the amount shown in the terms, and the lender would only find out at repayment. Offers that fail
-the check are shown as invalid, never as acceptable.
+the amount shown in the terms, and the lender would only find out at repayment. The lender also
+checks that input 1 of the creation transaction newly issues the terms' lender NFT, amount 1 and
+no reissuance token, so that no other unit can claim the repayment or liquidate, and that the
+expiry is below the lock time threshold (500 000 000), so that liquidation is possible. Offers
+that fail the check are shown as invalid, never as acceptable.
 
 ## Marker
 
