@@ -84,10 +84,19 @@ working protocol: contract, indexer, and front end.
   `ct(slip77(<key>),elwpkh(...))`; the seed wallet's `Signer::wpkhSlip77Descriptor()` likewise.
   The secret stays in the browser; only the x-only public key leaves it (to the directory).
 - **Ephemeral key** of an offer:
-  `e = tagged_hash("simplicity-lending/private/v1/ephemeral", borrower_lending_sk ‖ first input outpoint of the creation tx)`.
-  Its public key is the collateral output's nonce. Deterministic, so the borrower recovers its
-  offers on any device: it recomputes `e·G` for candidates and compares with their nonce, then
-  decrypts the lender's key from the marker (see "Marker") to get the shared secret.
+  `e = tagged_hash("simplicity-lending/private/v1/ephemeral", borrower_lending_sk ‖ txid ‖ vout_le32 ‖ borrower_nft ‖ lender_nft)`,
+  over the creation transaction's first input (input 0's outpoint) and the two NFT asset ids it
+  issues (outputs 0 and 1), the txid and the asset ids in their internal byte order and the
+  secret key as its 32 bytes. Its public key is the collateral output's nonce. Deterministic, so
+  the borrower recovers its offers on any device: it recomputes `e·G` from each candidate's
+  input 0 and outputs 0 and 1 and compares with the nonce, then decrypts the lender's key from
+  the marker (see "Marker") to get the shared secret.
+- **Fresh NFTs per build.** Every secret of an offer follows from `e`, so two different creation
+  transactions with the same `e` would leak to whoever sees both the collateral amount (shared
+  range proof nonce), the difference of the amounts (shared blinders) or the XOR of the lenders'
+  keys (shared marker pad). The NFT issuance entropy is therefore fresh randomness for every
+  build, which makes every rebuild a fresh offer; a retry rebroadcasts the byte-identical
+  transaction instead of building a new one from the same offer.
 - **Shared secret**: the one Elements uses to rewind the collateral output's range proof
   (`Nonce::with_ephemeral_sk(e, lender_pk)` / `Nonce::shared_secret(lender_sk)`).
 - **Derived values**: `tagged_hash("simplicity-lending/private/v1/<label>", shared_secret)` for:
@@ -136,16 +145,40 @@ directory name (if registered) and key fingerprint.
 
 ## Lender verification (soundness-critical)
 
-Before showing an offer as acceptable, the lender's browser recomputes every contract parameter
-from the decrypted terms and the derived blinders (commitment hashes, expiry, NFT ids, the
-principal and repayment output script hashes) and checks that the resulting pending offer
-address equals the offer output's script pubkey. It also checks that the rewound collateral
-matches the terms, and the borrower's signature. Without this, a borrower could pin a repayment commitment that differs from
-the amount shown in the terms, and the lender would only find out at repayment. The lender also
-checks that input 1 of the creation transaction newly issues the terms' lender NFT, amount 1 and
-no reissuance token, so that no other unit can claim the repayment or liquidate, and that the
-expiry is below the lock time threshold (500 000 000), so that liquidation is possible. Offers
-that fail the check are shown as invalid, never as acceptable.
+Before showing an offer as acceptable, the lender's browser runs one check on the whole creation
+transaction; nothing else may present an offer as valid. It has two layers:
+
+- `private_lending_core::open_creation_as_lender(lender_key, creation_tx, program_id)`, which the
+  wasm module runs unchanged: it finds the offer by the creation layout (marker of this program
+  at output 2, offer at output 3, first input = input 0's outpoint, NFT ids from outputs 0 and
+  1), opens it (view tag, rewind, the borrower's signature over the terms for this lender and
+  first input, the rewound collateral equal to the pinned pending collateral, commitments
+  included), and checks that:
+  - the terms lend something and ask back at least as much (principal ≥ 1, repayment ≥
+    principal), and the expiry is below the lock time threshold (500 000 000), so that
+    liquidation is possible;
+  - input 1 newly issues the terms' lender NFT, amount 1 and no reissuance token, so that no other
+    unit can claim the repayment or liquidate;
+  - outputs 0 and 1 are one explicit unit each of the terms' borrower NFT and lender NFT.
+- The address checks, which need the contract (`verify_offer_as_lender(lender_key, creation_tx,
+  network)` in the contracts crate; LWK's `SimplicityProgram` in the browser): recompute every
+  contract parameter from the opened terms and the derived blinders
+  (`PrivateLendingParameters::from_terms`: commitment hashes, expiry, NFT ids, the principal and
+  repayment output script hashes), and check that the resulting pending offer address is output
+  3's script pubkey and that output 1 locks the lender NFT to that offer (`script_auth` of its
+  script hash).
+
+Without the address check, a borrower could pin a repayment commitment that differs from the
+amount shown in the terms, and the lender would only find out at repayment. Offers that fail any
+check are shown as invalid, never as acceptable.
+
+The borrower runs the same check with its own key (`open_creation_as_borrower` /
+`verify_offer_as_borrower`) to recover its offers, and on its finished creation transaction
+before broadcasting it: an offer that fails would never be accepted, and the borrower could not
+rebuild it from the chain to cancel it, which would strand the collateral. The transaction
+builder also asserts that the offer's parameters come from its signed terms and that input 0 is
+the offer's first input. NFT issuance entropy is fresh for every build, and a retry rebroadcasts
+the byte-identical transaction (see "Keys and secrets").
 
 ## Marker
 
@@ -155,9 +188,11 @@ Creation transactions carry an OP_RETURN output with
 - `program_id` is the existing scheme: the first 4 bytes of SHA-256 of the program source
   (`SimplexProgram::get_program_id`). A future contract version therefore gets a new id.
 - `encrypted_lender_key` is the lender's x-only lending key XOR
-  `tagged_hash("simplicity-lending/private/v1/lender-key-pad", borrower_lending_sk ‖ first input outpoint)`.
+  `tagged_hash("simplicity-lending/private/v1/lender-key-pad", borrower_lending_sk ‖ txid ‖ vout_le32 ‖ borrower_nft ‖ lender_nft)`,
+  the same data as the ephemeral key: the first input and the NFT ids, in internal byte order.
   Only the borrower can decrypt it; it is what lets the borrower rebuild the shared secret on a
-  new device (designer's call; the lender does not need it).
+  new device (designer's call; the lender does not need it). The NFT ids, fresh for every build,
+  keep two markers from the same input 0 from revealing the XOR of their lenders' keys.
 
 ## The contract (`private_lending.simf`, v1)
 
