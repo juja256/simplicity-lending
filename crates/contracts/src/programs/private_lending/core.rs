@@ -2,9 +2,7 @@ use private_lending_core::{NewOffer, OfferSecrets, lift_lending_key};
 use simplex::{
     program::Program,
     provider::SimplicityNetwork,
-    simplicityhl::elements::{
-        AssetId, LockTime, Script, Sequence, bitcoin::PublicKey, secp256k1_zkp::XOnlyPublicKey,
-    },
+    simplicityhl::elements::{AssetId, LockTime, OutPoint, Script, Sequence, bitcoin::PublicKey},
     transaction::{
         PartialInput, PartialOutput, RequiredSignature, UTXO, partial_input::IssuanceInput,
     },
@@ -25,7 +23,13 @@ use crate::{
 /// unit each and no reissuance token. Returns the asset ids of the borrower NFT and of the lender
 /// NFT.
 ///
-/// The issuance entropy is random: the asset ids travel in the offer's terms.
+/// The issuance entropy is fresh randomness on every call, and it must be: the offer's secrets
+/// derive from the borrower, the first input and the NFT ids, so a second creation transaction
+/// from the same coins with the same NFT ids would leak the collateral amount, the difference of
+/// the amounts or the XOR of the lenders' keys. A retry rebroadcasts the byte-identical
+/// transaction; a new build calls this again and builds a new
+/// [`NewOffer`](private_lending_core::NewOffer). The asset ids travel in the offer's terms and
+/// outputs 0 and 1, so the borrower recovers them from the chain.
 ///
 /// # Panics
 /// Panics if the transaction already has inputs.
@@ -126,21 +130,26 @@ impl PrivateLendingOffer {
 
     /// Adds the outputs of the offer's creation transaction: the borrower NFT to
     /// `borrower_nft_receiver` (output 0), the lender NFT locked to this offer (output 1), the
-    /// marker (output 2) and the pending collateral (output 3). The collateral is blinded to
-    /// `lender`'s lending key, with the ephemeral public key of `new_offer` as its nonce and the
-    /// signed terms in its range proof, so the lender and the borrower can open it from the chain.
+    /// marker (output 2) and the pending collateral (output 3). The collateral is blinded to the
+    /// lending key of `new_offer.lender`, with the ephemeral public key of `new_offer` as its
+    /// nonce and the signed terms in its range proof, so the lender and the borrower can open it
+    /// from the chain.
     ///
     /// The inputs come first from [`add_nft_issuances`]; the collateral, the change and the fee
-    /// follow.
+    /// follow. Before broadcasting the finished transaction, the borrower checks it with
+    /// [`verify_offer_as_borrower`](crate::programs::private_lending::verify_offer_as_borrower):
+    /// an offer that does not verify would never be accepted, and the borrower could not rebuild
+    /// it from the chain to cancel it.
     ///
     /// # Panics
-    /// Panics if the offer is active, the transaction already has outputs, or `new_offer` was not
-    /// built for this offer's pinned outputs and `lender`.
+    /// Panics if the offer is active, the transaction already has outputs, its input 0 is not
+    /// `new_offer.first_input`, this offer's parameters are not
+    /// [`PrivateLendingParameters::from_terms`] of `new_offer`'s terms and pinned outputs, or
+    /// `new_offer`'s secrets are not those of its lender.
     pub fn attach_creation(
         &self,
         ctx: &mut ConfidentialTransaction,
         new_offer: &NewOffer,
-        lender: &XOnlyPublicKey,
         borrower_nft_receiver: Script,
     ) {
         assert!(!self.is_active, "Only a pending offer can be created");
@@ -148,15 +157,33 @@ impl PrivateLendingOffer {
             ctx.n_outputs() == 0,
             "The creation outputs must be the first outputs"
         );
-        // with other pinned outputs the collateral would be unspendable, with another lender
-        // nobody could rewind it
+        // the offer's secrets and signature depend on input 0
+        let first_input = ctx.inputs().first().map(|input| {
+            OutPoint::new(
+                input.partial_input.witness_txid,
+                input.partial_input.witness_output_index,
+            )
+        });
         assert!(
-            new_offer.pinned == self.parameters.pinned,
-            "The new offer pins other outputs than this offer"
+            first_input == Some(new_offer.first_input),
+            "Input 0 is not the new offer's first input"
+        );
+        // with other parameters the offer would not be at the address of its terms: the lender
+        // would refuse it and the borrower could not recover it
+        let expected = PrivateLendingParameters::from_terms(
+            &new_offer.signed_terms.terms,
+            new_offer.pinned,
+            self.parameters.network,
         );
         assert!(
-            OfferSecrets::for_borrower(&new_offer.ephemeral_sk, lender) == new_offer.secrets,
-            "The new offer is for another lender"
+            self.parameters == expected,
+            "The offer's parameters are not those of the new offer's terms"
+        );
+        // with other secrets nobody could rewind the collateral
+        assert!(
+            OfferSecrets::for_borrower(&new_offer.ephemeral_sk, &new_offer.lender)
+                == new_offer.secrets,
+            "The new offer's secrets are not those of its lender"
         );
 
         ctx.add_output(PartialOutput::new(
@@ -176,7 +203,7 @@ impl PrivateLendingOffer {
         ctx.add_pinned_output_with(
             self.get_script_pubkey(),
             self.parameters.pinned.pending_collateral,
-            PublicKey::new(lift_lending_key(lender)),
+            PublicKey::new(lift_lending_key(&new_offer.lender)),
             new_offer.ephemeral_sk,
             new_offer.signed_terms.encode(),
         );

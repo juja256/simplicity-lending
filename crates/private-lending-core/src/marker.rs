@@ -1,10 +1,10 @@
 //! The marker of an offer: the `OP_RETURN` payload of its creation transaction.
 
-use elements::OutPoint;
-use elements::hashes::Hash;
 use elements::secp256k1_zkp::XOnlyPublicKey;
+use elements::{AssetId, OutPoint};
 
-use crate::{LendingKey, OfferSecrets, tagged_hash};
+use crate::keys::borrower_tagged_hash;
+use crate::{LendingKey, OfferSecrets};
 
 const LENDER_KEY_PAD_TAG: &str = "simplicity-lending/private/v1/lender-key-pad";
 
@@ -29,18 +29,22 @@ pub struct Marker {
 
 impl Marker {
     /// The marker of the offer from `borrower` to `lender` whose creation transaction spends
-    /// `first_input` as its input 0.
+    /// `first_input` as its input 0 and issues `borrower_nft` and `lender_nft`.
     pub fn new(
         program_id: [u8; 4],
         secrets: &OfferSecrets,
         lender: &XOnlyPublicKey,
         borrower: &LendingKey,
         first_input: &OutPoint,
+        borrower_nft: AssetId,
+        lender_nft: AssetId,
     ) -> Marker {
+        let pad = lender_key_pad(borrower, first_input, borrower_nft, lender_nft);
+
         Marker {
             program_id,
             view_tag: secrets.view_tag(),
-            encrypted_lender_key: xor(lender.serialize(), lender_key_pad(borrower, first_input)),
+            encrypted_lender_key: xor(lender.serialize(), pad),
         }
     }
 
@@ -67,37 +71,44 @@ impl Marker {
 
     /// The lender's key, which only the offer's borrower can decrypt: it XORs the encrypted key
     /// with the pad `tagged_hash("simplicity-lending/private/v1/lender-key-pad", borrower_sk ‖
-    /// txid ‖ vout_le32)` over the first input of the creation transaction, the txid in its
-    /// internal byte order.
+    /// txid ‖ vout_le32 ‖ borrower_nft ‖ lender_nft)` over the first input of the creation
+    /// transaction and the two NFTs it issues, the txid and the asset ids in their internal byte
+    /// order.
     ///
-    /// With another borrower key or first input the result is `None` or an unrelated key.
+    /// With another borrower key, first input or NFT the result is `None` or an unrelated key.
     pub fn decrypt_lender_key(
         &self,
         borrower: &LendingKey,
         first_input: &OutPoint,
+        borrower_nft: AssetId,
+        lender_nft: AssetId,
     ) -> Option<XOnlyPublicKey> {
-        let key = xor(
-            self.encrypted_lender_key,
-            lender_key_pad(borrower, first_input),
-        );
+        let pad = lender_key_pad(borrower, first_input, borrower_nft, lender_nft);
 
-        XOnlyPublicKey::from_slice(&key).ok()
+        XOnlyPublicKey::from_slice(&xor(self.encrypted_lender_key, pad)).ok()
     }
 }
 
 /// The pad that encrypts the lender's key:
-/// `tagged_hash("simplicity-lending/private/v1/lender-key-pad", borrower_sk ‖ txid ‖ vout_le32)`.
+/// `tagged_hash("simplicity-lending/private/v1/lender-key-pad", borrower_sk ‖ txid ‖ vout_le32 ‖
+/// borrower_nft ‖ lender_nft)`.
 ///
 /// It hashes the borrower's secret key rather than the shared secret, so the borrower can
-/// compute it without knowing the lender.
-fn lender_key_pad(borrower: &LendingKey, first_input: &OutPoint) -> [u8; 32] {
-    tagged_hash(
+/// compute it without knowing the lender. The NFTs, issued from fresh random entropy by every
+/// build, make it differ between two creation transactions that spend the same input 0, so the
+/// XOR of two markers does not reveal the XOR of their lenders' keys.
+fn lender_key_pad(
+    borrower: &LendingKey,
+    first_input: &OutPoint,
+    borrower_nft: AssetId,
+    lender_nft: AssetId,
+) -> [u8; 32] {
+    borrower_tagged_hash(
         LENDER_KEY_PAD_TAG,
-        &[
-            &borrower.secret_key().secret_bytes(),
-            first_input.txid.as_byte_array(),
-            &first_input.vout.to_le_bytes(),
-        ],
+        borrower,
+        first_input,
+        borrower_nft,
+        lender_nft,
     )
 }
 
@@ -110,9 +121,11 @@ mod tests {
     use std::sync::LazyLock;
 
     use elements::Txid;
+    use elements::hashes::Hash;
 
     use super::*;
-    use crate::ephemeral_key;
+    use crate::test_util::sequence;
+    use crate::{ephemeral_key, tagged_hash};
 
     const PROGRAM_ID: [u8; 4] = [0x10, 0x11, 0x12, 0x13];
 
@@ -124,16 +137,19 @@ mod tests {
         LazyLock::new(|| LendingKey::from_master_blinding_key(&[2; 32]).x_only_public_key());
     /// The txid bytes 0x00..=0x1f in internal order and a vout whose bytes differ, so a byte
     /// order mistake changes the pad.
-    static FIRST_INPUT: LazyLock<OutPoint> = LazyLock::new(|| {
-        OutPoint::new(
-            Txid::from_byte_array(std::array::from_fn(|i| i as u8)),
-            0x0102_0304,
-        )
-    });
+    static FIRST_INPUT: LazyLock<OutPoint> =
+        LazyLock::new(|| OutPoint::new(Txid::from_byte_array(sequence(0x00)), 0x0102_0304));
+    /// The NFT ids of the sample creation transaction, the bytes 0x40..=0x5f and 0x60..=0x7f in
+    /// internal order.
+    static BORROWER_NFT: LazyLock<AssetId> =
+        LazyLock::new(|| AssetId::from_slice(&sequence(0x40)).unwrap());
+    static LENDER_NFT: LazyLock<AssetId> =
+        LazyLock::new(|| AssetId::from_slice(&sequence(0x60)).unwrap());
 
     /// The borrower's secrets of an offer from [`BORROWER`] to [`LENDER`].
     fn sample_secrets() -> OfferSecrets {
-        OfferSecrets::for_borrower(&ephemeral_key(&BORROWER, &FIRST_INPUT), &LENDER)
+        let ephemeral_sk = ephemeral_key(&BORROWER, &FIRST_INPUT, *BORROWER_NFT, *LENDER_NFT);
+        OfferSecrets::for_borrower(&ephemeral_sk, &LENDER)
     }
 
     fn sample_marker() -> Marker {
@@ -143,6 +159,8 @@ mod tests {
             &LENDER,
             &BORROWER,
             &FIRST_INPUT,
+            *BORROWER_NFT,
+            *LENDER_NFT,
         )
     }
 
@@ -159,7 +177,7 @@ mod tests {
     fn borrower_decrypts_lender_key() {
         let marker = sample_marker();
         assert_eq!(
-            marker.decrypt_lender_key(&BORROWER, &FIRST_INPUT),
+            marker.decrypt_lender_key(&BORROWER, &FIRST_INPUT, *BORROWER_NFT, *LENDER_NFT),
             Some(*LENDER)
         );
     }
@@ -168,9 +186,25 @@ mod tests {
     fn other_borrower_gets_another_key() {
         let marker = sample_marker();
         assert_ne!(
-            marker.decrypt_lender_key(&OTHER_BORROWER, &FIRST_INPUT),
+            marker.decrypt_lender_key(&OTHER_BORROWER, &FIRST_INPUT, *BORROWER_NFT, *LENDER_NFT),
             Some(*LENDER)
         );
+    }
+
+    #[test]
+    fn another_first_input_or_other_nfts_give_another_key() {
+        let marker = sample_marker();
+        let other_input = OutPoint::new(FIRST_INPUT.txid, FIRST_INPUT.vout + 1);
+        let other_nft = AssetId::from_slice(&[0x66; 32]).unwrap();
+
+        let decrypted = [
+            marker.decrypt_lender_key(&BORROWER, &other_input, *BORROWER_NFT, *LENDER_NFT),
+            marker.decrypt_lender_key(&BORROWER, &FIRST_INPUT, other_nft, *LENDER_NFT),
+            marker.decrypt_lender_key(&BORROWER, &FIRST_INPUT, *BORROWER_NFT, other_nft),
+        ];
+        for key in decrypted {
+            assert_ne!(key, Some(*LENDER));
+        }
     }
 
     #[test]
@@ -185,14 +219,16 @@ mod tests {
         assert_eq!(bytes[0..4], PROGRAM_ID);
         assert_eq!(bytes[4], sample_secrets().view_tag());
 
-        // the pad is tagged_hash(lender-key-pad, borrower_sk ‖ txid ‖ vout_le32)
-        let txid: [u8; 32] = std::array::from_fn(|i| i as u8);
+        // the pad is tagged_hash(lender-key-pad, borrower_sk ‖ txid ‖ vout_le32 ‖ borrower_nft ‖
+        // lender_nft)
         let pad = tagged_hash(
             "simplicity-lending/private/v1/lender-key-pad",
             &[
                 &BORROWER.secret_key().secret_bytes(),
-                &txid,
+                &sequence(0x00),
                 &[0x04, 0x03, 0x02, 0x01],
+                &sequence(0x40),
+                &sequence(0x60),
             ],
         );
         let lender = LENDER.serialize();

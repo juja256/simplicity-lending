@@ -3,12 +3,13 @@
 use std::fmt;
 
 use elements::confidential::Nonce;
+use elements::locktime::LOCK_TIME_THRESHOLD;
 use elements::secp256k1_zkp::{PublicKey, SECP256K1, SecretKey, XOnlyPublicKey};
-use elements::{AssetId, OutPoint, TxOut, TxOutSecrets};
+use elements::{AssetId, OutPoint, TxOutSecrets};
 
 use crate::{
-    LendingKey, Marker, OfferSecrets, OfferTerms, PinnedBlinding, PinnedOutput, PinnedRole,
-    RewindError, SignedTerms, TermsError, ephemeral_key, rewind,
+    FoundOffer, LendingKey, Marker, OfferSecrets, OfferTerms, PinnedBlinding, PinnedOutput,
+    PinnedRole, RewindError, SignedTerms, TermsError, ephemeral_key, rewind,
 };
 
 /// The four pinned outputs of an offer, their blinding factors derived from the offer's shared
@@ -73,6 +74,10 @@ impl OfferPinned {
 /// An offer a borrower is about to create: everything its creation transaction needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NewOffer {
+    /// The lender the offer is for, whose lending key the collateral output is blinded to.
+    pub lender: XOnlyPublicKey,
+    /// The outpoint that the creation transaction must spend as its input 0.
+    pub first_input: OutPoint,
     /// The key whose public key becomes the collateral output's nonce.
     pub ephemeral_sk: SecretKey,
     pub secrets: OfferSecrets,
@@ -84,11 +89,24 @@ pub struct NewOffer {
 
 impl NewOffer {
     /// Builds the offer from `borrower` to `lender` whose creation transaction spends
-    /// `first_input` as its input 0, with `program_id` in the marker.
+    /// `first_input` as its input 0 and issues the terms' NFTs, with `program_id` in the marker.
+    ///
+    /// The ephemeral key, and so every blinder and the range proof's nonce, depend only on the
+    /// borrower, the first input and the NFT ids. Two different transactions with the same values
+    /// would leak the collateral amount, the difference of the amounts or the XOR of the lenders'
+    /// keys to whoever sees both. So the NFT issuance entropy must be fresh randomness for every
+    /// build, and a retry must rebroadcast the byte-identical transaction rather than build a new
+    /// one from the same `NewOffer`.
+    ///
+    /// Before broadcasting, the borrower checks its finished creation transaction with
+    /// [`open_creation_as_borrower`](crate::open_creation_as_borrower) and the address checks
+    /// (the contracts crate's `verify_offer_as_borrower`), so that a mismatch between the
+    /// transaction and the offer cannot strand the collateral.
     ///
     /// # Errors
     /// Returns an error if the collateral or the principal amount is zero (confidential amounts
-    /// must be positive) or the repayment amount is below the principal amount.
+    /// must be positive), the repayment amount is below the principal amount, or the expiration
+    /// is not a block height (from 500 000 000 on, a lock time is a timestamp).
     pub fn build(
         borrower: &LendingKey,
         lender: &XOnlyPublicKey,
@@ -104,22 +122,41 @@ impl NewOffer {
         if terms.repayment_amount < terms.principal_amount {
             return Err(OfferError::RepaymentBelowPrincipal);
         }
+        if terms.loan_expiration_time >= LOCK_TIME_THRESHOLD {
+            return Err(OfferError::ExpirationNotBlockHeight);
+        }
 
-        let ephemeral_sk = ephemeral_key(borrower, first_input);
+        let (borrower_nft, lender_nft) = (terms.borrower_nft, terms.lender_nft);
+        let ephemeral_sk = ephemeral_key(borrower, first_input, borrower_nft, lender_nft);
         let secrets = OfferSecrets::for_borrower(&ephemeral_sk, lender);
+        let marker = Marker::new(
+            program_id,
+            &secrets,
+            lender,
+            borrower,
+            first_input,
+            borrower_nft,
+            lender_nft,
+        );
 
         Ok(NewOffer {
+            lender: *lender,
+            first_input: *first_input,
             ephemeral_sk,
             secrets,
             signed_terms: SignedTerms::sign(terms, borrower, lender, first_input),
             pinned: OfferPinned::derive(&secrets, collateral_asset, collateral_amount, &terms),
-            marker: Marker::new(program_id, &secrets, lender, borrower, first_input),
+            marker,
         })
     }
 
     /// How [`blind_pset`](crate::blind_pset) blinds the pending collateral, output
     /// `output_index` of the creation transaction: its nonce is the ephemeral public key and its
     /// range proof carries the signed terms.
+    ///
+    /// The PSET output's `blinding_key` must be [`lift_lending_key`](crate::lift_lending_key) of
+    /// [`NewOffer::lender`]: the nonce and that key give the shared secret that rewinds the range
+    /// proof.
     pub fn collateral_blinding(&self, output_index: usize) -> PinnedBlinding {
         PinnedBlinding {
             output_index,
@@ -130,7 +167,9 @@ impl NewOffer {
     }
 }
 
-/// An offer opened by its lender or its borrower.
+/// An offer opened by its lender or its borrower from its creation transaction; see
+/// [`open_creation_as_lender`](crate::open_creation_as_lender) and
+/// [`open_creation_as_borrower`](crate::open_creation_as_borrower) for what they check.
 ///
 /// The terms are signed by `signed_terms.borrower` for `lender` and the creation transaction's
 /// first input, and the collateral output is exactly the pinned pending collateral. Opening does
@@ -153,6 +192,9 @@ pub enum OfferError {
     ZeroAmount,
     /// The repayment amount is below the principal amount.
     RepaymentBelowPrincipal,
+    /// The expiration is a lock time from 500 000 000 on, a timestamp, which a block height
+    /// never reaches: the lender could never liquidate.
+    ExpirationNotBlockHeight,
 }
 
 impl fmt::Display for OfferError {
@@ -162,6 +204,7 @@ impl fmt::Display for OfferError {
             Self::RepaymentBelowPrincipal => {
                 f.write_str("the repayment amount is below the principal amount")
             }
+            Self::ExpirationNotBlockHeight => f.write_str("the expiration is not a block height"),
         }
     }
 }
@@ -211,57 +254,57 @@ impl std::error::Error for OpenError {
     }
 }
 
-/// Opens `offer`, the pending collateral output of a creation transaction that spends
-/// `first_input` as its input 0 and carries `marker`, with the lender's key.
+/// Opens `found` with the lender's key.
 ///
 /// The view tag is checked first, so most offers to other lenders fail without a rewind.
 ///
 /// # Errors
 /// Returns an error if the offer is not addressed to `lender`, its terms are not signed for
-/// `lender` and `first_input`, or its collateral output is not the pinned pending collateral.
-pub fn open_as_lender(
+/// `lender` and the first input, or its collateral output is not the pinned pending collateral.
+pub(crate) fn open_as_lender(
     lender: &LendingKey,
-    offer: &TxOut,
-    first_input: &OutPoint,
-    marker: &Marker,
+    found: &FoundOffer,
 ) -> Result<OpenedOffer, OpenError> {
-    let nonce = offer.nonce.commitment().ok_or(OpenError::NotMine)?;
+    let nonce = found.offer.nonce.commitment().ok_or(OpenError::NotMine)?;
     let secrets = OfferSecrets::for_lender(lender, &nonce);
 
-    open(
-        offer,
-        first_input,
-        marker,
-        lender.x_only_public_key(),
-        secrets,
-    )
+    open(found, lender.x_only_public_key(), secrets)
 }
 
-/// Opens `offer`, the pending collateral output of a creation transaction that spends
-/// `first_input` as its input 0 and carries `marker`, with the borrower's key: the offer's
-/// ephemeral key and the lender's key, decrypted from the marker, give the shared secret.
+/// Opens `found` with the borrower's key: the offer's ephemeral key and the lender's key,
+/// decrypted from the marker, give the shared secret. Both depend on the first input and the
+/// NFTs that `found` read from the creation transaction.
 ///
 /// # Errors
 /// Returns an error if the borrower did not create the offer, its terms are not signed by the
-/// borrower for the decrypted lender and `first_input`, or its collateral output is not the
+/// borrower for the decrypted lender and the first input, or its collateral output is not the
 /// pinned pending collateral.
-pub fn open_as_borrower(
+pub(crate) fn open_as_borrower(
     borrower: &LendingKey,
-    offer: &TxOut,
-    first_input: &OutPoint,
-    marker: &Marker,
+    found: &FoundOffer,
 ) -> Result<OpenedOffer, OpenError> {
-    let ephemeral_sk = ephemeral_key(borrower, first_input);
+    let ephemeral_sk = ephemeral_key(
+        borrower,
+        &found.first_input,
+        found.borrower_nft,
+        found.lender_nft,
+    );
     let ephemeral_pk = PublicKey::from_secret_key(SECP256K1, &ephemeral_sk);
-    if offer.nonce != Nonce::Confidential(ephemeral_pk) {
+    if found.offer.nonce != Nonce::Confidential(ephemeral_pk) {
         return Err(OpenError::NotMine);
     }
-    let lender = marker
-        .decrypt_lender_key(borrower, first_input)
+    let lender = found
+        .marker
+        .decrypt_lender_key(
+            borrower,
+            &found.first_input,
+            found.borrower_nft,
+            found.lender_nft,
+        )
         .ok_or(OpenError::NotMine)?;
     let secrets = OfferSecrets::for_borrower(&ephemeral_sk, &lender);
 
-    let opened = open(offer, first_input, marker, lender, secrets)?;
+    let opened = open(found, lender, secrets)?;
     if opened.signed_terms.borrower != borrower.x_only_public_key() {
         return Err(OpenError::NotMine);
     }
@@ -272,13 +315,12 @@ pub fn open_as_borrower(
 /// The steps both sides share once they have the offer's secrets: check the view tag, rewind the
 /// collateral, check the terms and the collateral against the outputs they pin.
 fn open(
-    offer: &TxOut,
-    first_input: &OutPoint,
-    marker: &Marker,
+    found: &FoundOffer,
     lender: XOnlyPublicKey,
     secrets: OfferSecrets,
 ) -> Result<OpenedOffer, OpenError> {
-    if marker.view_tag != secrets.view_tag() {
+    let offer = &found.offer;
+    if found.marker.view_tag != secrets.view_tag() {
         return Err(OpenError::ViewTagMismatch);
     }
 
@@ -286,7 +328,7 @@ fn open(
         rewind(offer, secrets.shared_secret()).map_err(OpenError::Rewind)?;
     let signed_terms = SignedTerms::decode(&extra_data).map_err(OpenError::Terms)?;
     signed_terms
-        .verify(&lender, first_input)
+        .verify(&lender, &found.first_input)
         .map_err(OpenError::Terms)?;
 
     let pinned = OfferPinned::derive(
@@ -321,7 +363,7 @@ mod tests {
     use elements::hashes::Hash;
     use elements::pset::{Input, Output, PartiallySignedTransaction};
     use elements::secp256k1_zkp::RangeProof;
-    use elements::{RangeProofMessage, Script, TxOutWitness, Txid, bitcoin};
+    use elements::{RangeProofMessage, Script, TxOut, TxOutWitness, Txid, bitcoin};
     use rand::thread_rng;
 
     use super::*;
@@ -458,6 +500,19 @@ mod tests {
         blinded_collateral(new.collateral_blinding(0))
     }
 
+    /// `offer` as found in a creation transaction of `new`: with its marker, its first input and
+    /// the NFTs of its terms.
+    fn found(new: &NewOffer, offer: TxOut) -> FoundOffer {
+        FoundOffer {
+            marker: new.marker,
+            offer,
+            offer_outpoint: OutPoint::new(Txid::from_byte_array([0xdd; 32]), 3),
+            first_input: new.first_input,
+            borrower_nft: new.signed_terms.terms.borrower_nft,
+            lender_nft: new.signed_terms.terms.lender_nft,
+        }
+    }
+
     /// An output of the offer's collateral nonce and terms whose commitments and range proof hold
     /// `actual`, while the range proof message claims the asset and asset blinder of `claimed`.
     fn forged_collateral(new: &NewOffer, actual: &PinnedOutput, claimed: &PinnedOutput) -> TxOut {
@@ -502,9 +557,9 @@ mod tests {
     #[test]
     fn lender_opens_offer() {
         let new = sample_offer();
-        let offer = blinded_offer_output(&new);
+        let found = found(&new, blinded_offer_output(&new));
 
-        let opened = open_as_lender(&LENDER, &offer, &FIRST_INPUT, &new.marker).unwrap();
+        let opened = open_as_lender(&LENDER, &found).unwrap();
         assert_eq!(opened.signed_terms, new.signed_terms);
         assert_eq!(opened.signed_terms.terms, sample_terms());
         assert_eq!(opened.lender, LENDER.x_only_public_key());
@@ -519,23 +574,69 @@ mod tests {
     #[test]
     fn borrower_recovers_offer() {
         let new = sample_offer();
-        let offer = blinded_offer_output(&new);
+        let found = found(&new, blinded_offer_output(&new));
 
-        let recovered = open_as_borrower(&BORROWER, &offer, &FIRST_INPUT, &new.marker).unwrap();
+        let recovered = open_as_borrower(&BORROWER, &found).unwrap();
         assert_eq!(recovered.lender, LENDER.x_only_public_key());
+        assert_eq!(recovered, open_as_lender(&LENDER, &found).unwrap());
+    }
+
+    #[test]
+    fn rebuilt_offer_with_fresh_nfts_has_fresh_secrets() {
+        // a rebuilt creation transaction spends the same input 0 and issues fresh NFTs
+        let first = sample_offer();
+        let rebuilt_terms = OfferTerms {
+            borrower_nft: asset(0x46),
+            lender_nft: asset(0x57),
+            ..sample_terms()
+        };
+        let rebuilt = build(COLLATERAL_AMOUNT, rebuilt_terms).unwrap();
+
+        assert_eq!(rebuilt.first_input, first.first_input);
+        assert_ne!(rebuilt.ephemeral_sk, first.ephemeral_sk);
+        assert_ne!(
+            rebuilt.secrets.shared_secret(),
+            first.secrets.shared_secret()
+        );
+        assert_ne!(
+            rebuilt.pinned.pending_collateral.value_blinding_factor,
+            first.pinned.pending_collateral.value_blinding_factor
+        );
+        // same lender: equal encrypted keys would mean equal pads
+        assert_ne!(
+            rebuilt.marker.encrypted_lender_key,
+            first.marker.encrypted_lender_key
+        );
+
+        // the borrower recovers each offer with the NFTs of its own creation transaction
+        let found_first = found(&first, blinded_offer_output(&first));
+        let found_rebuilt = found(&rebuilt, blinded_offer_output(&rebuilt));
         assert_eq!(
-            recovered,
-            open_as_lender(&LENDER, &offer, &FIRST_INPUT, &new.marker).unwrap()
+            open_as_borrower(&BORROWER, &found_first).unwrap().pinned,
+            first.pinned
+        );
+        assert_eq!(
+            open_as_borrower(&BORROWER, &found_rebuilt).unwrap().pinned,
+            rebuilt.pinned
+        );
+        let with_first_nfts = FoundOffer {
+            borrower_nft: found_first.borrower_nft,
+            lender_nft: found_first.lender_nft,
+            ..found_rebuilt
+        };
+        assert_eq!(
+            open_as_borrower(&BORROWER, &with_first_nfts),
+            Err(OpenError::NotMine)
         );
     }
 
     #[test]
     fn other_borrower_cannot_recover() {
         let new = sample_offer();
-        let offer = blinded_offer_output(&new);
+        let found = found(&new, blinded_offer_output(&new));
 
         assert_eq!(
-            open_as_borrower(&OTHER_BORROWER, &offer, &FIRST_INPUT, &new.marker),
+            open_as_borrower(&OTHER_BORROWER, &found),
             Err(OpenError::NotMine)
         );
     }
@@ -544,15 +645,18 @@ mod tests {
     fn offer_opened_with_another_first_input_is_rejected() {
         let new = sample_offer();
         let offer = blinded_offer_output(&new);
-        let other_input = OutPoint::new(FIRST_INPUT.txid, FIRST_INPUT.vout + 1);
+        let other_input = FoundOffer {
+            first_input: OutPoint::new(FIRST_INPUT.txid, FIRST_INPUT.vout + 1),
+            ..found(&new, offer)
+        };
 
         // the lender's secrets do not depend on the first input, but the signature does
         assert_eq!(
-            open_as_lender(&LENDER, &offer, &other_input, &new.marker),
+            open_as_lender(&LENDER, &other_input),
             Err(OpenError::Terms(TermsError::BadSignature))
         );
         assert_eq!(
-            open_as_borrower(&BORROWER, &offer, &other_input, &new.marker),
+            open_as_borrower(&BORROWER, &other_input),
             Err(OpenError::NotMine)
         );
     }
@@ -560,7 +664,7 @@ mod tests {
     #[test]
     fn view_tag_collision_with_wrong_key_is_rejected() {
         let new = sample_offer();
-        let offer = blinded_offer_output(&new);
+        let found = found(&new, blinded_offer_output(&new));
         let nonce = PublicKey::from_secret_key(SECP256K1, &new.ephemeral_sk);
 
         // about one key in 256 shares a one-byte view tag, so the 256 keys `[i; 32]` may all
@@ -578,7 +682,7 @@ mod tests {
             .expect("another key shares the view tag");
 
         assert!(matches!(
-            open_as_lender(&impostor, &offer, &FIRST_INPUT, &new.marker),
+            open_as_lender(&impostor, &found),
             Err(OpenError::Rewind(RewindError::RangeProof(_)))
         ));
     }
@@ -588,15 +692,15 @@ mod tests {
         let new = sample_offer();
         let mut offer = blinded_offer_output(&new);
         offer.witness.rangeproof = None; // rewinding would fail with MissingRangeProof
-        let mut marker = new.marker;
-        marker.view_tag ^= 1;
+        let mut wrong_tag = found(&new, offer);
+        wrong_tag.marker.view_tag ^= 1;
 
         assert_eq!(
-            open_as_lender(&LENDER, &offer, &FIRST_INPUT, &marker),
+            open_as_lender(&LENDER, &wrong_tag),
             Err(OpenError::ViewTagMismatch)
         );
         assert_eq!(
-            open_as_borrower(&BORROWER, &offer, &FIRST_INPUT, &marker),
+            open_as_borrower(&BORROWER, &wrong_tag),
             Err(OpenError::ViewTagMismatch)
         );
     }
@@ -614,13 +718,14 @@ mod tests {
             pinned: foreign,
             ..new.collateral_blinding(0)
         });
+        let found = found(&new, offer);
 
         assert_eq!(
-            open_as_lender(&LENDER, &offer, &FIRST_INPUT, &new.marker),
+            open_as_lender(&LENDER, &found),
             Err(OpenError::CollateralMismatch)
         );
         assert_eq!(
-            open_as_borrower(&BORROWER, &offer, &FIRST_INPUT, &new.marker),
+            open_as_borrower(&BORROWER, &found),
             Err(OpenError::CollateralMismatch)
         );
     }
@@ -640,7 +745,7 @@ mod tests {
         assert_eq!(rewound, pending.secrets());
 
         assert_eq!(
-            open_as_lender(&LENDER, &offer, &FIRST_INPUT, &new.marker),
+            open_as_lender(&LENDER, &found(&new, offer)),
             Err(OpenError::CollateralMismatch)
         );
     }
@@ -659,7 +764,7 @@ mod tests {
         assert!(pending.matches(&offer));
 
         assert_eq!(
-            open_as_lender(&LENDER, &offer, &FIRST_INPUT, &new.marker),
+            open_as_lender(&LENDER, &found(&new, offer)),
             Err(OpenError::CollateralMismatch)
         );
     }
@@ -673,18 +778,15 @@ mod tests {
             &LENDER.x_only_public_key(),
             &FIRST_INPUT,
         );
-        let offer = blinded_offer_output(&new);
+        let found = found(&new, blinded_offer_output(&new));
 
         // the lender sees a valid offer from the key that signed the terms
-        let opened = open_as_lender(&LENDER, &offer, &FIRST_INPUT, &new.marker).unwrap();
+        let opened = open_as_lender(&LENDER, &found).unwrap();
         assert_eq!(
             opened.signed_terms.borrower,
             OTHER_BORROWER.x_only_public_key()
         );
-        assert_eq!(
-            open_as_borrower(&BORROWER, &offer, &FIRST_INPUT, &new.marker),
-            Err(OpenError::NotMine)
-        );
+        assert_eq!(open_as_borrower(&BORROWER, &found), Err(OpenError::NotMine));
     }
 
     #[test]
@@ -716,5 +818,36 @@ mod tests {
             ..terms
         };
         assert!(build(COLLATERAL_AMOUNT, no_interest).is_ok());
+    }
+
+    #[test]
+    fn build_rejects_expiration_that_is_not_a_block_height() {
+        // from 500_000_000 on, a lock time is a timestamp: the lender could never liquidate
+        let timestamp = OfferTerms {
+            loan_expiration_time: 500_000_000,
+            ..sample_terms()
+        };
+        assert_eq!(
+            build(COLLATERAL_AMOUNT, timestamp).err(),
+            Some(OfferError::ExpirationNotBlockHeight)
+        );
+
+        let last_height = OfferTerms {
+            loan_expiration_time: 499_999_999,
+            ..sample_terms()
+        };
+        assert!(build(COLLATERAL_AMOUNT, last_height).is_ok());
+    }
+
+    #[test]
+    fn new_offer_records_lender_and_first_input() {
+        let new = sample_offer();
+
+        assert_eq!(new.lender, LENDER.x_only_public_key());
+        assert_eq!(new.first_input, *FIRST_INPUT);
+        assert_eq!(
+            new.secrets,
+            OfferSecrets::for_borrower(&new.ephemeral_sk, &new.lender)
+        );
     }
 }

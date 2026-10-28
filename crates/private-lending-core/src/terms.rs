@@ -81,6 +81,10 @@ impl std::error::Error for TermsError {}
 impl SignedTerms {
     /// Signs `terms` with the borrower's lending key for `lender` and the first input of the
     /// creation transaction, with random auxiliary data.
+    ///
+    /// The auxiliary data comes from `rand`'s thread RNG, which seeds from the operating system
+    /// through `getrandom`: on `wasm32-unknown-unknown` that needs `getrandom`'s `js` feature (see
+    /// the crate documentation).
     pub fn sign(
         terms: OfferTerms,
         borrower: &LendingKey,
@@ -99,7 +103,10 @@ impl SignedTerms {
         }
     }
 
-    /// Checks that the borrower signed the terms for `lender` and `first_input`.
+    /// Checks that the key in `borrower` signed the terms for `lender` and `first_input`.
+    ///
+    /// It proves only that the embedded `borrower` key signed, whoever that is: a caller that
+    /// expects a particular borrower compares `borrower` with that key itself.
     pub fn verify(
         &self,
         lender: &XOnlyPublicKey,

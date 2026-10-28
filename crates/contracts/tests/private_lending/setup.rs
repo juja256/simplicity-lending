@@ -8,7 +8,7 @@ use simplex::transaction::{
 use lending_contracts::programs::asset_auth::{AssetAuth, AssetAuthWitnessParams};
 use lending_contracts::programs::lending::OfferParameters;
 use lending_contracts::programs::private_lending::{
-    PrivateLendingOffer, PrivateLendingParameters, add_nft_issuances,
+    PrivateLendingOffer, PrivateLendingParameters, add_nft_issuances, verify_offer_as_borrower,
 };
 use lending_contracts::programs::program::SimplexProgram;
 use lending_contracts::utils::confidential::{
@@ -55,7 +55,18 @@ pub(super) fn broadcast(
     ctx: &ConfidentialTransaction,
     signer: &Signer,
 ) -> anyhow::Result<Transaction> {
-    let tx = ctx.broadcast(signer)?;
+    let tx = ctx.finalize(signer)?;
+
+    broadcast_finalized(&tx, signer)?;
+
+    Ok(tx)
+}
+
+/// Broadcasts `tx`, finalized by `signer`, and waits as [`broadcast`] does.
+fn broadcast_finalized(tx: &Transaction, signer: &Signer) -> anyhow::Result<()> {
+    let provider = signer.get_provider();
+    provider.broadcast_transaction(tx)?;
+    wait_for_confirmation(provider, &tx.txid())?;
 
     // the finalizer's change precedes the fee, the last output
     let change_vout = (tx.output.len() - 2) as u32;
@@ -63,7 +74,7 @@ pub(super) fn broadcast(
     for _ in 0..100 {
         let listed = signer.get_utxos_txid(tx.txid())?;
         if listed.iter().any(|utxo| utxo.outpoint.vout == change_vout) {
-            return Ok(tx);
+            return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
@@ -224,7 +235,8 @@ fn issue_asset(context: &simplex::TestContext, asset_amount: u64) -> anyhow::Res
 /// The borrower (the default signer) issues the principal asset, then creates the pending offer
 /// for the test lender's lending key: the creation transaction issues both NFTs from two of the
 /// borrower's coins, and the offer's blinding factors derive from the borrower and lender's
-/// shared secret.
+/// shared secret. The borrower verifies the finished creation transaction before broadcasting
+/// it, as part C's front end must.
 pub(super) fn setup_pending_private_offer(
     context: &simplex::TestContext,
     offer_parameters: OfferParameters,
@@ -274,25 +286,22 @@ pub(super) fn setup_pending_private_offer(
         terms,
     )?;
 
-    let parameters = PrivateLendingParameters {
-        borrower_nft_asset_id,
-        lender_nft_asset_id,
-        pinned: new_offer.pinned,
-        loan_expiration_time: offer_parameters.loan_expiration_time,
-        network,
-    };
+    let parameters = PrivateLendingParameters::from_terms(&terms, new_offer.pinned, network);
 
     let offer = PrivateLendingOffer::new_pending(parameters);
 
     // the collateral comes from the finalizer's coin selection
-    offer.attach_creation(
-        &mut ctx,
-        &new_offer,
-        &lender,
-        borrower.get_address().script_pubkey(),
+    offer.attach_creation(&mut ctx, &new_offer, borrower.get_address().script_pubkey());
+
+    // an offer that does not verify would strand the collateral: check before broadcasting
+    let creation_tx = ctx.finalize(borrower)?;
+    let (_, verified) = verify_offer_as_borrower(&borrower_lending_key, &creation_tx, network)?;
+    anyhow::ensure!(
+        verified == parameters,
+        "the creation transaction does not create the offer"
     );
 
-    let creation_tx = broadcast(&ctx, borrower)?;
+    broadcast_finalized(&creation_tx, borrower)?;
 
     Ok(PrivateOfferSetup {
         offer,

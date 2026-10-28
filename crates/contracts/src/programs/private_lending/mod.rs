@@ -5,5 +5,5 @@ mod witness;
 
 pub use core::{PrivateLendingOffer, add_nft_issuances};
 pub use params::PrivateLendingParameters;
-pub use verify::{VerifyError, find_private_offer, verify_pending_offer};
+pub use verify::{VerifyError, verify_offer_as_borrower, verify_offer_as_lender};
 pub use witness::PrivateLendingWitnessBranch;
