@@ -108,25 +108,8 @@ pub fn blind_pset(
     }
     let blindings: Vec<_> = blindings.into_iter().map(|b| b.0).collect();
 
-    // The core clears the blinder index of a pinned output so that its last blinding step skips
-    // it, which leaves a blinding key without a blinder index: a PSET that does not parse from
-    // base64. Restore the indices the caller set.
-    let blinder_indices: Vec<_> = blindings
-        .iter()
-        .map(|b| {
-            let index = b.output_index;
-            (
-                index,
-                pset.outputs().get(index).and_then(|o| o.blinder_index),
-            )
-        })
-        .collect();
-
     private_lending_core::blind_pset(&mut pset, &secrets, &blindings, &mut rand::thread_rng())
         .map_err(bad_input)?;
-    for (index, blinder_index) in blinder_indices {
-        pset.outputs_mut()[index].blinder_index = blinder_index;
-    }
     Ok(pset.to_string())
 }
 
