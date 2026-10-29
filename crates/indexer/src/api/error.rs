@@ -15,6 +15,9 @@ pub enum ApiError {
 
     #[error("Validation error: {0}")]
     BadRequest(String),
+
+    #[error("Unauthorized: {0}")]
+    Unauthorized(String),
 }
 
 impl IntoResponse for ApiError {
@@ -34,6 +37,7 @@ impl IntoResponse for ApiError {
                 format!("Resource not found: {}", id),
             ),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg.clone()),
+            ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "unauthorized", msg.clone()),
         };
 
         let body = Json(json!({
@@ -65,6 +69,20 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"]["code"], "bad_request");
         assert_eq!(json["error"]["message"], "invalid params");
+    }
+
+    #[tokio::test]
+    async fn unauthorized_maps_to_401() {
+        let response = ApiError::Unauthorized("invalid signature".to_string()).into_response();
+        let status = response.status();
+        let body_bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: Value = serde_json::from_slice(&body_bytes).expect("valid json");
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(json["error"]["code"], "unauthorized");
+        assert_eq!(json["error"]["message"], "invalid signature");
     }
 
     #[tokio::test]

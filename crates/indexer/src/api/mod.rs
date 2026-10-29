@@ -1,6 +1,7 @@
 mod assets;
 mod borrowers;
 mod db;
+mod directory;
 mod dto;
 mod error;
 mod events;

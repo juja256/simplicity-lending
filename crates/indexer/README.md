@@ -423,3 +423,25 @@ Sync recipe:
 2. Remember that `last_indexed_height` as `H`.
 3. Next sync: request `from_height=H+1`, paging the same way.
 4. To refresh known offers, refetch `/private/candidates/{creation_txid}`. Refetch on the `block_indexed` event.
+
+### Lender directory
+
+The directory is a public list of x-only lending keys with display names. An entry proves control of the key, not identity: anyone can pick any name, so clients must not treat a name as verified.
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/private/directory/challenges` | Issues a challenge: `{ challenge, expires_at }`. |
+| `GET` | `/private/directory` | Entries ordered by `(display_name, pubkey)`. `limit` (default 50, max 100; a larger value returns `400`), `offset` (default 0). Returns `{ items, total, limit, offset }`. |
+| `GET` | `/private/directory/{pubkey}` | One entry, or `404`. |
+| `PUT` | `/private/directory/{pubkey}` | Creates or renames the entry. Body: `{ display_name, challenge, signature }`. Returns the entry. |
+| `DELETE` | `/private/directory/{pubkey}` | Removes the entry. Body: `{ challenge, signature }`. Returns `204`, or `404` if there is no entry. |
+
+Entries are `{ pubkey, display_name, created_at, updated_at }`, with unix-second timestamps. `pubkey`, `challenge` and `signature` are plain hex: 32, 32 and 64 bytes.
+
+Writes are signed over a server challenge:
+
+- A challenge is 32 random bytes, valid for 300 seconds and consumed by one successful write. A rejected signature does not consume it.
+- The signed message is `tagged_hash("simplicity-lending/directory/v1", action || pubkey || challenge || display_name)`. `action` is one byte: `1` for put, `2` for delete. `pubkey` is the 32-byte x-only key, `challenge` is 32 bytes, and `display_name` is its UTF-8 bytes (empty for delete). The signature is BIP340.
+- Display names are 1 to 64 characters, with no leading or trailing whitespace and no control characters.
+
+Errors: `400` for a malformed pubkey, challenge, signature or name; `401` with `invalid signature`, or with `unknown, used or expired challenge`.

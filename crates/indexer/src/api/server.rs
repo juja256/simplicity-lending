@@ -9,6 +9,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::api::assets;
 use crate::api::borrowers;
+use crate::api::directory;
 use crate::api::events::{self, EventBus, spawn_indexer_events_listener};
 use crate::api::factories;
 use crate::api::health;
@@ -35,6 +36,7 @@ pub async fn run_server(listener: TcpListener, db_pool: PgPool) {
         .merge(factories::routes())
         .merge(offers::routes())
         .merge(private_offers::routes())
+        .merge(directory::routes())
         .merge(assets::routes());
 
     #[cfg(feature = "swagger-ui")]
