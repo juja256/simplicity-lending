@@ -5,7 +5,7 @@ use simplex::simplicityhl::elements::{AssetId, OutPoint, Txid, hashes::Hash, hex
 use crate::{
     db::DbTx,
     indexer::{PrivateOfferWatchEntry, WatchCache},
-    models::{PrivateOfferModel, PrivateOfferUtxoModel, PrivateUtxoType},
+    models::{PrivateOfferModel, PrivateOfferStatus, PrivateOfferUtxoModel, PrivateUtxoType},
 };
 
 #[tracing::instrument(name = "Loading unspent private offer UTXOs from DB", skip(db))]
@@ -133,6 +133,69 @@ pub async fn insert_private_offer_utxo(
     .await
     .map_err(|e| {
         tracing::error!("Failed to insert private offer UTXO to the DB: {e:?}");
+        e
+    })?;
+
+    Ok(())
+}
+
+#[tracing::instrument(
+    name = "Marking private offer UTXO as spent",
+    skip(sql_tx),
+    fields(outpoint = %outpoint, block_height = %block_height, spent_txid = %txid)
+)]
+pub async fn spend_private_offer_utxo(
+    sql_tx: &mut DbTx<'_>,
+    outpoint: &OutPoint,
+    block_height: u64,
+    txid: Txid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE private_offer_utxos
+        SET spent_txid = $1, spent_at_height = $2
+        WHERE txid = $3 AND vout = $4
+        "#,
+    )
+    .bind(txid.to_byte_array().to_vec())
+    .bind(block_height as i64)
+    .bind(outpoint.txid.to_byte_array().to_vec())
+    .bind(outpoint.vout as i32)
+    .execute(&mut **sql_tx)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to mark private offer UTXO as spent: {e:?}");
+        e
+    })?;
+
+    Ok(())
+}
+
+#[tracing::instrument(
+    name = "Updating private offer status in DB",
+    skip(sql_tx),
+    fields(offer_id = %offer_id, status = ?status, block_height = %block_height)
+)]
+pub async fn update_private_offer_status(
+    sql_tx: &mut DbTx<'_>,
+    offer_id: i64,
+    status: PrivateOfferStatus,
+    block_height: u64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE private_offers
+        SET current_status = $1, updated_at_height = $2
+        WHERE id = $3
+        "#,
+    )
+    .bind(status)
+    .bind(block_height as i64)
+    .bind(offer_id)
+    .execute(&mut **sql_tx)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to update private offer status: {e:?}");
         e
     })?;
 

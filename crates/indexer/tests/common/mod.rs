@@ -420,6 +420,96 @@ pub fn private_creation(
     PrivateCreation { tx, offer }
 }
 
+/// `OP_RETURN "burn"` with an explicit asset and value 1.
+pub fn burn_output(asset: AssetId) -> TxOut {
+    TxOut {
+        asset: confidential::Asset::Explicit(asset),
+        value: confidential::Value::Explicit(1),
+        script_pubkey: Script::new_op_return(b"burn"),
+        ..Default::default()
+    }
+}
+
+pub fn explicit_output(asset: AssetId, amount: u64) -> TxOut {
+    TxOut {
+        asset: confidential::Asset::Explicit(asset),
+        value: confidential::Value::Explicit(amount),
+        script_pubkey: non_op_return_script(),
+        ..Default::default()
+    }
+}
+
+fn creation_outpoint(c: &PrivateCreation, vout: u32) -> OutPoint {
+    OutPoint {
+        txid: c.tx.txid(),
+        vout,
+    }
+}
+
+fn asset(byte: u8) -> AssetId {
+    AssetId::from_slice(&[byte; 32]).expect("valid asset id")
+}
+
+/// Acceptance: spends the pending offer and the lender NFT coin; the lender NFT is not burned.
+pub fn acceptance_tx(c: &PrivateCreation) -> Transaction {
+    let terms = &c.offer.signed_terms.terms;
+    tx_with_inputs(
+        vec![creation_outpoint(c, 3), creation_outpoint(c, 1)],
+        vec![
+            explicit_output(asset(0x61), 1),
+            explicit_output(terms.principal_asset, terms.principal_amount),
+            explicit_output(terms.lender_nft, 1),
+        ],
+    )
+}
+
+/// Cancellation: burns both NFTs and returns the collateral.
+pub fn cancellation_tx(c: &PrivateCreation) -> Transaction {
+    let terms = &c.offer.signed_terms.terms;
+    tx_with_inputs(
+        vec![
+            creation_outpoint(c, 3),
+            creation_outpoint(c, 1),
+            creation_outpoint(c, 0),
+        ],
+        vec![
+            burn_output(terms.lender_nft),
+            burn_output(terms.borrower_nft),
+            explicit_output(asset(9), 5_000),
+        ],
+    )
+}
+
+/// Full repayment: burns the borrower NFT, pays the lender and returns the collateral.
+pub fn repayment_tx(c: &PrivateCreation, active: OutPoint) -> Transaction {
+    let terms = &c.offer.signed_terms.terms;
+    tx_with_inputs(
+        vec![creation_outpoint(c, 0), active],
+        vec![
+            burn_output(terms.borrower_nft),
+            explicit_output(terms.principal_asset, terms.repayment_amount),
+            explicit_output(asset(9), 5_000),
+        ],
+    )
+}
+
+/// Liquidation: burns the lender NFT and pays out the collateral.
+pub fn liquidation_tx(c: &PrivateCreation, active: OutPoint) -> Transaction {
+    let terms = &c.offer.signed_terms.terms;
+    tx_with_inputs(
+        vec![active, creation_outpoint(c, 1)],
+        vec![
+            burn_output(terms.lender_nft),
+            explicit_output(asset(9), 5_000),
+        ],
+    )
+}
+
+/// A plain spend of a claimable output.
+pub fn claim_tx(spent: OutPoint) -> Transaction {
+    tx_with_input(spent, vec![explicit_output(asset(0x62), 1)])
+}
+
 pub async fn block_processor(pool: &PgPool) -> anyhow::Result<BlockProcessor> {
     let registry = TrackerRegistry::load(
         pool,

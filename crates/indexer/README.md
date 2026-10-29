@@ -42,6 +42,20 @@ After the public trackers, every transaction is also checked for a private offer
 
 The indexer reads only this public data and never verifies or opens the offer, so a candidate may be fake and clients verify every offer themselves. It stores the whole consensus-encoded creation transaction, the nonce (33-byte compressed key), the marker's view tag and encrypted lender key, the first input outpoint and the two NFT asset ids in `private_offers` (status `pending`), and the output 3 UTXO as `pending_offer` in `private_offer_utxos`. Re-indexing a creation transaction is a no-op.
 
+#### Private Offer States
+
+An offer starts `pending`. Each spend of a tracked UTXO moves it on, and the spending transaction's output 0 decides which way:
+
+| Spent UTXO | Output 0 of the spending transaction | New status | New UTXOs |
+|---|---|---|---|
+| `pending_offer` | `OP_RETURN` burning the lender NFT (explicit asset) | `cancelled` | none |
+| `pending_offer` | anything else | `active` | `active_offer` at output 0, `principal` at output 1 |
+| `active_offer` | `OP_RETURN` burning the borrower NFT (explicit asset) | `repaid` | `repayment` at output 1 |
+| `active_offer` | anything else | `liquidated` | none |
+| `principal`, `repayment` | any | unchanged | none (the UTXO is marked spent) |
+
+`active` means the debt is outstanding. Repayments are a list of `repayment` UTXOs: one in this contract version, possibly more in a later one. A status change sets `updated_at_height`. These statuses mean something only for offers that verify: the indexer never checks the contract, so for a fake candidate they are meaningless. No SSE event is emitted for private offers, and clients refetch on `block_indexed`.
+
 #### `PreLock` Transaction Detection Rules
 
 To identify transactions creating `PreLock` covenants, the engine applies a strict validation sequence:
