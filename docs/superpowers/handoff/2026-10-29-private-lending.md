@@ -4,10 +4,21 @@ Read this file first, then the spec. It lists what exists, what comes next, and 
 
 - Spec (the binding design): `docs/superpowers/specs/2026-10-28-private-lending-design.md`
 - Plan, part A (executed): `docs/superpowers/plans/2026-10-28-private-lending-core-and-contract.md`
+- Plan, part B (executed): `docs/superpowers/plans/2026-10-29-private-lending-indexer.md`
 
 ## Where things stand
 
 Part A is done. It was built on branch `private-lending-v1`, merged into `main`, and pushed to the `fork` remote (`juja256/simplicity-lending`). The `origin` remote is BlockstreamResearch's upstream repository. Nothing was pushed there.
+
+Part B (the indexer) is done on branch `private-lending-indexer`. It is not merged and not pushed yet; the user decides. What it added:
+- **Core:** `directory_message`, `sign_directory_action` and `verify_directory_action`, with known-answer vectors. The wasm module signs directory writes with these.
+- **Detection:** `PrivateOffersTracker` (`crates/indexer/src/indexer/trackers/private_offers/`) finds candidates with `find_offer` plus a confidential nonce at output 3. It stores the light fields and the whole creation transaction.
+- **States:** pending, active, cancelled, repaid and liquidated, classified by the NFT burned at output 0 of the spending transaction. Claims show as spent `principal` and `repayment` UTXOs. There is no `claimed` status. Colliding spends of fake candidates cannot halt the indexer: UTXO inserts use `ON CONFLICT DO NOTHING`.
+- **API:**
+  - Candidates: `GET /private/candidates?from_height&to_height&limit&offset`, `/private/candidates/{creation_txid}` and `.../tx`.
+  - Directory: `POST /private/directory/challenges`, and `GET`, `PUT` and `DELETE` on `/private/directory/{pubkey}`, plus `GET /private/directory`.
+  - The shapes, byte orders and the sync recipe are in `crates/indexer/README.md`.
+- **Tests:** 51 core tests and 130 indexer tests pass. The indexer count includes 13 indexing, 5 candidates API and 8 directory tests.
 
 **`crates/private-lending-core`** depends only on `elements` 0.25.2 and `rand`, so it compiles to wasm in part C. It contains:
 - **Keys and secrets.** Lending keys derived from a wallet's SLIP-77 master blinding key. Per-offer secrets derived from the borrower–lender ECDH secret: view tag and blinders.
@@ -29,13 +40,12 @@ Part A is done. It was built on branch `private-lending-v1`, merged into `main`,
 
 ## What comes next, in order
 
-1. **Plan part B: the indexer.** Use superpowers:writing-plans with the spec, as for part A, then execute it subagent-driven.
-   - It extends the existing axum + Postgres indexer (`crates/indexer`).
-   - **Candidates.** Detect private offers with the core's `find_offer` (marker at output 2 with this program's id, from `PrivateLendingOffer::get_program_id()`). Store the offer outpoint, the nonce public key, the view tag, the encrypted lender key, the first input, the NFT ids and the height.
-   - **States.** Track pending, active, cancelled, repaid and liquidated from NFT movements.
-   - **API.** Serve light candidates, plus the full creation transaction on request. Verification needs the whole transaction (Ruling P7).
-   - **Lender directory.** Writes require a BIP340 signature over `tagged_hash("simplicity-lending/directory/v1", action ‖ pubkey ‖ challenge ‖ display_name)`, using single-use, expiring challenges.
-2. **Plan part C: the wasm module and front end.** It builds on the core crate and must carry these rules from part A:
+1. **Merge part B** once the user has reviewed the branch `private-lending-indexer`.
+2. **Plan part C: the wasm module and front end.** It builds on the core crate and must carry these rules from parts A and B:
+   - **The indexer is untrusted.** It may hide candidates or substitute directory keys. Verify every offer in the browser and show key fingerprints.
+   - **Render directory names bidi-isolated, next to the key fingerprint.** The indexer rejects control characters but not format characters, such as bidi overrides and zero-width characters.
+   - **Sync candidates by height.** The first page's `last_indexed_height` becomes `to_height` for the remaining pages, and the next sync starts at that height + 1. Txids and asset ids come as display-order hex.
+   - **Refresh on the existing `block_indexed` event.** There are no private-specific SSE events.
    - The borrower self-verifies the creation transaction before broadcast.
    - NFT issuance entropy is fresh for every build. A retry rebroadcasts the byte-identical transaction.
    - The UI shows the interest derived from the amounts (repayment − principal), never `interest_rate_bps` (Ruling P8).
@@ -103,6 +113,10 @@ All are test and doc polish:
 - **Core tests.** `cargo test -p private-lending-core`.
 - **Lint.** `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
 - **Indexer tests.** They need Postgres; see `.github/workflows/tests.yml` and `crates/indexer/scripts/init_db.sh`.
+  - Locally, the user starts Postgres in Docker, which needs sudo, and a git-ignored `crates/indexer/.env` points `DATABASE_URL` at it.
+  - Build and test with `SQLX_OFFLINE=true`: `SQLX_OFFLINE=true cargo test -p lending-indexer`. With the `.env` present, the existing `query!` macros would otherwise check against the live database.
+  - New SQL in part B uses runtime `sqlx::query*` only, so `.sqlx/` needs no regeneration.
+  - The `/home` disk fills up with stale test executables in `target/debug/deps`. Prune old copies when space runs low.
 - **The user's workflow:**
   - plans executed subagent-driven, with one commit per task;
   - pushes go to the `fork` remote, never to `origin`;
