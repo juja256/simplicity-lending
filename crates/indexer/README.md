@@ -34,6 +34,14 @@ For every block height, the engine executes the following steps:
     - If an input spends a participant-related output (NFT), the engine updates the participant registry for the associated offer.
     - If no existing state matches are found, the transaction is evaluated as a potential offer creation.
 
+#### Private Offer Detection
+
+After the public trackers, every transaction is also checked for a private offer (`private_offers` tracker). A transaction creates one when:
+1. Output 2 is an `OP_RETURN` carrying a marker of the private lending program (its 4-byte program id), and the NFT outputs 0 and 1 have explicit assets (`private_lending_core::find_offer`).
+2. Output 3, the pending offer, has a confidential nonce: the borrower's ephemeral public key.
+
+The indexer reads only this public data and never verifies or opens the offer, so a candidate may be fake and clients verify every offer themselves. It stores the whole consensus-encoded creation transaction, the nonce (33-byte compressed key), the marker's view tag and encrypted lender key, the first input outpoint and the two NFT asset ids in `private_offers` (status `pending`), and the output 3 UTXO as `pending_offer` in `private_offer_utxos`. Re-indexing a creation transaction is a no-op.
+
 #### `PreLock` Transaction Detection Rules
 
 To identify transactions creating `PreLock` covenants, the engine applies a strict validation sequence:

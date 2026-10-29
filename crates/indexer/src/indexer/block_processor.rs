@@ -37,7 +37,6 @@ impl BlockProcessor {
     pub async fn process_block(&mut self, block_height: u64) -> anyhow::Result<()> {
         let block_hash = self.client.get_block_hash_at_height(block_height).await?;
         let txids = self.client.get_block_txids(&block_hash).await?;
-        let tx_count = txids.len();
 
         let mut txs: Vec<Transaction> = Vec::with_capacity(txids.len());
 
@@ -45,13 +44,24 @@ impl BlockProcessor {
             txs.push(self.client.get_tx_by_id(txid).await?);
         }
 
+        self.index_block(block_height, block_hash, &txs).await
+    }
+
+    /// Indexes the transactions of one block in a single SQL transaction.
+    pub async fn index_block(
+        &mut self,
+        block_height: u64,
+        block_hash: String,
+        txs: &[Transaction],
+    ) -> anyhow::Result<()> {
+        let tx_count = txs.len();
         let mut sql_tx = self.db_pool.begin().await?;
         self.tracker_registry.begin_block();
 
         let process_result = async {
             for tx in txs {
                 self.tracker_registry
-                    .process_tx(&mut sql_tx, &tx, block_height)
+                    .process_tx(&mut sql_tx, tx, block_height)
                     .await?;
             }
 
