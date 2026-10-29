@@ -1,19 +1,15 @@
 import {
-  SimplicityArguments,
   SimplicityProgram,
   SimplicityTypedValue,
   SimplicityWitnessValues,
 } from '@lilbonekit/lwk-web'
 import { sources } from 'virtual:simplicity-sources'
 
-import { bytes32ToHex } from '@/utils/hex'
-import type { Bytes32, Uint32, Uint64 } from '@/utils/uint'
+import type { Uint32 } from '@/utils/uint'
 
-const ARGUMENTS = {
-  ASSET_ID: 'ASSET_ID',
-  ASSET_AMOUNT: 'ASSET_AMOUNT',
-  WITH_ASSET_BURN: 'WITH_ASSET_BURN',
-} as const
+import { type AssetAuthProgramParams, buildAssetAuthArguments } from './arguments'
+
+export { type AssetAuthProgramParams, buildAssetAuthArguments }
 
 const WITNESS = {
   INPUT_ASSET_INDEX: 'INPUT_ASSET_INDEX',
@@ -24,12 +20,6 @@ const WITNESS = {
 // broadcast tx (program + CMR + control block + witness data = 706 bytes), plus margin.
 export const ASSET_AUTH_MAX_WEIGHT_TO_SATISFY = 800
 
-export interface AssetAuthProgramParams {
-  assetId: Bytes32
-  assetAmount: Uint64
-  withAssetBurn: boolean
-}
-
 export interface AssetAuthWitnessParams {
   inputAssetIndex: Uint32
   outputAssetIndex: Uint32
@@ -37,13 +27,6 @@ export interface AssetAuthWitnessParams {
 
 export function loadAssetAuthProgram(params: AssetAuthProgramParams): SimplicityProgram {
   return SimplicityProgram.load(sources.asset_auth, buildAssetAuthArguments(params))
-}
-
-export function buildAssetAuthArguments(params: AssetAuthProgramParams): SimplicityArguments {
-  return new SimplicityArguments()
-    .addValue(ARGUMENTS.ASSET_ID, SimplicityTypedValue.fromU256Hex(bytes32ToHex(params.assetId)))
-    .addValue(ARGUMENTS.ASSET_AMOUNT, SimplicityTypedValue.fromU64(params.assetAmount))
-    .addValue(ARGUMENTS.WITH_ASSET_BURN, SimplicityTypedValue.fromBoolean(params.withAssetBurn))
 }
 
 export function buildAssetAuthWitness(params: AssetAuthWitnessParams): SimplicityWitnessValues {
