@@ -86,9 +86,18 @@ impl NewOffer {
     }
 
     /// How to blind the pending collateral, output `output_index` of the creation transaction.
+    /// The PSET output must carry exactly the blinding key of `collateralBlindingKey()`, or the
+    /// lender cannot open the offer and the collateral is stranded.
     #[wasm_bindgen(js_name = collateralBlinding)]
     pub fn collateral_blinding(&self, output_index: u32) -> PinnedBlinding {
         PinnedBlinding::from_core(self.inner.collateral_blinding(output_index as usize))
+    }
+
+    /// The blinding key the collateral output must carry: the lender's lifted key (33-byte
+    /// compressed public key, hex).
+    #[wasm_bindgen(js_name = collateralBlindingKey)]
+    pub fn collateral_blinding_key(&self) -> String {
+        crate::open::lifted(&self.inner.lender)
     }
 
     /// The lender's x-only public key, hex.

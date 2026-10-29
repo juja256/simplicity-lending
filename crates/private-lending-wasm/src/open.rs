@@ -5,7 +5,8 @@ use elements::hex::ToHex;
 use elements::{Transaction, confidential};
 use private_lending_core::{
     CreationError, OfferPinned, OfferTerms, OpenedOffer as CoreOpenedOffer, PinnedOutput,
-    PinnedRole as CorePinnedRole, open_creation_as_borrower, open_creation_as_lender,
+    PinnedRole as CorePinnedRole, lift_lending_key, open_creation_as_borrower,
+    open_creation_as_lender,
 };
 use wasm_bindgen::prelude::*;
 
@@ -54,6 +55,11 @@ impl OpenedOffer {
             .to_string();
         Ok(Self { offer, first_input })
     }
+}
+
+/// The lifted lending key, hex of the 33-byte compressed public key.
+pub(crate) fn lifted(key: &elements::secp256k1_zkp::XOnlyPublicKey) -> String {
+    encode_hex(&lift_lending_key(key).serialize())
 }
 
 fn parse_tx(hex: &str) -> Result<Transaction, String> {
@@ -155,6 +161,22 @@ impl OpenedOffer {
     #[wasm_bindgen(js_name = firstInput)]
     pub fn first_input(&self) -> String {
         self.first_input.clone()
+    }
+
+    /// The blinding key, the lifted lender key (33-byte compressed public key, hex), that the
+    /// creation transaction's collateral output carries. Outputs spent into the lender's
+    /// control must carry it.
+    #[wasm_bindgen(js_name = lenderBlindingKey)]
+    pub fn lender_blinding_key(&self) -> String {
+        lifted(&self.offer.lender)
+    }
+
+    /// The blinding key, the lifted borrower key (33-byte compressed public key, hex), that
+    /// the outputs of acceptance must carry: the PSET output must have exactly this blinding
+    /// key.
+    #[wasm_bindgen(js_name = borrowerBlindingKey)]
+    pub fn borrower_blinding_key(&self) -> String {
+        lifted(&self.offer.signed_terms.borrower)
     }
 
     /// The arguments of the offer's contract.
@@ -303,14 +325,14 @@ impl PinnedOutputInfo {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::scan::view_tag_matches;
     use lending_contracts::programs::private_lending::verify_offer_as_lender;
     use private_lending_core::find_offer;
     use simplex::provider::SimplicityNetwork;
 
-    fn fixture() -> serde_json::Value {
+    pub(crate) fn fixture() -> serde_json::Value {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../web/scripts/fixtures/private-lending-parity.json"
@@ -318,15 +340,15 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
-    fn key_of(fixture: &serde_json::Value, field: &str) -> LendingKey {
+    pub(crate) fn key_of(fixture: &serde_json::Value, field: &str) -> LendingKey {
         LendingKey::from_master_blinding_key(fixture[field].as_str().unwrap()).unwrap()
     }
 
-    fn creation_hex(fixture: &serde_json::Value) -> String {
+    pub(crate) fn creation_hex(fixture: &serde_json::Value) -> String {
         fixture["creation_tx"].as_str().unwrap().to_string()
     }
 
-    fn tx_of(hex: &str) -> Transaction {
+    pub(crate) fn tx_of(hex: &str) -> Transaction {
         parse_tx(hex).unwrap()
     }
 
@@ -448,19 +470,69 @@ mod tests {
         let found = find_offer(&tx, crate::program_id()).unwrap();
         let nonce = encode_hex(&found.offer.nonce.commitment().unwrap().serialize());
 
-        let colliding = (0u8..=255)
-            .map(|i| LendingKey::from_master_blinding_key(&encode_hex(&[i; 32])).unwrap())
+        // about one key in 256 shares the view tag, so search master blinding keys from a u16
+        // counter: 65536 candidates always contain one
+        let colliding = (0..=u16::MAX)
+            .map(|i| {
+                let mut mbk = [0; 32];
+                mbk[..2].copy_from_slice(&i.to_be_bytes());
+                LendingKey::from_master_blinding_key(&encode_hex(&mbk)).unwrap()
+            })
             .find(|key| {
                 key.x_only_public_key() != lender.x_only_public_key()
                     && view_tag_matches(key, &nonce, found.marker.view_tag).unwrap()
             })
-            .expect("a colliding key among 256 candidates");
+            .expect("a colliding key among 65536 candidates");
 
         let error = open_creation_as_lender_hex(&colliding, &hex).err().unwrap();
-        assert!(
-            error.starts_with("rewind-failed:") || error.starts_with("view-tag-mismatch:"),
-            "{error}"
-        );
+        assert!(error.starts_with("rewind-failed:"), "{error}");
+    }
+
+    #[test]
+    fn pending_collateral_blinding_is_bad_input() {
+        let fixture = fixture();
+        let lender = key_of(&fixture, "lender_master_blinding_key");
+        let offer = open_creation_as_lender_hex(&lender, &creation_hex(&fixture)).unwrap();
+        let error = offer
+            .pinned_blinding(PinnedRole::PendingCollateral, 0)
+            .err()
+            .unwrap();
+        assert!(error.starts_with("bad-input:"), "{error}");
+        assert!(offer.pinned_blinding(PinnedRole::Principal, 0).is_ok());
+    }
+
+    #[test]
+    fn lifted_keys_match_the_core() {
+        let fixture = fixture();
+        let lender = key_of(&fixture, "lender_master_blinding_key");
+        let borrower = key_of(&fixture, "borrower_master_blinding_key");
+        for key in [&lender, &borrower] {
+            let x_only = key.x_only_public_key();
+            let expected = private_lending_core::lift_lending_key(&key.inner().x_only_public_key());
+            assert_eq!(
+                crate::keys::lift_lending_key(&x_only).unwrap(),
+                encode_hex(&expected.serialize())
+            );
+        }
+        assert!(crate::keys::lift_lending_key("+a").is_err());
+    }
+
+    #[test]
+    fn the_creation_output_decodes_with_the_lenders_blinding_key() {
+        let fixture = fixture();
+        let hex = creation_hex(&fixture);
+        let lender = key_of(&fixture, "lender_master_blinding_key");
+        let borrower = key_of(&fixture, "borrower_master_blinding_key");
+
+        let as_lender = open_creation_as_lender_hex(&lender, &hex).unwrap();
+        let as_borrower = open_creation_as_borrower_hex(&borrower, &hex).unwrap();
+
+        let lender_key = crate::keys::lift_lending_key(&lender.x_only_public_key()).unwrap();
+        let borrower_key = crate::keys::lift_lending_key(&borrower.x_only_public_key()).unwrap();
+        assert_eq!(as_lender.lender_blinding_key(), lender_key);
+        assert_eq!(as_borrower.lender_blinding_key(), lender_key);
+        assert_eq!(as_lender.borrower_blinding_key(), borrower_key);
+        assert_eq!(as_borrower.borrower_blinding_key(), borrower_key);
     }
 
     #[test]

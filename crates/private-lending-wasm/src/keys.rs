@@ -1,6 +1,9 @@
 //! Lending keys in the browser.
 
-use private_lending_core::{LendingKey as CoreLendingKey, tagged_hash};
+use elements::secp256k1_zkp::XOnlyPublicKey;
+use private_lending_core::{
+    LendingKey as CoreLendingKey, lift_lending_key as core_lift, tagged_hash,
+};
 use wasm_bindgen::prelude::*;
 
 use crate::error::{bad_input, decode_hex_array, encode_hex};
@@ -53,6 +56,15 @@ impl LendingKey {
 }
 
 /// The fingerprint of an x-only public key given as 64 hex characters.
+/// The 33-byte compressed public key (hex) of an x-only lending key, the point with even Y. It is
+/// the blinding key of outputs addressed to that lending key.
+#[wasm_bindgen(js_name = liftLendingKey)]
+pub fn lift_lending_key(x_only_hex: &str) -> Result<String, String> {
+    let key = XOnlyPublicKey::from_slice(&decode_hex_array::<32>(x_only_hex)?)
+        .map_err(|e| bad_input(format!("not an x-only public key: {e}")))?;
+    Ok(encode_hex(&core_lift(&key).serialize()))
+}
+
 #[wasm_bindgen(js_name = keyFingerprint)]
 pub fn key_fingerprint(x_only_hex: &str) -> Result<String, String> {
     Ok(fingerprint(&decode_hex_array::<32>(x_only_hex)?))

@@ -137,6 +137,31 @@ async function main(): Promise<void> {
     )
   }
 
+  // The blinder strings of the wasm are in LWK's format: LWK secrets built from them commit to
+  // the same asset and value as the creation transaction's pending collateral output.
+  const pending = asLender.pinned(wasm.PinnedRole.PendingCollateral)
+  const lwkSecrets = new lwk.TxOutSecrets(
+    lwk.AssetId.fromString(pending.asset),
+    lwk.AssetBlindingFactor.fromString(pending.assetBlinder),
+    pending.amount,
+    lwk.ValueBlindingFactor.fromString(pending.valueBlinder),
+  )
+  equal(
+    'LWK asset commitment of the pending collateral',
+    lwkSecrets.assetCommitment(),
+    pending.assetCommitment,
+  )
+  equal(
+    'LWK value commitment of the pending collateral',
+    lwkSecrets.valueCommitment(),
+    pending.valueCommitment,
+  )
+  check(
+    'pending collateral commitments are those of creation output 3',
+    outputBytesHex(creationTx).includes(pending.assetCommitment) &&
+      outputBytesHex(creationTx).includes(pending.valueCommitment),
+  )
+
   const scripts = privateOfferScripts(sources, expected, network)
   equal(
     'principal output script hash',
@@ -165,6 +190,10 @@ async function main(): Promise<void> {
   )
 
   report('private lending parity: ok')
+}
+
+function outputBytesHex(tx: lwk.Transaction): string {
+  return Buffer.from(tx.toBytes()).toString('hex')
 }
 
 function tamperLastHexDigit(value: string): string {
