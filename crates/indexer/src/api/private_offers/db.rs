@@ -21,8 +21,8 @@ pub async fn fetch_candidates(
     limit: u64,
     offset: u64,
 ) -> Result<PrivateCandidateList, sqlx::Error> {
-    // Read the sync height first: rows indexed afterwards may appear in the list, but the
-    // reported height never runs ahead of what the client has been given.
+    // Read the sync height first: the `BETWEEN ... upper` bound excludes rows indexed
+    // afterwards, so only the status of a listed row can be newer than this height.
     let last_indexed =
         sqlx::query_scalar::<_, i64>("SELECT last_indexed_height FROM sync_state WHERE id = 1")
             .fetch_optional(db)

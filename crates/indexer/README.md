@@ -417,6 +417,12 @@ Details add `utxos`: `{ utxo_type, txid, vout, created_at_height, spent_txid, sp
 
 The list response carries `items`, `total` (candidates in the height range, ignoring paging), `limit`, `offset` and `last_indexed_height`. The indexer reads `last_indexed_height` first and returns only candidates up to it, so the height never runs ahead of the items. Before any block is indexed, `items` is empty and `last_indexed_height` is `null`.
 
+Operator and client notes:
+
+- `POST`, `PUT` and `DELETE` on `/private/directory...` are the API's first unauthenticated write endpoints. Rate-limit them at the reverse proxy.
+- Private offers in blocks indexed before this version are not backfilled, because the stored sync height wins over the configured start height.
+- Treat the indexer as untrusted. It can hide candidates or substitute directory keys, so verify every offer and show key fingerprints.
+
 Sync recipe:
 
 1. First sync: request pages with `from_height=0`. Fix `to_height` to the `last_indexed_height` of the first page and advance `offset` until `items` is empty. Test each candidate locally with `view_tag`, then the nonce.
