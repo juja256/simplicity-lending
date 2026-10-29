@@ -15,7 +15,7 @@ fn parse_nonce(nonce_hex: &str) -> Result<PublicKey, String> {
         .map_err(|e| bad_input(format!("the nonce is not a public key: {e}")))
 }
 
-fn parse<T: std::str::FromStr>(what: &str, value: &str) -> Result<T, String>
+pub(crate) fn parse<T: std::str::FromStr>(what: &str, value: &str) -> Result<T, String>
 where
     T::Err: std::fmt::Display,
 {
