@@ -16,9 +16,9 @@ mod open;
 mod scan;
 
 pub use blind::{InputSecret, PinnedBlinding, blind_pset};
-pub use build::{NewOffer, OfferTermsInput, issued_asset_id};
+pub use build::{NewOffer, OfferTermsInput, contract_hash_from_json, issued_asset_id};
 pub use directory::{DirectoryAction, sign_directory_action};
-pub use keys::{LendingKey, key_fingerprint};
+pub use keys::{LendingKey, confidential_address, fresh_issuer_pubkey, key_fingerprint};
 pub use open::{
     ContractArguments, OpenedOffer, PinnedOutputInfo, PinnedRole, open_creation_as_borrower_hex,
     open_creation_as_lender_hex,

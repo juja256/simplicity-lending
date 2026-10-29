@@ -116,6 +116,15 @@ pub fn issued_asset_id(outpoint: &str, contract_hash: &str) -> Result<String, St
     Ok(AssetId::from_entropy(AssetId::generate_asset_entropy(outpoint, contract_hash)).to_string())
 }
 
+/// The ELIP-100 contract hash of a contract's JSON (LWK's `Contract.toString()`), in the format
+/// `issuedAssetId` takes.
+#[wasm_bindgen(js_name = contractHashFromJson)]
+pub fn contract_hash_from_json(json: &str) -> Result<String, String> {
+    ContractHash::from_json_contract(json)
+        .map(|hash| hash.to_string())
+        .map_err(|e| bad_input(format!("not a contract: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,6 +298,26 @@ mod tests {
 
     fn hex_bytes(hex: &str) -> Vec<u8> {
         crate::error::decode_hex(hex).unwrap()
+    }
+
+    const CONTRACT_JSON: &str = r#"{"entity":{"domain":"example.com"},"issuer_pubkey":"02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"simplicity-lending/v1 borrower-nft","precision":0,"ticker":"SLB1234","version":0}"#;
+
+    #[test]
+    fn contract_hash_matches_elements() {
+        assert_eq!(
+            contract_hash_from_json(CONTRACT_JSON).unwrap(),
+            ContractHash::from_json_contract(CONTRACT_JSON)
+                .unwrap()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn bad_contract_json_is_rejected() {
+        for bad in ["", "{", "[]"] {
+            let error = contract_hash_from_json(bad).unwrap_err();
+            assert!(error.starts_with("bad-input:"), "{bad}: {error}");
+        }
     }
 
     #[test]
