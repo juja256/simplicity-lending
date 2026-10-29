@@ -10,6 +10,7 @@ mod lenders;
 mod offers;
 mod openapi;
 mod params;
+mod private_offers;
 mod query;
 pub mod server;
 mod state;

@@ -2,6 +2,7 @@
 
 use anyhow::Context;
 use lending_contracts::programs::{private_lending::PrivateLendingOffer, program::SimplexProgram};
+use lending_indexer::api::server::run_server;
 use lending_indexer::esplora_client::EsploraClient;
 use lending_indexer::indexer::{BlockProcessor, TrackerRegistry};
 use lending_indexer::indexer::{
@@ -13,12 +14,14 @@ use lending_indexer::models::{
     ParticipantType, PrivateOfferModel, PrivateOfferUtxoModel, UtxoType,
 };
 use private_lending_core::{LendingKey, NewOffer, OfferTerms};
+use serde_json::Value;
 use simplex::provider::SimplicityNetwork;
 use simplex::simplicityhl::elements::secp256k1_zkp::{PublicKey, SECP256K1};
 use simplex::simplicityhl::elements::{
     AssetId, LockTime, OutPoint, Script, Transaction, TxIn, TxOut, Txid, confidential, hashes::Hash,
 };
 use sqlx::PgPool;
+use tokio::net::TcpListener;
 use uuid::Uuid;
 
 /// Returns a ready-to-use pool with migrations applied and domain tables
@@ -577,4 +580,27 @@ pub async fn private_offer_count(pool: &PgPool) -> anyhow::Result<i64> {
             .fetch_one(pool)
             .await?,
     )
+}
+
+pub async fn start_api(pool: PgPool) -> anyhow::Result<(String, tokio::task::JoinHandle<()>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let handle = tokio::spawn(async move {
+        run_server(listener, pool).await;
+    });
+    // Socket is already listening after `bind`; kernel buffers early
+    // connection attempts, so no startup sleep is required.
+    Ok((format!("http://{addr}"), handle))
+}
+
+pub async fn response_json(response: reqwest::Response) -> anyhow::Result<Value> {
+    // `reqwest::Response::json` needs the `json` feature which this crate
+    // does not enable.
+    let body = response.text().await?;
+    Ok(serde_json::from_str(&body)?)
+}
+
+pub async fn get_json(http: &reqwest::Client, url: String) -> anyhow::Result<Value> {
+    let response = http.get(url).send().await?.error_for_status()?;
+    response_json(response).await
 }

@@ -129,7 +129,7 @@ where
 }
 
 /// Query params are always strings; `#[serde(flatten)]` does not coerce them to integers.
-fn deserialize_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+pub(crate) fn deserialize_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
