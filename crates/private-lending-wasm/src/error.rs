@@ -2,9 +2,6 @@
 //!
 //! No exported function builds a `JsValue` or `JsError`, since those panic outside wasm.
 
-// The opening functions that report these errors come in a later change.
-#![allow(dead_code)]
-
 use std::fmt::Display;
 
 use private_lending_core::{CreationError, OpenError};
@@ -40,11 +37,6 @@ pub(crate) fn creation_error_code(error: &CreationError) -> &'static str {
         CreationError::LenderNftNotUnique => "lender-nft-not-unique",
         CreationError::NftOutputMismatch => "nft-output-mismatch",
     }
-}
-
-/// The error string of an open error.
-pub(crate) fn open_error(error: OpenError) -> String {
-    err(open_error_code(&error), error)
 }
 
 /// The error string of a creation error.
