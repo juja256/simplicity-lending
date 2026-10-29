@@ -391,3 +391,35 @@ Overview sums (`collateral_locked`, `borrowings`) are per asset across the borro
 | `GET` | `/offers` | Paginated short offer list | offer list filters (see above) |
 | `GET` | `/offers/by-script` | Offer IDs (decimal strings) where `script_pubkey` matches an unspent participant UTXO (borrower or lender); response body is `["1", "2", …]` | `script_pubkey` (query param, hex) |
 | `GET` | `/offers/{id}` | Full offer details with latest participant UTXOs and unspent offer UTXOs; `{id}` is the numeric offer ID in the path | — |
+
+### Private lending
+
+Private offers are found by scanning. The indexer stores every transaction whose output 0..3 layout and marker match the private program, and serves them as candidates. It never holds keys and never reads terms. A fake candidate is possible, so clients verify every offer themselves.
+
+| Method | Endpoint | Description | Params |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/private/candidates` | Candidates ordered by `(created_at_height, id)` | `from_height` (default 0), `to_height` (capped at the sync height), `limit` (default 100, max 500; a larger value returns `400`), `offset` (default 0). A malformed parameter returns `400`. |
+| `GET` | `/private/candidates/{creation_txid}` | One candidate with its tracked UTXOs, ordered by creation height and `vout` | `404` if unknown, `400` if the txid is malformed |
+| `GET` | `/private/candidates/{creation_txid}/tx` | The creation transaction as `{ "tx_hex": ... }`, consensus-encoded | same errors |
+
+Candidate fields:
+
+- `creation_txid`: display-order hex. The offer is output 3 of this transaction.
+- `nonce`: the 33-byte compressed public key from output 3's nonce, plain hex.
+- `view_tag`: a number from 0 to 255.
+- `encrypted_lender_key`: 32 bytes, plain hex.
+- `first_input`: `{ txid, vout }`, with the txid in display order.
+- `borrower_nft_asset_id`, `lender_nft_asset_id`: display-order hex.
+- `status`: `pending`, `active`, `cancelled`, `repaid` or `liquidated`. For a fake candidate the status is meaningless.
+- `created_at_height`, `updated_at_height`: numbers.
+
+Details add `utxos`: `{ utxo_type, txid, vout, created_at_height, spent_txid, spent_at_height }`. `utxo_type` is `pending_offer`, `active_offer`, `principal` or `repayment`. `spent_txid` and `spent_at_height` are `null` while the UTXO is unspent. All txids are in display order.
+
+The list response carries `items`, `total` (candidates in the height range, ignoring paging), `limit`, `offset` and `last_indexed_height`. The indexer reads `last_indexed_height` first and returns only candidates up to it, so the height never runs ahead of the items. Before any block is indexed, `items` is empty and `last_indexed_height` is `null`.
+
+Sync recipe:
+
+1. First sync: request pages with `from_height=0`. Fix `to_height` to the `last_indexed_height` of the first page and advance `offset` until `items` is empty. Test each candidate locally with `view_tag`, then the nonce.
+2. Remember that `last_indexed_height` as `H`.
+3. Next sync: request `from_height=H+1`, paging the same way.
+4. To refresh known offers, refetch `/private/candidates/{creation_txid}`. Refetch on the `block_indexed` event.

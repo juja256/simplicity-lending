@@ -21,8 +21,15 @@ use crate::api::offers::dto::{
 };
 use crate::api::offers::handlers as offer_handlers;
 use crate::api::params::{OfferSortBy, SortDir};
+use crate::api::private_offers::dto::{
+    OutPointDto, PrivateCandidate, PrivateCandidateDetails, PrivateCandidateList,
+    PrivateCreationTx, PrivateUtxoDto,
+};
+use crate::api::private_offers::handlers as private_handlers;
 use crate::events::IndexerEvent;
-use crate::models::{FactoryStatus, OfferStatus, ParticipantType, UtxoType};
+use crate::models::{
+    FactoryStatus, OfferStatus, ParticipantType, PrivateOfferStatus, PrivateUtxoType, UtxoType,
+};
 
 use super::schemas::{ErrorBody, ErrorResponse, OfferDetailsResponseSchema};
 
@@ -41,6 +48,9 @@ use super::schemas::{ErrorBody, ErrorResponse, OfferDetailsResponseSchema};
         offer_handlers::list_offers,
         offer_handlers::get_ids_by_script,
         offer_handlers::get_details,
+        private_handlers::list_candidates,
+        private_handlers::get_candidate,
+        private_handlers::get_candidate_tx,
         borrower_handlers::get_overview_by_script,
         borrower_handlers::list_offers_by_script,
         lender_handlers::get_overview_by_script,
@@ -69,17 +79,26 @@ use super::schemas::{ErrorBody, ErrorResponse, OfferDetailsResponseSchema};
         OfferListResponse,
         OffersOverview,
         OfferSortBy,
+        OutPointDto,
         OfferStatus,
         OfferUtxoDto,
         OfferUtxoOutpointShort,
         ParticipantDto,
         ParticipantShort,
         ParticipantType,
+        PrivateCandidate,
+        PrivateCandidateDetails,
+        PrivateCandidateList,
+        PrivateCreationTx,
+        PrivateOfferStatus,
+        PrivateUtxoDto,
+        PrivateUtxoType,
         SortDir,
         UtxoType,
     )),
     tags(
         (name = "offers", description = "Lending offer queries"),
+        (name = "private", description = "Private lending candidate scan"),
         (name = "borrowers", description = "Borrower queries"),
         (name = "lenders", description = "Lender queries"),
         (name = "factories", description = "Issuance factory queries"),
@@ -111,6 +130,9 @@ mod tests {
         assert!(paths.contains_key("/offers/overview"));
         assert!(paths.contains_key("/offers/by-script"));
         assert!(paths.contains_key("/offers/{id}"));
+        assert!(paths.contains_key("/private/candidates"));
+        assert!(paths.contains_key("/private/candidates/{creation_txid}"));
+        assert!(paths.contains_key("/private/candidates/{creation_txid}/tx"));
         assert!(paths.contains_key("/borrowers/overview"));
         assert!(paths.contains_key("/borrowers/offers"));
         assert!(paths.contains_key("/lenders/overview"));

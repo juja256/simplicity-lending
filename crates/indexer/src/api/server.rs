@@ -15,6 +15,7 @@ use crate::api::health;
 use crate::api::lenders;
 use crate::api::offers;
 use crate::api::openapi;
+use crate::api::private_offers;
 use crate::api::state::AppState;
 
 pub async fn run_server(listener: TcpListener, db_pool: PgPool) {
@@ -33,6 +34,7 @@ pub async fn run_server(listener: TcpListener, db_pool: PgPool) {
         .merge(lenders::routes())
         .merge(factories::routes())
         .merge(offers::routes())
+        .merge(private_offers::routes())
         .merge(assets::routes());
 
     #[cfg(feature = "swagger-ui")]

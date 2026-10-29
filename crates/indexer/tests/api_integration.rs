@@ -2,7 +2,6 @@ mod common;
 
 use std::time::Duration;
 
-use lending_indexer::api::server::run_server;
 use lending_indexer::events::{INDEXER_EVENTS_CHANNEL, IndexerEvent};
 use lending_indexer::models::{OfferStatus, ParticipantType, UtxoType};
 use reqwest::StatusCode;
@@ -10,15 +9,14 @@ use serde_json::Value;
 use serial_test::serial;
 use simplex::simplicityhl::elements::OutPoint;
 use sqlx::PgPool;
-use tokio::net::TcpListener;
 use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::common::{
-    factory_model, offer_model, outpoint_from_offer_id, seed_factory_row, seed_offer_row,
-    seed_offer_utxo_row, seed_participant_utxo_row, seed_sync_state, spent_offer_utxo,
-    spent_participant, test_pool, unique_32_bytes_from_uuid, unspent_offer_utxo,
-    unspent_participant,
+    factory_model, get_json, offer_model, outpoint_from_offer_id, response_json, seed_factory_row,
+    seed_offer_row, seed_offer_utxo_row, seed_participant_utxo_row, seed_sync_state,
+    spent_offer_utxo, spent_participant, start_api, test_pool, unique_32_bytes_from_uuid,
+    unspent_offer_utxo, unspent_participant,
 };
 
 fn participant_script<'a>(item: &'a Value, role: &str) -> Option<&'a str> {
@@ -39,29 +37,6 @@ fn find_list_item(items: &Value, offer_id: i64) -> Option<&Value> {
         .as_array()?
         .iter()
         .find(|item| offer_id_from_json(item) == Some(offer_id))
-}
-
-async fn start_api(pool: PgPool) -> anyhow::Result<(String, tokio::task::JoinHandle<()>)> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
-    let handle = tokio::spawn(async move {
-        run_server(listener, pool).await;
-    });
-    // Socket is already listening after `bind`; kernel buffers early
-    // connection attempts, so no startup sleep is required.
-    Ok((format!("http://{addr}"), handle))
-}
-
-async fn response_json(response: reqwest::Response) -> anyhow::Result<Value> {
-    // `reqwest::Response::json` needs the `json` feature which this crate
-    // does not enable.
-    let body = response.text().await?;
-    Ok(serde_json::from_str(&body)?)
-}
-
-async fn get_json(http: &reqwest::Client, url: String) -> anyhow::Result<Value> {
-    let response = http.get(url).send().await?.error_for_status()?;
-    response_json(response).await
 }
 
 fn ids_from_objects(value: &Value) -> Vec<String> {
