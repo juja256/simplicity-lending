@@ -23,6 +23,8 @@ async function get(base: string, route: string): Promise<Response> {
 
 export interface Chain {
   fetchTx(txid: string): Promise<Transaction>
+  /** Each input's script witness, as esplora reports it: one hex string per stack item. */
+  fetchWitnesses(txid: string): Promise<string[][]>
   broadcast(hex: string): Promise<string>
   tipHeight(): Promise<number>
   waitForConfirmation(txid: string): Promise<void>
@@ -34,6 +36,12 @@ export function createChain(esploraApi: string): Chain {
       return Transaction.fromString(
         (await (await get(esploraApi, `/tx/${txid}/hex`)).text()).trim(),
       )
+    },
+    async fetchWitnesses(txid) {
+      const tx = (await (await get(esploraApi, `/tx/${txid}`)).json()) as {
+        vin: { witness?: string[] }[]
+      }
+      return tx.vin.map(input => input.witness ?? [])
     },
     async broadcast(hex) {
       const response = await fetch(`${esploraApi}/tx`, { method: 'POST', body: hex })

@@ -13,9 +13,12 @@
 // right before it builds.
 import * as lwk from '@lilbonekit/lwk-web'
 
+import { buildPrivateAcceptance } from '@/privateLending/flows/acceptance'
+import { buildPrincipalClaim } from '@/privateLending/flows/claimPrincipal'
 import { buildPrivateCreation } from '@/privateLending/flows/creation'
-import { inspectPset } from '@/privateLending/inspectPset'
-import { openAndVerifyOffer } from '@/privateLending/verify'
+import { outpointOf } from '@/privateLending/flows/shared'
+import { type InspectedOutput, inspectPset } from '@/privateLending/inspectPset'
+import { openAndVerifyOffer, type VerifiedOffer } from '@/privateLending/verify'
 import * as wasm from '@/wasm/private-lending/private_lending_wasm'
 
 import { createChain, submitStage } from './e2e/chain'
@@ -384,15 +387,375 @@ async function createDryStage(ctx: Context): Promise<void> {
   out('\ncreate-dry: ok (nothing signed, broadcast or saved)')
 }
 
+/** The `create` offer, fetched from chain and opened through the gate as `role`. */
+async function loadCreatedOffer(ctx: Context, role: Wallet): Promise<VerifiedOffer> {
+  const record = getRecord('create')
+  if (record?.status !== 'confirmed') throw new Error('no confirmed offer: run the create stage')
+  const wallet = ctx.wallets[role]
+  const creationTx = await ctx.chain.fetchTx(record.txid)
+  return openAndVerifyOffer(
+    flowDeps(wallet, ctx.chain),
+    role,
+    wallet.lendingKey,
+    creationTx.toString(),
+  )
+}
+
+/** Confirmed coins of `asset`, smallest first, until they hold `amount`. */
+function pickCoins(
+  wallet: SeedWallet,
+  asset: string,
+  amount: bigint,
+  label: string,
+): lwk.WalletTxOut[] {
+  const coins = wallet
+    .utxos()
+    .filter(utxo => utxo.height() !== undefined && utxo.unblinded().asset().toString() === asset)
+    .sort(compareValues)
+  const picked: lwk.WalletTxOut[] = []
+  let total = 0n
+  for (const coin of coins) {
+    if (total >= amount) break
+    picked.push(coin)
+    total += coin.unblinded().value()
+  }
+  if (total < amount) throw new Error(`${label}: needs ${amount} in confirmed coins, has ${total}`)
+  return picked
+}
+
+/** Whether an inspected output carries exactly the pinned commitments (`PinnedOutput::matches`). */
+function pinnedMatches(
+  pinned: wasm.PinnedOutputInfo,
+  output: InspectedOutput | undefined,
+): boolean {
+  return (
+    output !== undefined &&
+    output.assetCommitment === pinned.assetCommitment &&
+    output.amountCommitment === pinned.valueCommitment
+  )
+}
+
+function scriptHash(scriptHex: string): string {
+  return new lwk.Script(scriptHex).jet_sha256_hex()
+}
+
+/**
+ * The stage's own checks of a blinded acceptance PSET, independent of the builder's: the pinned
+ * outputs by their commitments and scripts, and the lender NFT to the lender, explicit.
+ */
+function assertAcceptanceOutputs(
+  pset: lwk.Pset,
+  offer: VerifiedOffer,
+  lenderNftScript: string,
+): void {
+  const opened = offer.opened
+  const [active, principal, lenderNft] = inspectPset(wasm, pset.toString()).outputs
+  const checks: [string, boolean][] = [
+    [
+      'output 0 is the active offer with the pinned active collateral',
+      pinnedMatches(opened.pinned(wasm.PinnedRole.ActiveCollateral), active) &&
+        active.script === offer.scripts.activeOffer.toString() &&
+        active.blindingKey === opened.borrowerBlindingKey() &&
+        active.ecdhPubkey !== null,
+    ],
+    [
+      'output 1 is the principal asset_auth with the pinned principal',
+      pinnedMatches(opened.pinned(wasm.PinnedRole.Principal), principal) &&
+        scriptHash(principal.script) === offer.scripts.principalOutputScriptHash &&
+        principal.blindingKey === opened.borrowerBlindingKey() &&
+        principal.ecdhPubkey !== null,
+    ],
+    [
+      'output 2 is the lender NFT to the lender, explicit',
+      lenderNft !== undefined &&
+        lenderNft.script === lenderNftScript &&
+        lenderNft.asset === opened.lenderNft() &&
+        lenderNft.amount === 1n &&
+        lenderNft.blindingKey === null &&
+        lenderNft.assetCommitment === null &&
+        lenderNft.amountCommitment === null,
+    ],
+  ]
+  for (const [what, ok] of checks) {
+    if (!ok) throw new Error(`acceptance PSET: not true that ${what}`)
+    out(`  ok: ${what}`)
+  }
+}
+
+/**
+ * The stage's own checks of a blinded principal claim PSET: the borrower NFT back to the borrower,
+ * explicit, and the principal to the borrower's wallet, blinded to it.
+ */
+function assertClaimOutputs(pset: lwk.Pset, offer: VerifiedOffer, receiver: lwk.Address): void {
+  const opened = offer.opened
+  const [nft, principal] = inspectPset(wasm, pset.toString()).outputs
+  const checks: [string, boolean][] = [
+    [
+      'output 0 is the borrower NFT to the borrower, explicit',
+      nft !== undefined &&
+        nft.script === receiver.toUnconfidential().scriptPubkey().toString() &&
+        nft.asset === opened.borrowerNft() &&
+        nft.amount === 1n &&
+        nft.blindingKey === null &&
+        nft.assetCommitment === null &&
+        nft.amountCommitment === null,
+    ],
+    [
+      'output 1 is the principal to the borrower, blinded',
+      principal !== undefined &&
+        principal.script === receiver.scriptPubkey().toString() &&
+        principal.asset === opened.principalAsset() &&
+        principal.amount === opened.principalAmount() &&
+        principal.blindingKey !== null &&
+        principal.assetCommitment !== null &&
+        principal.amountCommitment !== null &&
+        principal.ecdhPubkey !== null,
+    ],
+  ]
+  for (const [what, ok] of checks) {
+    if (!ok) throw new Error(`principal claim PSET: not true that ${what}`)
+    out(`  ok: ${what}`)
+  }
+}
+
+/** The weight a script witness adds: the stack's serialization, one weight unit per byte. */
+function witnessWeight(items: string[]): number {
+  const varint = (n: number): number => (n < 0xfd ? 1 : n <= 0xffff ? 3 : 5)
+  return items.reduce(
+    (total, item) => total + varint(item.length / 2) + item.length / 2,
+    varint(items.length),
+  )
+}
+
+/**
+ * The index of the wallet's receive address whose unconfidential script is `script`, up to the
+ * last unused one; undefined if none is.
+ */
+function walletAddressIndex(wallet: SeedWallet, script: string): number | undefined {
+  const lastUnused = wallet.wollet.address(null).index()
+  for (let index = 0; index <= lastUnused; index += 1) {
+    const address = wallet.wollet.address(index).address().toUnconfidential()
+    if (address.scriptPubkey().toString() === script) return index
+  }
+  return undefined
+}
+
+/** Prints the witness weight of each named input of a broadcast transaction. */
+async function reportWitnessWeights(ctx: Context, txid: string, names: string[]): Promise<void> {
+  const witnesses = await ctx.chain.fetchWitnesses(txid)
+  out('witness weights (serialized script witness, WU):')
+  names.forEach((name, index) => {
+    const items = witnesses[index] ?? []
+    const sizes = items.map(item => item.length / 2).join(' + ')
+    out(`  input ${index} ${name.padEnd(28)} ${witnessWeight(items)} (items ${sizes})`)
+  })
+}
+
+/**
+ * The lender's acceptance of the `create` offer: built, checked by the stage, signed and
+ * finalized (which runs the covenants). The caller saves and broadcasts it, or not.
+ */
+async function buildSignedAcceptance(
+  ctx: Context,
+  offer: VerifiedOffer,
+): Promise<{ hex: string; txid: string }> {
+  const { lender } = ctx.wallets
+  const lenderNftReceiver = new lwk.Address(lender.address())
+  const principalCoins = pickCoins(lender, TESTNET_ASSETS.principal, PRINCIPAL, 'lender principal')
+  const feeCoins = pickCoins(lender, TESTNET_ASSETS.policy, FEE_BUDGET, 'lender fee')
+  out(`principal coins ${principalCoins.map(outpointOf).join(', ')}`)
+  out(`fee coins       ${feeCoins.map(outpointOf).join(', ')}`)
+
+  const built = await buildPrivateAcceptance(flowDeps(lender, ctx.chain), offer, {
+    principalCoins,
+    feeCoins,
+    lenderNftReceiver,
+  })
+  out('blinded acceptance PSET:')
+  describeOutputs(built.pset, {
+    borrowerNft: offer.opened.borrowerNft(),
+    lenderNft: offer.opened.lenderNft(),
+  })
+  assertAcceptanceOutputs(
+    built.pset,
+    offer,
+    lenderNftReceiver.toUnconfidential().scriptPubkey().toString(),
+  )
+  const { finalizedTx, summary } = built.finalize(lender.signer.sign(built.pset))
+  out(
+    `finalized: active offer ${summary.activeOfferOutpoint}, principal ${summary.principalOutpoint}`,
+  )
+  return { hex: finalizedTx.toString(), txid: finalizedTx.txid().toString() }
+}
+
+async function acceptStage(ctx: Context): Promise<void> {
+  const offer = await loadCreatedOffer(ctx, 'lender')
+  let hex: string | undefined
+  if (!getRecord('accept')) {
+    requireStageNeed(ctx, 'accept')
+    hex = (await buildSignedAcceptance(ctx, offer)).hex
+  }
+  const txid = await submitStage(
+    ctx.chain,
+    'accept',
+    () => {
+      if (hex === undefined) throw new Error('unreachable: a record exists')
+      return hex
+    },
+    out,
+  )
+  await ctx.wallets.lender.sync()
+
+  // The lender NFT is an explicit output, which LWK does not list among the wallet's coins.
+  const acceptanceTx = await ctx.chain.fetchTx(txid)
+  const lenderNft = acceptanceTx.outputs[2]
+  if (
+    lenderNft?.asset()?.toString() !== offer.opened.lenderNft() ||
+    lenderNft.value() !== 1n ||
+    walletAddressIndex(ctx.wallets.lender, lenderNft.scriptPubkey().toString()) === undefined
+  ) {
+    throw new Error('the confirmed acceptance does not pay the lender NFT to the lender')
+  }
+  out(`lender NFT ${offer.opened.lenderNft()} at ${txid}:2 (a lender address)`)
+  await reportWitnessWeights(ctx, txid, [
+    'offer (OfferAcceptance)',
+    'lender NFT lock (script_auth)',
+  ])
+  out('\naccept: ok')
+}
+
+/** An acceptance built, checked, signed and finalized, but never saved or broadcast. */
+async function acceptDryStage(ctx: Context): Promise<void> {
+  requireStageNeed(ctx, 'accept')
+  const { txid } = await buildSignedAcceptance(ctx, await loadCreatedOffer(ctx, 'lender'))
+  out(`\naccept-dry: ok (${txid} finalized, not saved or broadcast)`)
+}
+
+/** The borrower NFT's outpoint: creation output 0, or the claim's output 0 once it confirmed. */
+function borrowerNftOutpoint(): string {
+  const claim = getRecord('claim-principal')
+  if (claim?.status === 'confirmed') return `${claim.txid}:0`
+  const create = getRecord('create')
+  if (!create) throw new Error('no offer: run the create stage')
+  return `${create.txid}:0`
+}
+
+function requireAcceptance(): string {
+  const accept = getRecord('accept')
+  if (accept?.status !== 'confirmed') throw new Error('no confirmed acceptance: run accept')
+  return accept.txid
+}
+
+async function buildSignedClaim(
+  ctx: Context,
+  offer: VerifiedOffer,
+  acceptTxid: string,
+): Promise<{ hex: string; txid: string }> {
+  const { borrower } = ctx.wallets
+  const receiver = new lwk.Address(borrower.address())
+  const feeCoins = pickCoins(borrower, TESTNET_ASSETS.policy, FEE_BUDGET, 'borrower fee')
+  out(`fee coins ${feeCoins.map(outpointOf).join(', ')}`)
+
+  const built = await buildPrincipalClaim(flowDeps(borrower, ctx.chain), offer, {
+    principalOutpoint: `${acceptTxid}:1`,
+    borrowerNftOutpoint: borrowerNftOutpoint(),
+    feeCoins,
+    receiver,
+  })
+  out('blinded principal claim PSET:')
+  describeOutputs(built.pset, {
+    borrowerNft: offer.opened.borrowerNft(),
+    lenderNft: offer.opened.lenderNft(),
+  })
+  assertClaimOutputs(built.pset, offer, receiver)
+  const { finalizedTx, summary } = built.finalize(borrower.signer.sign(built.pset))
+  out(`finalized: principal to ${summary.principalOutpoint}`)
+  return { hex: finalizedTx.toString(), txid: finalizedTx.txid().toString() }
+}
+
+/** Syncs until the wallet lists `outpoint` as a confirmed coin. */
+async function waitForWalletCoin(wallet: SeedWallet, outpoint: string): Promise<lwk.WalletTxOut> {
+  for (let attempt = 0; ; attempt += 1) {
+    await wallet.sync()
+    const coin = wallet
+      .utxos()
+      .find(utxo => outpointOf(utxo) === outpoint && utxo.height() !== undefined)
+    if (coin) return coin
+    if (attempt >= 11) throw new Error(`the wallet does not list ${outpoint} as a confirmed coin`)
+    await new Promise(resolve => setTimeout(resolve, 10_000))
+  }
+}
+
+async function claimPrincipalStage(ctx: Context): Promise<void> {
+  const { borrower } = ctx.wallets
+  const acceptTxid = requireAcceptance()
+  const offer = await loadCreatedOffer(ctx, 'borrower')
+  let hex: string | undefined
+  let before: bigint | undefined
+  if (!getRecord('claim-principal')) {
+    requireStageNeed(ctx, 'claim-principal')
+    before = confirmedBalance(borrower, TESTNET_ASSETS.principal)
+    hex = (await buildSignedClaim(ctx, offer, acceptTxid)).hex
+  }
+  const txid = await submitStage(
+    ctx.chain,
+    'claim-principal',
+    () => {
+      if (hex === undefined) throw new Error('unreachable: a record exists')
+      return hex
+    },
+    out,
+  )
+
+  const coin = await waitForWalletCoin(borrower, `${txid}:1`)
+  const secrets = coin.unblinded()
+  if (
+    secrets.asset().toString() !== offer.opened.principalAsset() ||
+    secrets.value() !== offer.opened.principalAmount()
+  ) {
+    throw new Error(`${txid}:1 holds ${secrets.value()} of ${secrets.asset().toString()}`)
+  }
+  out(`the borrower's wallet holds ${txid}:1, ${secrets.value()} TEST units`)
+  const after = confirmedBalance(borrower, TESTNET_ASSETS.principal)
+  if (before !== undefined) {
+    out(`borrower TEST (confirmed): ${before} -> ${after}`)
+    if (after - before !== offer.opened.principalAmount()) {
+      throw new Error(`the borrower's TEST balance rose by ${after - before}, not the principal`)
+    }
+  } else {
+    out(`borrower TEST (confirmed): ${after}`)
+  }
+  await reportWitnessWeights(ctx, txid, ['principal (asset_auth)', 'borrower NFT (p2wpkh)'])
+  out('\nclaim-principal: ok')
+}
+
+/** A principal claim built, checked, signed and finalized, but never saved or broadcast. */
+async function claimPrincipalDryStage(ctx: Context): Promise<void> {
+  requireStageNeed(ctx, 'claim-principal')
+  const offer = await loadCreatedOffer(ctx, 'borrower')
+  const { txid } = await buildSignedClaim(ctx, offer, requireAcceptance())
+  out(`\nclaim-principal-dry: ok (${txid} finalized, not saved or broadcast)`)
+}
+
 const STAGES: Record<string, (ctx: Context) => Promise<void>> = {
   wallets: walletsStage,
   'create-dry': createDryStage,
   create: createStage,
+  'accept-dry': acceptDryStage,
+  accept: acceptStage,
+  'claim-principal-dry': claimPrincipalDryStage,
+  'claim-principal': claimPrincipalStage,
 }
+
+/**
+ * The stages run when none is named: the real ones. The dry ones (`*-dry`) only rebuild and check
+ * a stage's transaction, from whatever coins the wallets hold now, so they run only by name.
+ */
+const DEFAULT_STAGES = Object.keys(STAGES).filter(name => !name.endsWith('-dry'))
 
 async function main(): Promise<void> {
   const requested = process.argv.slice(2)
-  const names = requested.length > 0 ? requested : Object.keys(STAGES)
+  const names = requested.length > 0 ? requested : DEFAULT_STAGES
   for (const name of names) {
     if (!STAGES[name]) {
       throw new Error(`unknown stage "${name}"; known: ${Object.keys(STAGES).join(', ')}`)

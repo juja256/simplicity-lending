@@ -1,31 +1,13 @@
-import {
-  SimplicityProgram,
-  SimplicityTypedValue,
-  SimplicityWitnessValues,
-} from '@lilbonekit/lwk-web'
+import { SimplicityProgram } from '@lilbonekit/lwk-web'
 import { sources } from 'virtual:simplicity-sources'
 
-import type { Bytes32, Uint32 } from '@/utils/uint'
+import type { Bytes32 } from '@/utils/uint'
 
 import { buildScriptAuthArguments } from './arguments'
+import { buildScriptAuthWitness, SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY } from './witness'
 
-export { buildScriptAuthArguments }
-
-const WITNESS = {
-  INPUT_SCRIPT_INDEX: 'INPUT_SCRIPT_INDEX',
-} as const
-
-// ExternalUtxo max-weight-to-satisfy for the ScriptAuth covenant input. Measured from real
-// broadcast txs (program + CMR + control block + witness data = 331 bytes), plus margin.
-export const SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY = 400
+export { buildScriptAuthArguments, buildScriptAuthWitness, SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY }
 
 export function loadScriptAuthProgram(scriptHash: Bytes32): SimplicityProgram {
   return SimplicityProgram.load(sources.script_auth, buildScriptAuthArguments(scriptHash))
-}
-
-export function buildScriptAuthWitness(inputScriptIndex: Uint32): SimplicityWitnessValues {
-  return new SimplicityWitnessValues().addValue(
-    WITNESS.INPUT_SCRIPT_INDEX,
-    SimplicityTypedValue.fromU32(inputScriptIndex),
-  )
 }
