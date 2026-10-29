@@ -61,3 +61,31 @@ export function loadEnv(): E2eEnv {
     lenderMnemonic: need('PRIVATE_E2E_LENDER_MNEMONIC'),
   }
 }
+
+// Amounts of the e2e run, in tL-sats (collateral) and TEST units (principal, repayment).
+export const COLLATERAL = 20_000n
+export const PRINCIPAL = 1_000n
+export const REPAYMENT = 1_100n
+/** tL-sats reserved per transaction. */
+export const FEE_BUDGET = 2_000n
+/** Transactions each wallet signs over a full run. */
+export const TX_COUNT_BORROWER = 10n
+export const TX_COUNT_LENDER = 6n
+
+/** What each wallet must hold, confirmed, to run every stage (three offers, two accepted). */
+export const NEEDS = {
+  borrower: {
+    lbtc: 3n * COLLATERAL + TX_COUNT_BORROWER * FEE_BUDGET,
+    test: REPAYMENT - PRINCIPAL,
+  },
+  lender: {
+    lbtc: TX_COUNT_LENDER * FEE_BUDGET,
+    test: 2n * PRINCIPAL,
+  },
+} as const
+
+/** Confirmed tL-BTC coins to split each wallet into, and their size. */
+export const SPLITS = {
+  borrower: { coins: 6, amount: 15_000n },
+  lender: { coins: 3, amount: 5_000n },
+} as const

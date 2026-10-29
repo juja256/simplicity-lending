@@ -1,6 +1,8 @@
 // Esplora access for the e2e run.
 import { Transaction } from '@lilbonekit/lwk-web'
 
+import { getRecord, saveRecord } from './state'
+
 const POLL_MS = 10_000
 const TIMEOUT_MS = 10 * 60_000
 
@@ -55,4 +57,51 @@ export function createChain(esploraApi: string): Chain {
     },
   }
   return chain
+}
+
+const ALREADY_KNOWN = /already|txn-same-nonwitness-data-in-mempool/i
+
+/**
+ * Runs one transaction stage so that a crash never makes a re-run build a different transaction.
+ * A `built`/`broadcast` record rebroadcasts its saved hex ("already known" counts as success) and
+ * waits for confirmation; only a stage without a record calls `build`.
+ */
+export async function submitStage(
+  chain: Chain,
+  stage: string,
+  build: () => string,
+  log: (line: string) => void,
+): Promise<string> {
+  let record = getRecord(stage)
+  if (record?.status === 'confirmed') {
+    log(`${stage}: ${record.txid} already confirmed`)
+    return record.txid
+  }
+  if (!record) {
+    const hex = build()
+    const txid = Transaction.fromString(hex).txid().toString()
+    record = { stage, txid, hex, status: 'built' }
+    saveRecord(record)
+  }
+  if (record.status === 'built') {
+    try {
+      await chain.broadcast(record.hex)
+    } catch (error) {
+      if (!ALREADY_KNOWN.test(error instanceof Error ? error.message : String(error))) throw error
+    }
+    record = { ...record, status: 'broadcast' }
+    saveRecord(record)
+    log(`${stage}: broadcast ${record.txid}`)
+  } else {
+    log(`${stage}: ${record.txid} already broadcast, rebroadcasting`)
+    try {
+      await chain.broadcast(record.hex)
+    } catch (error) {
+      if (!ALREADY_KNOWN.test(error instanceof Error ? error.message : String(error))) throw error
+    }
+  }
+  await chain.waitForConfirmation(record.txid)
+  saveRecord({ ...record, status: 'confirmed' })
+  log(`${stage}: confirmed`)
+  return record.txid
 }

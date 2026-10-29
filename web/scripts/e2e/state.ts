@@ -8,7 +8,7 @@ export interface StageRecord {
   stage: string
   txid: string
   hex: string
-  status: 'broadcast' | 'confirmed'
+  status: 'built' | 'broadcast' | 'confirmed'
 }
 
 const stateFile = path.join(webRoot, '.e2e-private/state.json')
@@ -27,9 +27,4 @@ export function saveRecord(record: StageRecord): void {
   all[record.stage] = record
   fs.mkdirSync(path.dirname(stateFile), { recursive: true })
   fs.writeFileSync(stateFile, `${JSON.stringify(all, null, 2)}\n`)
-}
-
-/** Whether the stage's transaction is already on chain or in the mempool. */
-export function isDone(stage: string): boolean {
-  return getRecord(stage) !== undefined
 }
