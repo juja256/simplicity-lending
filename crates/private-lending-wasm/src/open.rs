@@ -4,8 +4,8 @@ use elements::encode::deserialize;
 use elements::hex::ToHex;
 use elements::{Transaction, confidential};
 use private_lending_core::{
-    CreationError, OpenedOffer as CoreOpenedOffer, PinnedOutput, PinnedRole as CorePinnedRole,
-    open_creation_as_borrower, open_creation_as_lender,
+    CreationError, OfferPinned, OfferTerms, OpenedOffer as CoreOpenedOffer, PinnedOutput,
+    PinnedRole as CorePinnedRole, open_creation_as_borrower, open_creation_as_lender,
 };
 use wasm_bindgen::prelude::*;
 
@@ -41,8 +41,6 @@ pub struct OpenedOffer {
 }
 
 impl OpenedOffer {
-    // Used by the blinding functions of a later change.
-    #[allow(dead_code)]
     pub(crate) fn inner(&self) -> &CoreOpenedOffer {
         &self.offer
     }
@@ -162,28 +160,21 @@ impl OpenedOffer {
     /// The arguments of the offer's contract.
     #[wasm_bindgen(js_name = contractArguments)]
     pub fn contract_arguments(&self) -> ContractArguments {
-        let pinned = &self.offer.pinned;
-        let terms = &self.offer.signed_terms.terms;
-        ContractArguments {
-            borrower_nft_asset_id: encode_hex(&terms.borrower_nft.into_inner().0),
-            lender_nft_asset_id: encode_hex(&terms.lender_nft.into_inner().0),
-            pending_collateral_commitment: encode_hex(&pinned.pending_collateral.commitment_hash()),
-            active_collateral_commitment: encode_hex(&pinned.active_collateral.commitment_hash()),
-            principal_commitment: encode_hex(&pinned.principal.commitment_hash()),
-            repayment_commitment: encode_hex(&pinned.repayment.commitment_hash()),
-            loan_expiration_time: terms.loan_expiration_time,
-        }
+        ContractArguments::new(&self.offer.signed_terms.terms, &self.offer.pinned)
     }
 
     pub fn pinned(&self, role: PinnedRole) -> PinnedOutputInfo {
-        let pinned = &self.offer.pinned;
-        let output = match role {
-            PinnedRole::PendingCollateral => &pinned.pending_collateral,
-            PinnedRole::ActiveCollateral => &pinned.active_collateral,
-            PinnedRole::Principal => &pinned.principal,
-            PinnedRole::Repayment => &pinned.repayment,
-        };
-        PinnedOutputInfo::new(output)
+        PinnedOutputInfo::new(pinned_output(&self.offer.pinned, role))
+    }
+}
+
+/// The pinned output of a role.
+pub(crate) fn pinned_output(pinned: &OfferPinned, role: PinnedRole) -> &PinnedOutput {
+    match role {
+        PinnedRole::PendingCollateral => &pinned.pending_collateral,
+        PinnedRole::ActiveCollateral => &pinned.active_collateral,
+        PinnedRole::Principal => &pinned.principal,
+        PinnedRole::Repayment => &pinned.repayment,
     }
 }
 
@@ -198,6 +189,20 @@ pub struct ContractArguments {
     principal_commitment: String,
     repayment_commitment: String,
     loan_expiration_time: u32,
+}
+
+impl ContractArguments {
+    pub(crate) fn new(terms: &OfferTerms, pinned: &OfferPinned) -> Self {
+        Self {
+            borrower_nft_asset_id: encode_hex(&terms.borrower_nft.into_inner().0),
+            lender_nft_asset_id: encode_hex(&terms.lender_nft.into_inner().0),
+            pending_collateral_commitment: encode_hex(&pinned.pending_collateral.commitment_hash()),
+            active_collateral_commitment: encode_hex(&pinned.active_collateral.commitment_hash()),
+            principal_commitment: encode_hex(&pinned.principal.commitment_hash()),
+            repayment_commitment: encode_hex(&pinned.repayment.commitment_hash()),
+            loan_expiration_time: terms.loan_expiration_time,
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -250,7 +255,7 @@ pub struct PinnedOutputInfo {
 }
 
 impl PinnedOutputInfo {
-    fn new(output: &PinnedOutput) -> Self {
+    pub(crate) fn new(output: &PinnedOutput) -> Self {
         Self {
             asset: output.asset_id.to_string(),
             amount: output.amount,

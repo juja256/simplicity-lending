@@ -7,11 +7,17 @@
 
 use elements::hashes::{Hash, sha256};
 
+mod blind;
+mod build;
+mod directory;
 mod error;
 mod keys;
 mod open;
 mod scan;
 
+pub use blind::{InputSecret, PinnedBlinding, blind_pset};
+pub use build::{NewOffer, OfferTermsInput, issued_asset_id};
+pub use directory::{DirectoryAction, sign_directory_action};
 pub use keys::{LendingKey, key_fingerprint};
 pub use open::{
     ContractArguments, OpenedOffer, PinnedOutputInfo, PinnedRole, open_creation_as_borrower_hex,
