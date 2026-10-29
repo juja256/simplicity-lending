@@ -8,13 +8,29 @@
 // waits for its confirmation; it never builds that transaction again.
 //
 // Funding: every invocation first checks that both wallets hold the need-based minimums of
-// `NEEDS` (env.ts) in confirmed coins, and exits 1 naming each shortfall and the address to fund.
+// `NEEDS` (env.ts), less what recorded stages already spent (`STAGE_SPENDS`), in confirmed
+// coins, and exits 1 naming each shortfall and the address to fund.
 import * as lwk from '@lilbonekit/lwk-web'
 
+import { buildPrivateCreation } from '@/privateLending/flows/creation'
+import { readPsetFields } from '@/privateLending/psetFields'
+import { openAndVerifyOffer } from '@/privateLending/verify'
+import * as wasm from '@/wasm/private-lending/private_lending_wasm'
+
 import { createChain, submitStage } from './e2e/chain'
-import { FEE_BUDGET, loadEnv, NEEDS, SPLITS, TESTNET_ASSETS } from './e2e/env'
+import {
+  COLLATERAL,
+  FEE_BUDGET,
+  loadEnv,
+  NEEDS,
+  PRINCIPAL,
+  REPAYMENT,
+  SPLITS,
+  STAGE_SPENDS,
+  TESTNET_ASSETS,
+} from './e2e/env'
 import { getRecord } from './e2e/state'
-import { fingerprintGroups, initRuntime, type SeedWallet, seedWallet } from './e2e/wallet'
+import { fingerprintGroups, flowDeps, initRuntime, type SeedWallet, seedWallet } from './e2e/wallet'
 
 type Name = 'borrower' | 'lender'
 interface Context {
@@ -48,6 +64,18 @@ function confirmedLbtcCoins(wallet: SeedWallet): number {
     ).length
 }
 
+/** `NEEDS` less what the recorded stages already spent from the wallet. */
+function remainingNeed(name: Name): { lbtc: bigint; test: bigint } {
+  let { lbtc, test } = NEEDS[name]
+  for (const [stage, spends] of Object.entries(STAGE_SPENDS)) {
+    const spent = spends[name]
+    if (!spent || !getRecord(stage)) continue
+    lbtc -= spent.lbtc
+    test -= spent.test
+  }
+  return { lbtc: lbtc > 0n ? lbtc : 0n, test: test > 0n ? test : 0n }
+}
+
 /** Exits 1, naming each shortfall and the address to fund. */
 function requireFunding(ctx: Context): void {
   const short: string[] = []
@@ -55,7 +83,7 @@ function requireFunding(ctx: Context): void {
     const wallet = ctx.wallets[name]
     const lbtc = confirmedBalance(wallet, TESTNET_ASSETS.policy)
     const test = confirmedBalance(wallet, TESTNET_ASSETS.principal)
-    const need = NEEDS[name]
+    const need = remainingNeed(name)
     if (lbtc < need.lbtc) {
       short.push(`${name}: ${need.lbtc - lbtc} more tL-sats (has ${lbtc}, needs ${need.lbtc})`)
     }
@@ -133,8 +161,194 @@ async function resumeRecorded(ctx: Context, stage: string): Promise<boolean> {
   return true
 }
 
+/** Blocks from the tip to an e2e offer's loan expiration. */
+const OFFER_EXPIRY_BLOCKS = 1_440
+
+function compareValues(a: lwk.WalletTxOut, b: lwk.WalletTxOut): number {
+  const diff = a.unblinded().value() - b.unblinded().value()
+  return diff < 0n ? -1 : diff > 0n ? 1 : 0
+}
+
+/**
+ * The borrower's coins for a creation, all confirmed tL-BTC: the two smallest issue the NFTs,
+ * the next ones cover the collateral and the fee.
+ */
+function creationCoins(wallet: SeedWallet): {
+  firstInput: lwk.WalletTxOut
+  lenderNftCoin: lwk.WalletTxOut
+  collateralCoins: lwk.WalletTxOut[]
+} {
+  const coins = wallet
+    .utxos()
+    .filter(
+      utxo =>
+        utxo.height() !== undefined &&
+        utxo.unblinded().asset().toString() === TESTNET_ASSETS.collateral,
+    )
+    .sort(compareValues)
+  const [firstInput, lenderNftCoin, ...rest] = coins
+  const needed = COLLATERAL + FEE_BUDGET
+  const collateralCoins: lwk.WalletTxOut[] = []
+  let total = 0n
+  for (const coin of rest) {
+    if (total >= needed) break
+    collateralCoins.push(coin)
+    total += coin.unblinded().value()
+  }
+  if (!firstInput || !lenderNftCoin || total < needed) {
+    throw new Error(
+      `borrower: a creation needs two NFT coins and ${needed} tL-sats more in confirmed tL-BTC coins`,
+    )
+  }
+  return { firstInput, lenderNftCoin, collateralCoins }
+}
+
+/** The NFTs a creation PSET issues and the nonce of its pending offer, output 3. */
+function creationIdentity(pset: lwk.Pset): {
+  borrowerNft: string
+  lenderNft: string
+  nonce: string
+} {
+  const outputs = pset.outputs()
+  const nonce = readPsetFields(pset.toString()).outputs[3]?.ecdhPubkey
+  const borrowerNft = outputs[0]?.asset()?.toString()
+  const lenderNft = outputs[1]?.asset()?.toString()
+  if (!borrowerNft || !lenderNft || !nonce) {
+    throw new Error('the creation PSET has no explicit NFTs at outputs 0 and 1 or no nonce at 3')
+  }
+  return { borrowerNft, lenderNft, nonce }
+}
+
+/** One line per output: what it holds and how it is blinded. */
+function describeOutputs(pset: lwk.Pset, nfts: { borrowerNft: string; lenderNft: string }): void {
+  const names: Record<string, string> = {
+    [TESTNET_ASSETS.policy]: 'tL-BTC',
+    [TESTNET_ASSETS.principal]: 'TEST',
+    [nfts.borrowerNft]: 'borrower NFT',
+    [nfts.lenderNft]: 'lender NFT',
+  }
+  const fields = readPsetFields(pset.toString()).outputs
+  pset.outputs().forEach((output, index) => {
+    const field = fields[index]
+    const script = output.scriptPubkey()
+    const kind =
+      script.bytes().length === 0 ? 'fee' : script.isProvablyUnspendable() ? 'OP_RETURN' : 'script'
+    const asset = output.asset()?.toString() ?? '?'
+    const blinding = field?.blindingKey
+      ? `key ${field.blindingKey.slice(0, 10)}…, blinder ${field.blinderIndex ?? 'none'}, ` +
+        (field.valueCommitment ? `nonce ${field.ecdhPubkey?.slice(0, 10) ?? 'none'}…` : 'unblinded')
+      : 'explicit'
+    out(`  ${index} ${kind.padEnd(9)} ${output.amount()} ${names[asset] ?? asset} (${blinding})`)
+  })
+}
+
+/** A lending key's fingerprint from its x-only key, in groups of four. */
+function keyGroups(xOnly: string): string {
+  return (wasm.keyFingerprint(xOnly).match(/.{1,4}/g) ?? []).join(' ')
+}
+
+/**
+ * Builds a creation from the borrower to the lender twice from the same coins, checks that the
+ * rebuild is a fresh offer (Review Focus), then signs and finalizes the second build, which runs
+ * the borrower's self-check. The first build is never signed. Returns the finalized hex.
+ */
+async function buildCreation(ctx: Context, expiryBlocks: number): Promise<string> {
+  const { borrower, lender } = ctx.wallets
+  const deps = flowDeps(borrower, ctx.chain)
+  const tip = await ctx.chain.tipHeight()
+  const params = {
+    borrower: borrower.lendingKey,
+    lender: lender.lendingKey.xOnlyPublicKey(),
+    ...creationCoins(borrower),
+    collateralAmount: COLLATERAL,
+    principalAmount: PRINCIPAL,
+    repaymentAmount: REPAYMENT,
+    loanExpirationTime: tip + expiryBlocks,
+    borrowerNftReceiver: new lwk.Address(borrower.address()),
+  }
+
+  const discarded = creationIdentity((await buildPrivateCreation(deps, params)).pset)
+  const built = await buildPrivateCreation(deps, params)
+  const kept = creationIdentity(built.pset)
+  if (discarded.borrowerNft === kept.borrowerNft || discarded.lenderNft === kept.lenderNft) {
+    throw new Error('two creations built from the same coins issue the same NFTs')
+  }
+  if (discarded.nonce === kept.nonce) {
+    throw new Error('two creations built from the same coins share the output 3 nonce')
+  }
+  out('two builds from the same coins differ:')
+  out(`  borrower NFT ${discarded.borrowerNft} | ${kept.borrowerNft}`)
+  out(`  lender NFT   ${discarded.lenderNft} | ${kept.lenderNft}`)
+  out(`  nonce        ${discarded.nonce} | ${kept.nonce}`)
+  out('blinded creation PSET (second build):')
+  describeOutputs(built.pset, kept)
+
+  const { finalizedTx, summary } = await built.finalize(borrower.signer.sign(built.pset))
+  out(`borrower self-check: ok, offer ${summary.offerOutpoint}`)
+  return finalizedTx.toString()
+}
+
+/** Builds (only without a record), saves and broadcasts a creation; returns its txid. */
+async function submitCreation(ctx: Context, stage: string, expiryBlocks: number): Promise<string> {
+  const hex = getRecord(stage) ? undefined : await buildCreation(ctx, expiryBlocks)
+  const txid = await submitStage(
+    ctx.chain,
+    stage,
+    () => {
+      if (hex === undefined) throw new Error('unreachable: a record exists')
+      return hex
+    },
+    out,
+  )
+  await ctx.wallets.borrower.sync()
+  return txid
+}
+
+/** The lender fetches the creation, verifies it through the gate and shows its terms. */
+async function lenderView(ctx: Context, txid: string): Promise<void> {
+  const { borrower, lender } = ctx.wallets
+  const creationTx = await ctx.chain.fetchTx(txid)
+  const offer = await openAndVerifyOffer(
+    flowDeps(lender, ctx.chain),
+    'lender',
+    lender.lendingKey,
+    creationTx.toString(),
+  )
+  const opened = offer.opened
+  const expected: [string, unknown, unknown][] = [
+    ['borrower key', opened.borrowerPublicKey(), borrower.lendingKey.xOnlyPublicKey()],
+    ['lender key', opened.lenderPublicKey(), lender.lendingKey.xOnlyPublicKey()],
+    ['collateral asset', opened.collateralAsset(), TESTNET_ASSETS.collateral],
+    ['collateral', opened.collateralAmount(), COLLATERAL],
+    ['principal asset', opened.principalAsset(), TESTNET_ASSETS.principal],
+    ['principal', opened.principalAmount(), PRINCIPAL],
+    ['repayment', opened.repaymentAmount(), REPAYMENT],
+  ]
+  for (const [label, actual, wanted] of expected) {
+    if (actual !== wanted) throw new Error(`the lender sees ${label} ${actual}, not ${wanted}`)
+  }
+
+  out('the lender sees (verified):')
+  out(`  from         ${keyGroups(opened.borrowerPublicKey())}`)
+  out(`  collateral   ${opened.collateralAmount()} tL-sats`)
+  out(`  principal    ${opened.principalAmount()} TEST units`)
+  out(`  repayment    ${opened.repaymentAmount()} TEST units`)
+  out(`  interest     ${opened.repaymentAmount() - opened.principalAmount()} TEST units`)
+  out(`  expires at   block ${opened.loanExpirationTime()}`)
+  out(`  offer        ${txid}:3`)
+  out(`  borrower NFT ${opened.borrowerNft()}`)
+  out(`  lender NFT   ${opened.lenderNft()}`)
+}
+
+async function createStage(ctx: Context): Promise<void> {
+  const txid = await submitCreation(ctx, 'create', OFFER_EXPIRY_BLOCKS)
+  await lenderView(ctx, txid)
+  out('\ncreate: ok')
+}
+
 const STAGES: Record<string, (ctx: Context) => Promise<void>> = {
   wallets: walletsStage,
+  create: createStage,
 }
 
 async function main(): Promise<void> {

@@ -84,6 +84,18 @@ export const NEEDS = {
   },
 } as const
 
+/**
+ * What a recorded stage has taken out of a wallet's `NEEDS`. Later invocations check only what
+ * remains: a creation locks its collateral in the offer, so the borrower's balance drops below the
+ * full-run minimum, though it still covers every stage that is left.
+ */
+export const STAGE_SPENDS: Record<
+  string,
+  Partial<Record<'borrower' | 'lender', { lbtc: bigint; test: bigint }>>
+> = {
+  create: { borrower: { lbtc: COLLATERAL + FEE_BUDGET, test: 0n } },
+}
+
 /** Confirmed tL-BTC coins to split each wallet into, and their size. */
 export const SPLITS = {
   borrower: { coins: 6, amount: 15_000n },
