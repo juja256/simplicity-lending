@@ -129,7 +129,8 @@ const MESSAGE_PREFIX_LENGTH: usize = 64;
 /// Blinds the PSET's outputs: each pinned output with its fixed blinding factors, a range proof
 /// whose message is `asset id ‖ asset blinding factor ‖ extra data`, and blind value and asset
 /// proofs; then, with `blind_last`, the other outputs marked for blinding, the last of which
-/// balances the blinding factors.
+/// balances the blinding factors. A pinned output keeps its blinding key and its blinder index,
+/// so the blinded PSET round-trips through base64.
 ///
 /// `input_secrets` holds the secrets of the inputs by index, zero blinding factors for explicit
 /// inputs. At least one output besides the pinned ones must be marked for blinding (a blinding
@@ -155,12 +156,30 @@ pub fn blind_pset<R: RngCore + CryptoRng>(
     }
 
     let surjection_inputs = pset.surjection_inputs(input_secrets)?;
+    // blinding a pinned output clears its blinder index, which `blind_last` would take as "still
+    // to blind"; each is restored below
+    let blinder_indices: Vec<_> = pinned
+        .iter()
+        .map(|blinding| {
+            let index = blinding.output_index;
+            (
+                index,
+                pset.outputs().get(index).and_then(|o| o.blinder_index),
+            )
+        })
+        .collect();
 
     for blinding in pinned {
         blind_pinned_output(pset, &surjection_inputs, blinding, rng)?;
     }
 
     pset.blind_last(rng, SECP256K1, input_secrets)?;
+
+    // `blind_last` is done: give the pinned outputs their blinder index back, so that the PSET
+    // parses again (an output with a blinding key needs one)
+    for (index, blinder_index) in blinder_indices {
+        pset.outputs_mut()[index].blinder_index = blinder_index;
+    }
 
     Ok(())
 }
@@ -240,7 +259,7 @@ fn blind_pinned_output<R: RngCore + CryptoRng>(
     output.blind_asset_proof = Some(Box::new(blind_asset_proof));
     output.blind_value_proof = Some(Box::new(blind_value_proof));
     output.ecdh_pubkey = nonce.commitment().map(bitcoin::PublicKey::new);
-    // already blinded: `blind_last` must leave it alone
+    // already blinded: `blind_last` must leave it alone; `blind_pset` restores the index after
     output.blinder_index = None;
 
     // `blind_last` balances as if this output had zero blinding factors; the scalar corrects
@@ -535,6 +554,22 @@ mod tests {
             ));
             let asset_proof = output.blind_asset_proof.as_ref().unwrap();
             assert!(asset_proof.blind_asset_proof_verify(SECP256K1, asset_id, asset_comm));
+        }
+    }
+
+    #[test]
+    fn blinded_pset_round_trips_through_base64() {
+        use std::str::FromStr;
+
+        let (pset, pinned, _) = blinded_two_pinned();
+        let parsed = PartiallySignedTransaction::from_str(&pset.to_string()).unwrap();
+
+        for (index, pinned) in pinned.iter().enumerate() {
+            let (before, after) = (&pset.outputs()[index], &parsed.outputs()[index]);
+            assert_eq!(after.blinder_index, Some(0));
+            assert_eq!(after.blinding_key, before.blinding_key);
+            assert_eq!(after.asset_comm, Some(pinned.asset_generator()));
+            assert_eq!(after.amount_comm, before.amount_comm);
         }
     }
 

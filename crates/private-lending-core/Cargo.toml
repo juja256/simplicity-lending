@@ -12,3 +12,6 @@ workspace = true
 [dependencies]
 elements = "0.25.2"
 rand = "0.8"
+
+[dev-dependencies]
+elements = { version = "0.25.2", features = ["base64"] }
