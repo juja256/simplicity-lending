@@ -7,4 +7,5 @@ mod offer_cancellation_success_flows;
 mod offer_creation_flows;
 mod offer_full_repayment_success_flows;
 mod offer_liquidation_success_flows;
+mod parity_fixture;
 mod setup;
