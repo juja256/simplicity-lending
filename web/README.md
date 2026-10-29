@@ -42,6 +42,19 @@ This compiles `crates/private-lending-wasm` into `src/wasm/private-lending/` (gi
 after `pnpm install` and again whenever the Rust crates change: `pnpm dev`, `pnpm build` and
 `pnpm lint` need the generated package.
 
+## Check browser addresses against Rust
+
+```bash
+pnpm parity
+```
+
+Initialises LWK and the private lending wasm module in Node and compares them with
+`scripts/fixtures/private-lending-parity.json`, made from a regtest offer by the Rust code. It
+checks the program id, the contract arguments as lender and as borrower, the output script hashes,
+and the pending offer, active offer and lender NFT lock scripts, and that a tampered commitment is
+rejected. It must print `private lending parity: ok` before the browser's offer addresses are
+relied on (C2). Needs the wasm module built first.
+
 ## Run
 
 ```bash

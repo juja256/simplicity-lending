@@ -15,7 +15,8 @@
     "format:check": "prettier --check .",
     "build:wasm": "wasm-pack build ../crates/private-lending-wasm --release --target web --out-dir ../../web/src/wasm/private-lending --out-name private_lending_wasm && rm -f src/wasm/private-lending/.gitignore src/wasm/private-lending/package.json",
     "preview": "vite preview",
-    "add-icon": "tsx ./scripts/add-icon.ts"
+    "add-icon": "tsx ./scripts/add-icon.ts",
+    "parity": "tsx --tsconfig tsconfig.app.json scripts/check-private-lending-parity.ts"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",
