@@ -9,16 +9,28 @@ use elements::hashes::{Hash, sha256};
 
 mod error;
 mod keys;
+mod open;
 mod scan;
 
 pub use keys::{LendingKey, key_fingerprint};
+pub use open::{
+    ContractArguments, OpenedOffer, PinnedOutputInfo, PinnedRole, open_creation_as_borrower_hex,
+    open_creation_as_lender_hex,
+};
 pub use scan::{is_own_candidate, private_lending_program_id, view_tag_matches};
 
 /// The private lending program source, the same file the contracts crate compiles.
 const PROGRAM_SOURCE: &str = include_str!("../../contracts/simf/private_lending.simf");
 
-/// The program id as 8 hex characters: the first 4 bytes of the SHA-256 of the source.
-pub(crate) fn program_id_hex() -> String {
+/// The program id: the first 4 bytes of the SHA-256 of the source.
+pub(crate) fn program_id() -> [u8; 4] {
     let hash = sha256::Hash::hash(PROGRAM_SOURCE.as_bytes());
-    error::encode_hex(&hash.as_byte_array()[..4])
+    let mut id = [0; 4];
+    id.copy_from_slice(&hash.as_byte_array()[..4]);
+    id
+}
+
+/// The program id as 8 hex characters.
+pub(crate) fn program_id_hex() -> String {
+    error::encode_hex(&program_id())
 }

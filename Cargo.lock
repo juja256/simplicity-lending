@@ -2356,6 +2356,7 @@ dependencies = [
  "lending-contracts",
  "private-lending-core",
  "serde_json",
+ "smplx-std",
  "wasm-bindgen",
 ]
 
