@@ -11,6 +11,7 @@ mod blind;
 mod build;
 mod directory;
 mod error;
+mod inspect;
 mod keys;
 mod open;
 mod scan;
@@ -18,6 +19,7 @@ mod scan;
 pub use blind::{InputSecret, PinnedBlinding, blind_pset};
 pub use build::{NewOffer, OfferTermsInput, contract_hash_from_json, issued_asset_id};
 pub use directory::{DirectoryAction, sign_directory_action};
+pub use inspect::inspect_pset;
 pub use keys::{LendingKey, confidential_address, fresh_issuer_pubkey, key_fingerprint};
 pub use open::{
     ContractArguments, OpenedOffer, PinnedOutputInfo, PinnedRole, open_creation_as_borrower_hex,

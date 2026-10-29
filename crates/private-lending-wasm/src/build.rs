@@ -126,7 +126,7 @@ pub fn contract_hash_from_json(json: &str) -> Result<String, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::blind::{InputSecret, blind_pset};
     use crate::error::encode_hex;
@@ -187,7 +187,7 @@ mod tests {
         .unwrap()
     }
 
-    fn build_offer(principal: u64) -> Result<NewOffer, String> {
+    pub(crate) fn build_offer(principal: u64) -> Result<NewOffer, String> {
         NewOffer::build(
             &key(1),
             &key(2).x_only_public_key(),
@@ -223,9 +223,12 @@ mod tests {
         (input, txout)
     }
 
-    #[test]
-    fn new_offer_round_trips_through_opening() {
-        let offer = build_offer(10_000).unwrap();
+    /// The unblinded creation PSET of `offer`, in the creation layout (inputs 0 and 1 issue
+    /// the NFTs; outputs: borrower NFT, lender NFT, marker, pending collateral, change, fee), and
+    /// the secrets of its inputs.
+    pub(crate) fn creation_pset(
+        offer: &NewOffer,
+    ) -> (PartiallySignedTransaction, Vec<InputSecret>) {
         let terms = offer.inner.signed_terms.terms;
 
         let mut pset = PartiallySignedTransaction::new_v2();
@@ -265,6 +268,13 @@ mod tests {
         ] {
             pset.add_output(output);
         }
+        (pset, secrets)
+    }
+
+    #[test]
+    fn new_offer_round_trips_through_opening() {
+        let offer = build_offer(10_000).unwrap();
+        let (pset, secrets) = creation_pset(&offer);
 
         let blinded = blind_pset(
             &pset.to_string(),

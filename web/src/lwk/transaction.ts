@@ -1,7 +1,6 @@
 import {
   type AssetId,
   type OutPoint,
-  type Pset,
   type Script,
   Transaction,
   type TxOut,
@@ -9,14 +8,7 @@ import {
 
 import { fetchTxRaw } from '@/api/esplora/methods'
 
-// PSBT/PSET roles (BIP174): Creator+Constructor+Updater have already run by the time a
-// domain hook hands back `pset` — it has inputs, outputs, and signing data, just no
-// signature yet. `finalize` covers Input Finalizer + Transaction Extractor, run after
-// the caller signs (Signer role) in between.
-export interface UpdatedPset<TSummary> {
-  pset: Pset
-  finalize: (signedPset: Pset) => { finalizedTx: Transaction; summary: TSummary }
-}
+export type { AsyncUpdatedPset, UpdatedPset } from './updatedPset'
 
 export async function fetchTransaction(outpoint: OutPoint): Promise<Transaction> {
   return Transaction.fromBytes(await fetchTxRaw(outpoint.txid().toString()))
