@@ -9,7 +9,7 @@ use crate::{
     db::DbTx,
     indexer::{
         AssetRegistration, FactoriesTracker, FactoryAuthsTracker, FactoryCreationsTracker,
-        OfferCreationsTracker, OfferParticipantsTracker, OffersTracker,
+        OfferCreationsTracker, OfferParticipantsTracker, OffersTracker, PrivateOffersTracker,
     },
 };
 
@@ -20,6 +20,7 @@ pub struct TrackerRegistry {
     offers: OffersTracker,
     participants: OfferParticipantsTracker,
     creations: OfferCreationsTracker,
+    private_offers: PrivateOffersTracker,
 }
 
 impl TrackerRegistry {
@@ -46,6 +47,7 @@ impl TrackerRegistry {
                 network,
                 asset_registration,
             ),
+            private_offers: PrivateOffersTracker::load(db_pool).await?,
         })
     }
 
@@ -54,6 +56,7 @@ impl TrackerRegistry {
         self.factory_auths.begin_block();
         self.offers.begin_block();
         self.participants.begin_block();
+        self.private_offers.begin_block();
     }
 
     pub fn commit_block(&mut self) {
@@ -61,6 +64,7 @@ impl TrackerRegistry {
         self.factory_auths.commit_block();
         self.offers.commit_block();
         self.participants.commit_block();
+        self.private_offers.commit_block();
     }
 
     pub fn abort_block(&mut self) {
@@ -68,6 +72,7 @@ impl TrackerRegistry {
         self.factory_auths.abort_block();
         self.offers.abort_block();
         self.participants.abort_block();
+        self.private_offers.abort_block();
     }
 
     #[tracing::instrument(
@@ -119,6 +124,10 @@ impl TrackerRegistry {
                 )
                 .await?;
         }
+
+        self.private_offers
+            .process_tx(sql_tx, tx, block_height)
+            .await?;
 
         Ok(())
     }

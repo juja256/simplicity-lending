@@ -1805,6 +1805,7 @@ dependencies = [
  "futures-util",
  "hex",
  "lending-contracts",
+ "private-lending-core",
  "reqwest",
  "serde",
  "serde_json",
