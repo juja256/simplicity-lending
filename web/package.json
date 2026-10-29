@@ -13,6 +13,7 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "build:wasm": "wasm-pack build ../crates/private-lending-wasm --release --target web --out-dir ../../web/src/wasm/private-lending --out-name private_lending_wasm && rm -f src/wasm/private-lending/.gitignore src/wasm/private-lending/package.json",
     "preview": "vite preview",
     "add-icon": "tsx ./scripts/add-icon.ts"
   },

@@ -1,0 +1,23 @@
+[package]
+name = "private-lending-wasm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "WebAssembly module for Simplicity Lending private offers, used by the web app"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+elements = "0.25.2"
+getrandom = { version = "0.2", features = ["js"] }
+private-lending-core = { path = "../private-lending-core" }
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+lending-contracts = { path = "../contracts" }
+serde_json = "1"
