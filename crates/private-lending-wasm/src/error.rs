@@ -4,6 +4,7 @@
 
 use std::fmt::Display;
 
+use elements::hex::{FromHex, ToHex};
 use private_lending_core::{CreationError, OpenError};
 
 /// The error string `<code>: <message>`.
@@ -46,14 +47,7 @@ pub(crate) fn creation_error(error: CreationError) -> String {
 
 /// Decodes hex of either case, ignoring surrounding whitespace.
 pub(crate) fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
-    let hex = hex.trim();
-    if !hex.is_ascii() || !hex.len().is_multiple_of(2) {
-        return Err(bad_input("not a hex string"));
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| bad_input("not a hex string")))
-        .collect()
+    Vec::<u8>::from_hex(hex.trim()).map_err(|_| bad_input("not a hex string"))
 }
 
 /// Decodes exactly `N` bytes of hex.
@@ -65,7 +59,7 @@ pub(crate) fn decode_hex_array<const N: usize>(hex: &str) -> Result<[u8; N], Str
 
 /// Lowercase hex of the bytes.
 pub(crate) fn encode_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.to_hex()
 }
 
 #[cfg(test)]
@@ -88,5 +82,13 @@ mod tests {
         assert_eq!(encode_hex(&[0x0a, 0xff]), "0aff");
         assert!(decode_hex("abc").is_err());
         assert!(decode_hex_array::<2>("0a").is_err());
+    }
+
+    #[test]
+    fn signs_and_odd_digits_are_not_hex() {
+        for bad in ["+a", "+a+b", "-a", "+abc", "0x"] {
+            let error = decode_hex(bad).unwrap_err();
+            assert!(error.starts_with("bad-input:"), "{bad}: {error}");
+        }
     }
 }

@@ -3,7 +3,7 @@
 use private_lending_core::{DirectoryAction as CoreDirectoryAction, sign_directory_action as sign};
 use wasm_bindgen::prelude::*;
 
-use crate::error::{decode_hex_array, encode_hex};
+use crate::error::{bad_input, decode_hex_array, encode_hex};
 use crate::keys::LendingKey;
 
 /// What a directory signature authorizes.
@@ -34,6 +34,11 @@ pub fn sign_directory_action(
     challenge_hex: &str,
     display_name: &str,
 ) -> Result<String, String> {
+    if action == DirectoryAction::Delete && !display_name.is_empty() {
+        return Err(bad_input(
+            "a delete is signed over an empty name, as the indexer verifies it",
+        ));
+    }
     let challenge = decode_hex_array::<32>(challenge_hex)?;
     let signature = sign(key.inner(), action.into(), &challenge, display_name);
     Ok(encode_hex(signature.as_ref()))
@@ -81,5 +86,15 @@ mod tests {
         let key = LendingKey::from_master_blinding_key(&"07".repeat(32)).unwrap();
         let error = sign_directory_action(&key, DirectoryAction::Put, "abcd", "Acme").unwrap_err();
         assert!(error.starts_with("bad-input:"), "{error}");
+    }
+
+    #[test]
+    fn delete_with_a_name_is_bad_input() {
+        let key = LendingKey::from_master_blinding_key(&"07".repeat(32)).unwrap();
+        let challenge_hex = crate::error::encode_hex(&[0x5a; 32]);
+        let error = sign_directory_action(&key, DirectoryAction::Delete, &challenge_hex, "Acme")
+            .unwrap_err();
+        assert!(error.starts_with("bad-input:"), "{error}");
+        assert!(sign_directory_action(&key, DirectoryAction::Delete, &challenge_hex, "").is_ok());
     }
 }
