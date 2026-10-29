@@ -29,3 +29,5 @@ CREATE TABLE private_offer_utxos (
     spent_at_height BIGINT,
     PRIMARY KEY (txid, vout)
 );
+
+CREATE INDEX idx_private_offer_utxos_offer_id ON private_offer_utxos (offer_id);

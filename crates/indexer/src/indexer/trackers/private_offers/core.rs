@@ -3,7 +3,7 @@ use sqlx::PgPool;
 use lending_contracts::programs::{private_lending::PrivateLendingOffer, program::SimplexProgram};
 use private_lending_core::find_offer;
 use simplex::simplicityhl::elements::{
-    AssetId, OutPoint, Transaction, TxOut, Txid,
+    AssetId, OutPoint, Transaction, TxOut,
     confidential::{Asset, Nonce},
     encode::serialize,
     hashes::Hash,
@@ -162,18 +162,18 @@ impl PrivateOffersTracker {
                     .await?;
                     self.add_utxo(
                         sql_tx,
+                        tx,
                         entry,
                         PrivateUtxoType::ActiveOffer,
-                        txid,
                         0,
                         block_height,
                     )
                     .await?;
                     self.add_utxo(
                         sql_tx,
+                        tx,
                         entry,
                         PrivateUtxoType::Principal,
-                        txid,
                         1,
                         block_height,
                     )
@@ -192,9 +192,9 @@ impl PrivateOffersTracker {
                     .await?;
                     self.add_utxo(
                         sql_tx,
+                        tx,
                         entry,
                         PrivateUtxoType::Repayment,
-                        txid,
                         1,
                         block_height,
                     )
@@ -221,16 +221,25 @@ impl PrivateOffersTracker {
     }
 
     /// Records a new UTXO of the offer created by `txid` and starts watching it.
+    ///
+    /// The indexer never verifies candidates, so transitions must tolerate hostile
+    /// transactions. One transaction can spend several tracked UTXOs whose transitions create
+    /// the same outpoint: the first spend owns it, and a later one adds nothing. An output the
+    /// transaction lacks is not recorded either.
     async fn add_utxo(
         &mut self,
         sql_tx: &mut DbTx<'_>,
+        tx: &Transaction,
         entry: PrivateOfferWatchEntry,
         utxo_type: PrivateUtxoType,
-        txid: Txid,
         vout: u32,
         block_height: u64,
     ) -> anyhow::Result<()> {
-        insert_private_offer_utxo(
+        let txid = tx.txid();
+        if vout as usize >= tx.output.len() {
+            return Ok(());
+        }
+        let inserted = insert_private_offer_utxo(
             sql_tx,
             &PrivateOfferUtxoModel {
                 offer_id: entry.offer_id,
@@ -243,10 +252,12 @@ impl PrivateOffersTracker {
             },
         )
         .await?;
-        self.cache.insert(
-            OutPoint { txid, vout },
-            PrivateOfferWatchEntry { utxo_type, ..entry },
-        );
+        if inserted {
+            self.cache.insert(
+                OutPoint { txid, vout },
+                PrivateOfferWatchEntry { utxo_type, ..entry },
+            );
+        }
 
         Ok(())
     }

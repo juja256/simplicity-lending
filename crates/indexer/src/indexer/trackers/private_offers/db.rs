@@ -114,12 +114,13 @@ pub async fn insert_private_offer(
 pub async fn insert_private_offer_utxo(
     sql_tx: &mut DbTx<'_>,
     utxo: &PrivateOfferUtxoModel,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
         r#"
         INSERT INTO private_offer_utxos (
             offer_id, utxo_type, txid, vout, created_at_height, spent_txid, spent_at_height
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (txid, vout) DO NOTHING
         "#,
     )
     .bind(utxo.offer_id)
@@ -136,7 +137,7 @@ pub async fn insert_private_offer_utxo(
         e
     })?;
 
-    Ok(())
+    Ok(result.rows_affected() == 1)
 }
 
 #[tracing::instrument(

@@ -11,10 +11,10 @@ use simplex::simplicityhl::elements::{
 };
 
 use crate::common::{
-    acceptance_tx, block_processor, cancellation_tx, claim_tx, index_block, lending_key,
-    liquidation_tx, normal_output, outpoint_with_txid_byte, private_creation, private_offer_count,
-    private_offer_row, private_program_id, private_utxo_rows, repayment_tx, test_pool,
-    tx_with_input,
+    acceptance_tx, block_processor, burn_output, cancellation_tx, claim_tx, index_block,
+    lending_key, liquidation_tx, normal_output, outpoint_with_txid_byte, private_creation,
+    private_offer_count, private_offer_row, private_program_id, private_utxo_rows, repayment_tx,
+    test_pool, tx_with_input, tx_with_inputs,
 };
 
 #[tokio::test]
@@ -409,5 +409,165 @@ async fn tracking_survives_restarts() -> anyhow::Result<()> {
 
     let row = private_offer_row(&pool, c.tx.txid()).await?.expect("row");
     assert_eq!(row.current_status, PrivateOfferStatus::Repaid);
+    Ok(())
+}
+
+fn second_creation() -> crate::common::PrivateCreation {
+    private_creation(
+        &lending_key(1),
+        &lending_key(2),
+        outpoint_with_txid_byte(0x32, 8),
+    )
+}
+
+async fn utxo_count(pool: &sqlx::PgPool, outpoint: OutPoint) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM private_offer_utxos WHERE txid = $1 AND vout = $2",
+    )
+    .bind(outpoint.txid.to_byte_array().to_vec())
+    .bind(outpoint.vout as i32)
+    .fetch_one(pool)
+    .await?)
+}
+
+#[tokio::test]
+#[serial]
+async fn spending_two_candidates_in_one_transaction_does_not_halt_indexing() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let mut processor = block_processor(&pool).await?;
+    let a = creation();
+    let b = second_creation();
+    index_block(&mut processor, 100, &[a.tx.clone(), b.tx.clone()]).await?;
+
+    let t = tx_with_inputs(
+        vec![outpoint(&a.tx, 3), outpoint(&b.tx, 3)],
+        vec![normal_output(), normal_output()],
+    );
+    index_block(&mut processor, 101, std::slice::from_ref(&t)).await?;
+
+    let row_a = private_offer_row(&pool, a.tx.txid()).await?.expect("a");
+    let row_b = private_offer_row(&pool, b.tx.txid()).await?.expect("b");
+    assert_eq!(row_a.current_status, PrivateOfferStatus::Active);
+    assert_eq!(row_b.current_status, PrivateOfferStatus::Active);
+    for vout in 0..2 {
+        assert_eq!(utxo_count(&pool, outpoint(&t, vout)).await?, 1);
+        assert!(
+            private_utxo_rows(&pool, row_a.id)
+                .await?
+                .iter()
+                .any(|u| u.txid == t.txid().to_byte_array().to_vec() && u.vout == vout as i32)
+        );
+    }
+
+    let c = private_creation(
+        &lending_key(1),
+        &lending_key(2),
+        outpoint_with_txid_byte(0x33, 9),
+    );
+    index_block(&mut processor, 102, std::slice::from_ref(&c.tx)).await?;
+    assert!(private_offer_row(&pool, c.tx.txid()).await?.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn acceptance_and_repayment_colliding_in_one_transaction_does_not_halt_indexing()
+-> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let mut processor = block_processor(&pool).await?;
+    let a = creation();
+    let b = second_creation();
+    let accept = acceptance_tx(&a);
+    index_block(&mut processor, 100, &[a.tx.clone(), b.tx.clone()]).await?;
+    index_block(&mut processor, 101, std::slice::from_ref(&accept)).await?;
+
+    let t = tx_with_inputs(
+        vec![outpoint(&b.tx, 3), outpoint(&accept, 0)],
+        vec![
+            burn_output(a.offer.signed_terms.terms.borrower_nft),
+            normal_output(),
+            normal_output(),
+        ],
+    );
+    index_block(&mut processor, 102, std::slice::from_ref(&t)).await?;
+
+    let row_a = private_offer_row(&pool, a.tx.txid()).await?.expect("a");
+    let row_b = private_offer_row(&pool, b.tx.txid()).await?.expect("b");
+    assert_eq!(row_a.current_status, PrivateOfferStatus::Repaid);
+    assert_eq!(row_b.current_status, PrivateOfferStatus::Active);
+    assert_eq!(utxo_count(&pool, outpoint(&t, 1)).await?, 1);
+
+    // The reverse order: the repayment is processed first and owns (T,1).
+    let a2 = private_creation(
+        &lending_key(1),
+        &lending_key(2),
+        outpoint_with_txid_byte(0x34, 1),
+    );
+    let b2 = private_creation(
+        &lending_key(1),
+        &lending_key(2),
+        outpoint_with_txid_byte(0x35, 2),
+    );
+    let accept2 = acceptance_tx(&a2);
+    index_block(&mut processor, 103, &[a2.tx.clone(), b2.tx.clone()]).await?;
+    index_block(&mut processor, 104, std::slice::from_ref(&accept2)).await?;
+    let t2 = tx_with_inputs(
+        vec![outpoint(&accept2, 0), outpoint(&b2.tx, 3)],
+        vec![
+            burn_output(a2.offer.signed_terms.terms.borrower_nft),
+            normal_output(),
+            normal_output(),
+        ],
+    );
+    index_block(&mut processor, 105, std::slice::from_ref(&t2)).await?;
+    let row_a2 = private_offer_row(&pool, a2.tx.txid()).await?.expect("a2");
+    let row_b2 = private_offer_row(&pool, b2.tx.txid()).await?.expect("b2");
+    assert_eq!(row_a2.current_status, PrivateOfferStatus::Repaid);
+    assert_eq!(row_b2.current_status, PrivateOfferStatus::Active);
+    assert_eq!(utxo_count(&pool, outpoint(&t2, 1)).await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn a_transition_does_not_record_outputs_the_transaction_lacks() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let mut processor = block_processor(&pool).await?;
+    let a = creation();
+    index_block(&mut processor, 100, std::slice::from_ref(&a.tx)).await?;
+    let t = tx_with_input(outpoint(&a.tx, 3), vec![normal_output()]);
+    index_block(&mut processor, 101, std::slice::from_ref(&t)).await?;
+
+    let row = private_offer_row(&pool, a.tx.txid()).await?.expect("row");
+    assert_eq!(row.current_status, PrivateOfferStatus::Active);
+    let kinds: Vec<_> = private_utxo_rows(&pool, row.id)
+        .await?
+        .iter()
+        .map(|u| (u.utxo_type, u.vout))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            (PrivateUtxoType::PendingOffer, 3),
+            (PrivateUtxoType::ActiveOffer, 0)
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn tracking_survives_a_restart_before_cancellation() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let c = creation();
+    let cancel = cancellation_tx(&c);
+
+    let mut processor = block_processor(&pool).await?;
+    index_block(&mut processor, 100, std::slice::from_ref(&c.tx)).await?;
+    let mut processor = block_processor(&pool).await?;
+    index_block(&mut processor, 101, std::slice::from_ref(&cancel)).await?;
+
+    let row = private_offer_row(&pool, c.tx.txid()).await?.expect("row");
+    assert_eq!(row.current_status, PrivateOfferStatus::Cancelled);
     Ok(())
 }
