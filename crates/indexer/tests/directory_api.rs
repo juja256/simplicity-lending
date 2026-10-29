@@ -312,6 +312,17 @@ async fn directory_list_pages_in_name_order_and_caps_limit() -> anyhow::Result<(
     assert_eq!(names, ["Bravo", "Charlie"]);
     assert_eq!(page["total"], 3);
 
+    let beyond = response_json(
+        http.get(format!(
+            "{base}/private/directory?offset=9223372036854775808"
+        ))
+        .send()
+        .await?,
+    )
+    .await?;
+    assert_eq!(beyond["items"], json!([]));
+    assert_eq!(beyond["total"], 3);
+
     let response = http
         .get(format!("{base}/private/directory?limit=101"))
         .send()
