@@ -102,6 +102,11 @@ Building and blinding:
 - `OpenedOffer.inputSecret(role, inputIndex)`, `InputSecret` (`new`, `explicit`): the secrets of
   covenant and wallet inputs.
 - `blindPset(psetBase64, inputSecrets, blindings)`: blind a PSET.
+- `inspectPset(psetBase64)`: JSON of the PSET fields LWK's JS API does not expose, which the flows
+  check before signing: each input's prevout and issuance (asset and token ids, amounts or
+  commitments, inflation keys, `blinded_issuance`), and each output's script, explicit asset and
+  amount, commitments, nonce (`ecdhPubkey`), blinding key, blinder index and blind proofs. Absent
+  fields are `null`; amounts are decimal strings.
 
 LWK helpers:
 

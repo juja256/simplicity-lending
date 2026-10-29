@@ -86,7 +86,7 @@ export function flowDeps(wallet: SeedWallet, chain: Chain): PrivateFlowDeps {
   }
 }
 
-/** Groups of four hex characters, as the app shows lending key fingerprints. */
-export function fingerprintGroups(key: wasm.LendingKey): string {
-  return (key.fingerprint().match(/.{1,4}/g) ?? []).join(' ')
+/** A lending key fingerprint in groups of four hex characters, as the app shows it. */
+export function fingerprintGroups(fingerprint: string): string {
+  return (fingerprint.match(/.{1,4}/g) ?? []).join(' ')
 }

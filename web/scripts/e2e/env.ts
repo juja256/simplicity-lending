@@ -68,33 +68,83 @@ export const PRINCIPAL = 1_000n
 export const REPAYMENT = 1_100n
 /** tL-sats reserved per transaction. */
 export const FEE_BUDGET = 2_000n
-/** Transactions each wallet signs over a full run. */
-export const TX_COUNT_BORROWER = 10n
-export const TX_COUNT_LENDER = 6n
 
-/** What each wallet must hold, confirmed, to run every stage (three offers, two accepted). */
-export const NEEDS = {
-  borrower: {
-    lbtc: 3n * COLLATERAL + TX_COUNT_BORROWER * FEE_BUDGET,
-    test: REPAYMENT - PRINCIPAL,
-  },
-  lender: {
-    lbtc: TX_COUNT_LENDER * FEE_BUDGET,
-    test: 2n * PRINCIPAL,
-  },
-} as const
+export type Wallet = 'borrower' | 'lender'
+
+/** What a wallet must hold, confirmed: tL-sats and TEST units. */
+export interface Need {
+  lbtc: bigint
+  test: bigint
+}
+
+/** The stages that spend from the wallets, by the state record that marks each one done. */
+export type Stage =
+  | 'create'
+  | 'accept'
+  | 'claim-principal'
+  | 'repay'
+  | 'claim-repayment'
+  | 'cancel'
+  | 'liquidate'
+
+const NONE: Need = { lbtc: 0n, test: 0n }
 
 /**
- * What a recorded stage has taken out of a wallet's `NEEDS`. Later invocations check only what
- * remains: a creation locks its collateral in the offer, so the borrower's balance drops below the
- * full-run minimum, though it still covers every stage that is left.
+ * What each stage needs from each wallet when it builds. A creation needs two coins besides the
+ * collateral (2 × COLLATERAL, as the coins come) and a fee; `cancel` and `liquidate` include their
+ * own creation, and `liquidate` its acceptance. The `wallets` stage only moves coins within a
+ * wallet and checks its split itself.
  */
-export const STAGE_SPENDS: Record<
-  string,
-  Partial<Record<'borrower' | 'lender', { lbtc: bigint; test: bigint }>>
-> = {
-  create: { borrower: { lbtc: COLLATERAL + FEE_BUDGET, test: 0n } },
+export const STAGE_NEEDS: Record<Stage, Record<Wallet, Need>> = {
+  create: {
+    borrower: { lbtc: 2n * COLLATERAL + FEE_BUDGET, test: 0n },
+    lender: NONE,
+  },
+  accept: {
+    borrower: NONE,
+    lender: { lbtc: FEE_BUDGET, test: PRINCIPAL },
+  },
+  'claim-principal': {
+    borrower: { lbtc: FEE_BUDGET, test: 0n },
+    lender: NONE,
+  },
+  repay: {
+    // the principal comes from the claim; the interest from the wallet
+    borrower: { lbtc: FEE_BUDGET, test: REPAYMENT - PRINCIPAL },
+    lender: NONE,
+  },
+  'claim-repayment': {
+    borrower: NONE,
+    lender: { lbtc: FEE_BUDGET, test: 0n },
+  },
+  cancel: {
+    // its creation, then the cancellation
+    borrower: { lbtc: 2n * COLLATERAL + 2n * FEE_BUDGET, test: 0n },
+    lender: NONE,
+  },
+  liquidate: {
+    // its creation; the lender accepts, then liquidates
+    borrower: { lbtc: 2n * COLLATERAL + FEE_BUDGET, test: 0n },
+    lender: { lbtc: 2n * FEE_BUDGET, test: PRINCIPAL },
+  },
 }
+
+export const STAGE_NAMES = Object.keys(STAGE_NEEDS) as Stage[]
+
+/** The sum of the needs of `stages`, per wallet. */
+export function sumNeeds(stages: readonly Stage[]): Record<Wallet, Need> {
+  const total: Record<Wallet, Need> = { borrower: { ...NONE }, lender: { ...NONE } }
+  for (const stage of stages) {
+    for (const wallet of ['borrower', 'lender'] as const) {
+      total[wallet].lbtc += STAGE_NEEDS[stage][wallet].lbtc
+      total[wallet].test += STAGE_NEEDS[stage][wallet].test
+    }
+  }
+  return total
+}
+
+/** What each wallet must hold, confirmed, to run every stage. */
+export const NEEDS = sumNeeds(STAGE_NAMES)
 
 /** Confirmed tL-BTC coins to split each wallet into, and their size. */
 export const SPLITS = {

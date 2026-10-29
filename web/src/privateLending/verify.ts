@@ -33,7 +33,10 @@ const NOT_ADDRESSED_CODES: ReadonlySet<string> = new Set([
 
 export class PrivateOfferError extends Error {
   constructor(
-    /** The wasm error code, `address-mismatch`, or `unknown`. */
+    /**
+     * The wasm error code, `address-mismatch`, `terms-mismatch` (the creation's self-check: the
+     * opened offer differs from the requested one), or `unknown`.
+     */
     readonly code: string,
     message: string,
     /** False when the transaction is not addressed to the key, true otherwise (a bad offer). */

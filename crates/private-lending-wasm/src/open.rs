@@ -383,13 +383,11 @@ pub(crate) mod tests {
             borrower.x_only_public_key()
         );
         assert!(as_lender.repayment_amount() >= as_lender.principal_amount());
-        let outpoint = tx_of(&hex).input[0].previous_output;
-        // "<txid>:<vout>", the format `NewOffer.build` and `isOwnCandidate` take
+        // input 0 of the fixture's creation transaction, as "<txid>:<vout>"
         assert_eq!(
             as_lender.first_input(),
-            format!("{}:{}", outpoint.txid, outpoint.vout)
+            "e9c3ff06972d7e7ef13b315c654bc5b6a199babf498f25dbf934ead44bc88b51:0"
         );
-        assert!(!as_lender.first_input().starts_with('['));
     }
 
     #[test]
