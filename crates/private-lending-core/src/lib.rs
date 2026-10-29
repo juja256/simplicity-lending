@@ -13,6 +13,7 @@
 
 mod blind;
 mod creation;
+mod directory;
 mod keys;
 mod marker;
 mod offer;
@@ -25,6 +26,10 @@ use elements::hashes::{Hash, HashEngine, sha256};
 pub use blind::{BlindPsetError, PinnedBlinding, RewindError, blind_pset, rewind};
 pub use creation::{
     CreationError, FoundOffer, find_offer, open_creation_as_borrower, open_creation_as_lender,
+};
+pub use directory::{
+    DIRECTORY_TAG, DirectoryAction, directory_message, sign_directory_action,
+    verify_directory_action,
 };
 pub use keys::{LendingKey, ephemeral_key, lift_lending_key};
 pub use marker::Marker;
