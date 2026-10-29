@@ -38,6 +38,8 @@ pub async fn test_pool() -> anyhow::Result<PgPool> {
     sqlx::query(
         r#"
         TRUNCATE TABLE
+            directory_entries,
+            directory_challenges,
             private_offer_utxos,
             private_offers,
             offer_participants,
@@ -603,4 +605,21 @@ pub async fn response_json(response: reqwest::Response) -> anyhow::Result<Value>
 pub async fn get_json(http: &reqwest::Client, url: String) -> anyhow::Result<Value> {
     let response = http.get(url).send().await?.error_for_status()?;
     response_json(response).await
+}
+
+/// Inserts a directory challenge. A negative `expires_in_secs` gives one that has already expired.
+pub async fn seed_directory_challenge(
+    pool: &PgPool,
+    challenge: [u8; 32],
+    expires_in_secs: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO directory_challenges (challenge, expires_at)
+         VALUES ($1, now() + make_interval(secs => $2::double precision))",
+    )
+    .bind(challenge.as_slice())
+    .bind(expires_in_secs as f64)
+    .execute(pool)
+    .await?;
+    Ok(())
 }

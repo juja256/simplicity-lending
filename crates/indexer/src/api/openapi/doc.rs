@@ -6,6 +6,10 @@ use utoipa_swagger_ui::{Config, SwaggerUi};
 use crate::api::assets::handlers as asset_handlers;
 use crate::api::borrowers::dto::BorrowerOverview;
 use crate::api::borrowers::handlers as borrower_handlers;
+use crate::api::directory::dto::{
+    DeleteDirectoryEntry, DirectoryChallenge, DirectoryEntry, DirectoryList, PutDirectoryEntry,
+};
+use crate::api::directory::handlers as directory_handlers;
 use crate::api::dto::AssetAmount;
 use crate::api::events::handlers as event_handlers;
 use crate::api::factories::dto::{
@@ -51,6 +55,11 @@ use super::schemas::{ErrorBody, ErrorResponse, OfferDetailsResponseSchema};
         private_handlers::list_candidates,
         private_handlers::get_candidate,
         private_handlers::get_candidate_tx,
+        directory_handlers::issue_challenge,
+        directory_handlers::list_entries,
+        directory_handlers::get_entry,
+        directory_handlers::put_entry,
+        directory_handlers::delete_entry,
         borrower_handlers::get_overview_by_script,
         borrower_handlers::list_offers_by_script,
         lender_handlers::get_overview_by_script,
@@ -67,6 +76,11 @@ use super::schemas::{ErrorBody, ErrorResponse, OfferDetailsResponseSchema};
         BorrowerOverview,
         ErrorBody,
         ErrorResponse,
+        DeleteDirectoryEntry,
+        DirectoryChallenge,
+        DirectoryEntry,
+        DirectoryList,
+        PutDirectoryEntry,
         FactoryAuthUtxoDto,
         FactoryDetailsResponse,
         FactoryProgramUtxoDto,
@@ -99,6 +113,7 @@ use super::schemas::{ErrorBody, ErrorResponse, OfferDetailsResponseSchema};
     tags(
         (name = "offers", description = "Lending offer queries"),
         (name = "private", description = "Private lending candidate scan"),
+        (name = "directory", description = "Lender directory with signed writes"),
         (name = "borrowers", description = "Borrower queries"),
         (name = "lenders", description = "Lender queries"),
         (name = "factories", description = "Issuance factory queries"),
@@ -133,6 +148,9 @@ mod tests {
         assert!(paths.contains_key("/private/candidates"));
         assert!(paths.contains_key("/private/candidates/{creation_txid}"));
         assert!(paths.contains_key("/private/candidates/{creation_txid}/tx"));
+        assert!(paths.contains_key("/private/directory"));
+        assert!(paths.contains_key("/private/directory/{pubkey}"));
+        assert!(paths.contains_key("/private/directory/challenges"));
         assert!(paths.contains_key("/borrowers/overview"));
         assert!(paths.contains_key("/borrowers/offers"));
         assert!(paths.contains_key("/lenders/overview"));
