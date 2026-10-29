@@ -85,23 +85,50 @@ function storageSpendInfo(
     .finalize(XOnlyPublicKey.fromString(UNSPENDABLE_TAPROOT_PUBKEY))
 }
 
+/**
+ * The asset_auth program that locks a pinned output to one unit of an NFT: the principal
+ * (borrower NFT, no burn) or the repayment (lender NFT, burned). `nftAssetId` is in the internal
+ * byte order of `ContractArguments`.
+ */
+export function privateAssetAuthProgram(
+  sources: PrivateLendingSources,
+  nftAssetId: string,
+  withAssetBurn: boolean,
+): SimplicityProgram {
+  return SimplicityProgram.load(
+    sources.assetAuth,
+    buildAssetAuthArguments({
+      assetId: toBytes32(hexToBytes(nftAssetId), 'assetId'),
+      assetAmount: toUint64(1n),
+      withAssetBurn,
+    }),
+  )
+}
+
+/** The script_auth program that locks the lender NFT to the pending offer's script. */
+export function lenderNftLockProgram(
+  sources: PrivateLendingSources,
+  pendingOffer: Script,
+): SimplicityProgram {
+  return SimplicityProgram.load(
+    sources.scriptAuth,
+    buildScriptAuthArguments(
+      toBytes32(hexToBytes(pendingOffer.jet_sha256_hex()), 'pendingOfferScriptHash'),
+    ),
+  )
+}
+
 export function privateOfferScripts(
   sources: PrivateLendingSources,
   args: PrivateOfferArguments,
   network: Network,
 ): PrivateOfferScripts {
-  const loadAssetAuth = (assetId: string, withAssetBurn: boolean) =>
-    SimplicityProgram.load(
-      sources.assetAuth,
-      buildAssetAuthArguments({
-        assetId: toBytes32(hexToBytes(assetId), 'assetId'),
-        assetAmount: toUint64(1n),
-        withAssetBurn,
-      }),
-    )
-
-  const principalOutputScriptHash = scriptHash(loadAssetAuth(args.borrowerNftAssetId, false))
-  const repaymentOutputScriptHash = scriptHash(loadAssetAuth(args.lenderNftAssetId, true))
+  const principalOutputScriptHash = scriptHash(
+    privateAssetAuthProgram(sources, args.borrowerNftAssetId, false),
+  )
+  const repaymentOutputScriptHash = scriptHash(
+    privateAssetAuthProgram(sources, args.lenderNftAssetId, true),
+  )
 
   const program = SimplicityProgram.load(
     sources.privateLending,
@@ -124,12 +151,7 @@ export function privateOfferScripts(
   const activeSpendInfo = storageSpendInfo(program, true, args.repaymentCommitment)
 
   const pendingOffer = pendingSpendInfo.scriptPubkey
-  const lenderNftLock = SimplicityProgram.load(
-    sources.scriptAuth,
-    buildScriptAuthArguments(
-      toBytes32(hexToBytes(pendingOffer.jet_sha256_hex()), 'pendingOfferScriptHash'),
-    ),
-  )
+  const lenderNftLock = lenderNftLockProgram(sources, pendingOffer)
     .createP2trAddress(XOnlyPublicKey.fromString(UNSPENDABLE_TAPROOT_PUBKEY), network)
     .scriptPubkey()
 

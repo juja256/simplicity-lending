@@ -16,6 +16,7 @@ import type { PrivateFlowDeps } from '../deps'
 import { inspectPset } from '../inspectPset'
 import { walletInputSecret } from '../secrets'
 import { openAndVerifyOffer, PrivateOfferError, type VerifiedOffer } from '../verify'
+import { outpointOf, wasmStep } from './shared'
 
 const LENDER_NFT_OUTPUT = 1
 const PENDING_OFFER_OUTPUT = 3
@@ -82,11 +83,6 @@ interface CreationLayout {
   pendingCollateral: { assetCommitment: string; valueCommitment: string }
 }
 
-function outpointOf(utxo: WalletTxOut): string {
-  const outpoint = utxo.outpoint()
-  return `${outpoint.txid().toString()}:${outpoint.vout()}`
-}
-
 /** The terms' interest rate, for display only: the interest is repayment − principal. */
 function interestRateBps(principal: bigint, repayment: bigint): number {
   if (principal <= 0n) throw new Error('The principal must be positive')
@@ -106,16 +102,6 @@ function freshNftContract(deps: PrivateFlowDeps, nft: keyof typeof NFT_CONTRACTS
     ticker,
     0,
   )
-}
-
-/** Runs a wasm call, turning its thrown `"<code>: <message>"` string into an `Error`. */
-function wasmStep<T>(step: string, run: () => T): T {
-  try {
-    return run()
-  } catch (error) {
-    const text = typeof error === 'string' ? error : error instanceof Error ? error.message : ''
-    throw new Error(`${step}: ${text || 'unknown error'}`, { cause: error })
-  }
 }
 
 function assertCreationLayout(
