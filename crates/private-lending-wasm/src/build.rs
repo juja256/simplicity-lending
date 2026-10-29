@@ -303,12 +303,23 @@ mod tests {
     const CONTRACT_JSON: &str = r#"{"entity":{"domain":"example.com"},"issuer_pubkey":"02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"simplicity-lending/v1 borrower-nft","precision":0,"ticker":"SLB1234","version":0}"#;
 
     #[test]
-    fn contract_hash_matches_elements() {
+    fn contract_hash_known_answer() {
+        // SHA-256 of the compact JSON with sorted keys, displayed byte-reversed.
         assert_eq!(
             contract_hash_from_json(CONTRACT_JSON).unwrap(),
-            ContractHash::from_json_contract(CONTRACT_JSON)
-                .unwrap()
-                .to_string()
+            "aab713dd442bd022656c548028bb78daae25e4caff07a0c14e09e38d6d424ca4"
+        );
+    }
+
+    #[test]
+    fn contract_hash_ignores_key_order_and_whitespace() {
+        let reordered = format!(
+            "{{\n \"version\": 0,\n \"ticker\": \"SLB1234\",\n \"precision\": 0,\n \"name\": \"simplicity-lending/v1 borrower-nft\",\n \"issuer_pubkey\": \"02{}\",\n \"entity\": {{ \"domain\": \"example.com\" }}\n}}",
+            "aa".repeat(32)
+        );
+        assert_eq!(
+            contract_hash_from_json(&reordered).unwrap(),
+            contract_hash_from_json(CONTRACT_JSON).unwrap()
         );
     }
 

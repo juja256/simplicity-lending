@@ -88,7 +88,8 @@ pub fn confidential_address(
         other => return Err(bad_input(format!("unknown network {other:?}"))),
     };
     let script = Script::from(decode_hex(script_pubkey_hex)?);
-    let blinding_key = PublicKey::from_slice(&decode_hex(blinding_key_hex)?)
+    let blinding_key = decode_hex_array::<33>(blinding_key_hex)?;
+    let blinding_key = PublicKey::from_slice(&blinding_key)
         .map_err(|e| bad_input(format!("not a public key: {e}")))?;
     Address::from_script(&script, Some(blinding_key), params)
         .map(|address| address.to_string())
@@ -164,6 +165,7 @@ mod tests {
             confidential_address("zz", &key, "liquid"),
             confidential_address(&script, &key, "mainnet"),
             confidential_address(&script, "02", "liquid"),
+            confidential_address(&script, &format!("04{}", "11".repeat(64)), "liquid"),
             // OP_RETURN has no address form.
             confidential_address("6a", &key, "liquid"),
         ];
