@@ -1789,6 +1789,7 @@ dependencies = [
  "private-lending-core",
  "rand 0.8.6",
  "ring",
+ "serde_json",
  "smplx-std",
  "thiserror",
 ]
