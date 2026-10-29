@@ -103,6 +103,16 @@ Building and blinding:
   covenant and wallet inputs.
 - `blindPset(psetBase64, inputSecrets, blindings)`: blind a PSET.
 
+LWK helpers:
+
+- `confidentialAddress(scriptPubkeyHex, blindingKeyHex, network)`: the confidential address of a
+  script with a chosen 33-byte blinding key; `network` is `liquid`, `liquidtestnet` or `regtest`.
+  LWK cannot build one. `bad-input` for a script with no address form.
+- `contractHashFromJson(json)`: the ELIP-100 contract hash of LWK's `Contract.toString()`, in the
+  format `issuedAssetId` takes.
+- `freshIssuerPubkey()`: a random compressed public key (hex) for a contract's `issuer_pubkey`, so
+  each issuance has fresh entropy. The secret is discarded.
+
 Directory:
 
 - `signDirectoryAction(key, action, challengeHex, displayName)`: the Schnorr signature (hex) over a
