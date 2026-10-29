@@ -69,7 +69,7 @@ pub async fn list_entries(
         "SELECT {ENTRY_COLUMNS} FROM directory_entries ORDER BY display_name, pubkey LIMIT $1 OFFSET $2"
     ))
     .bind(limit as i64)
-    .bind(offset as i64)
+    .bind(i64::try_from(offset).unwrap_or(i64::MAX))
     .fetch_all(db)
     .await?;
 
