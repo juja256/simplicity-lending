@@ -1,4 +1,4 @@
-import { groupFingerprint } from '../helpers'
+import { groupFingerprint } from '@/privateLending/offerView'
 
 interface KeyFingerprintProps {
   /** `keyFingerprint` of the key: 16 hex characters. */
