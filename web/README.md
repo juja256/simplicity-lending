@@ -105,9 +105,11 @@ With no stage named, every stage below runs in this order.
   of candidates that pass the view-tag or own-nonce check, and a re-sync must start right after
   the stored height and keep the same offers. A fresh random key must find nothing. A local proxy
   then plays a hostile indexer that serves `create`'s candidate with `cancel-create`'s
-  transaction: `create` must come out invalid, never verified. Last, the lender registers "E2E
-  Lender" in the directory, sees it listed, gets a 401 for a write signed over another name, and
-  removes the entry.
+  transaction: `create` must come out invalid, never verified, and the next sync, against the
+  honest indexer, must check it again and find it verified. A cheap check that throws anything but
+  `bad-input` must fail the sync and leave the stored state unchanged. Last, the lender registers
+  "E2E Lender" in the directory, sees it listed, gets a 401 for a write signed over another name,
+  and removes the entry.
 
 Each stage prints its txids and the PSET it built, with the checks it ran. It fails if a covenant
 or NFT input's witness outweighs the constant its builder gives LWK for the fee: on chain, and in

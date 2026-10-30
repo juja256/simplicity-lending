@@ -45,6 +45,7 @@ import { buildPrivateRepayment } from '@/privateLending/flows/repayment'
 import { outpointOf } from '@/privateLending/flows/shared'
 import { type InspectedOutput, inspectPset } from '@/privateLending/inspectPset'
 import {
+  CREATION_TX_MISMATCH,
   loadVerifiedOffer,
   type ScanResult,
   type ScanState,
@@ -1933,8 +1934,10 @@ async function strangerScan(
 
 /**
  * A hostile indexer serves the first e2e offer's candidate with the second's creation
- * transaction, which is addressed to the same keys. The first offer must come out invalid or
- * absent, never verified, and `loadVerifiedOffer` must refuse it.
+ * transaction, which is addressed to the same keys. The first offer must come out invalid
+ * (`creation-tx-mismatch`), never verified, and `loadVerifiedOffer` must refuse it. That result
+ * says nothing final about the offer, so the next sync, against the honest indexer, checks it
+ * again by txid and must find it verified.
  */
 async function hostileScan(
   ctx: Context,
@@ -1942,18 +1945,23 @@ async function hostileScan(
   creations: Creation[],
 ): Promise<void> {
   const [victim, served, ...rest] = creations
+  const others = [served, ...rest]
   out(`hostile indexer: ${victim.stage}'s candidate comes with ${served.stage}'s transaction`)
-  proxy.substitute = { candidate: victim.txid, servedTx: served.txid }
   try {
     for (const name of NAMES) {
       const wallet = ctx.wallets[name]
       const deps = flowDeps(wallet, ctx.chain)
-      const state = await syncOffers(deps, wallet.lendingKey, proxy.url, memoryScanStore())
+      const store = memoryScanStore()
+      proxy.substitute = { candidate: victim.txid, servedTx: served.txid }
+      const state = await syncOffers(deps, wallet.lendingKey, proxy.url, store)
       const result = state.offers[victim.txid]
-      if (result?.result === 'verified') {
-        throw new Error(`${name}: the hostile indexer got ${victim.stage} verified`)
+      if (result?.result !== 'invalid' || result.code !== CREATION_TX_MISMATCH) {
+        throw new Error(
+          `${name}: with the hostile indexer, ${victim.stage} is ${describeResult(result)}, ` +
+            `not invalid: ${CREATION_TX_MISMATCH}`,
+        )
       }
-      for (const other of [served, ...rest]) {
+      for (const other of others) {
         if (state.offers[other.txid]?.result !== 'verified') {
           throw new Error(`${name}: ${other.stage} is ${describeResult(state.offers[other.txid])}`)
         }
@@ -1978,10 +1986,89 @@ async function hostileScan(
         `  ${name}: ${victim.stage} ${describeResult(result)}, the others verified; ` +
           `loadVerifiedOffer refuses it (${refusal.code})`,
       )
+
+      proxy.substitute = null
+      proxy.requests.length = 0
+      const healed = await syncOffers(deps, wallet.lendingKey, proxy.url, store)
+      const refetched = fetchedTxs(proxy.requests.splice(0))
+      const healedResult = healed.offers[victim.txid]
+      if (healedResult?.result !== 'verified' || healedResult.role !== name) {
+        throw new Error(
+          `${name}: against the honest indexer, ${victim.stage} stays ` +
+            describeResult(healedResult),
+        )
+      }
+      if (
+        !refetched.includes(victim.txid) ||
+        others.some(other => refetched.includes(other.txid)) ||
+        others.some(other => healed.offers[other.txid]?.result !== 'verified')
+      ) {
+        throw new Error(
+          `${name}: the honest re-sync fetched ${refetched.join(', ') || 'nothing'} and found ` +
+            JSON.stringify(healed.offers),
+        )
+      }
+      out(
+        `  ${name}: the next sync, honest, checks ${victim.stage} again by txid: ` +
+          `${describeResult(healedResult)}; the verified offers are not fetched again`,
+      )
     }
   } finally {
     proxy.substitute = null
   }
+}
+
+/**
+ * A cheap check that fails with anything but `bad-input` is a local fault (here a wrapper whose
+ * `viewTagMatches` throws, as a broken wasm instance or a freed key would): the sync must reject
+ * and leave the stored state as it was, never count it as "no match" and move the synced height
+ * past offers it did not check. A `bad-input` from the same check is no match.
+ */
+async function localFaultScan(ctx: Context): Promise<void> {
+  const { lender } = ctx.wallets
+  const key = lender.lendingKey
+  const withViewTagCheck = (viewTagMatches: () => boolean): PrivateFlowDeps => ({
+    ...flowDeps(lender, ctx.chain),
+    wasm: { ...wasm, viewTagMatches },
+  })
+  const fault = new Error('RuntimeError: unreachable (the e2e stand-in for a broken wasm)')
+  const seeded: ScanState = { syncedHeight: 0, offers: {} }
+  const store = memoryScanStore()
+  await store.set(key.fingerprint(), seeded)
+  const outcome = await syncOffers(
+    withViewTagCheck(() => {
+      throw fault
+    }),
+    key,
+    ctx.apiUrl,
+    store,
+  ).then(
+    () => null,
+    (error: unknown) => error,
+  )
+  if (outcome !== fault) {
+    throw new Error(`a local fault in the view-tag check did not fail the sync: ${String(outcome)}`)
+  }
+  if (!isDeepStrictEqual(await store.get(key.fingerprint()), seeded)) {
+    throw new Error('the sync that failed on a local fault changed the stored state')
+  }
+
+  // The lender is the lender of every e2e offer: with no view tag, it finds none.
+  const malformed = await syncOffers(
+    withViewTagCheck(() => {
+      throw 'bad-input: the e2e stand-in for a malformed nonce'
+    }),
+    key,
+    ctx.apiUrl,
+    memoryScanStore(),
+  )
+  if (Object.keys(malformed.offers).length > 0 || malformed.syncedHeight === null) {
+    throw new Error(`a bad-input view-tag check gave ${JSON.stringify(malformed)}`)
+  }
+  out(
+    'local fault: a view-tag check throwing a non-bad-input error fails the sync and leaves the ' +
+      'stored state unchanged; a bad-input is no match',
+  )
 }
 
 /** The lender registers in the directory, is listed, and removes its entry. */
@@ -2079,6 +2166,7 @@ async function scanStage(ctx: Context): Promise<void> {
     for (const name of NAMES) await scanAs(ctx, proxy, name, creations, candidates.length)
     await strangerScan(ctx, proxy, candidates.length)
     await hostileScan(ctx, proxy, creations)
+    await localFaultScan(ctx)
   } finally {
     await proxy.close()
   }
