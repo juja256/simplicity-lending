@@ -13,12 +13,24 @@
 // right before it builds.
 import * as lwk from '@lilbonekit/lwk-web'
 
+import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { buildPrivateAcceptance } from '@/privateLending/flows/acceptance'
 import { buildPrincipalClaim } from '@/privateLending/flows/claimPrincipal'
 import { buildPrivateCreation } from '@/privateLending/flows/creation'
 import { outpointOf } from '@/privateLending/flows/shared'
 import { type InspectedOutput, inspectPset } from '@/privateLending/inspectPset'
 import { openAndVerifyOffer, type VerifiedOffer } from '@/privateLending/verify'
+import { ASSET_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/asset-auth/witness'
+import {
+  ACCEPTANCE_INPUT,
+  ACCEPTANCE_OUTPUT,
+  CREATION_OUTPUT,
+  NFT_AMOUNT,
+  PRINCIPAL_CLAIM_INPUT,
+  PRINCIPAL_CLAIM_OUTPUT,
+} from '@/simplicity/private-lending/layout'
+import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
+import { SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/script-auth/witness'
 import * as wasm from '@/wasm/private-lending/private_lending_wasm'
 
 import { createChain, submitStage } from './e2e/chain'
@@ -223,10 +235,10 @@ function creationIdentity(pset: lwk.Pset): {
   lenderNft: string
   nonce: string
 } {
-  const [borrowerNftOutput, lenderNftOutput, , offerOutput] = inspectPset(
-    wasm,
-    pset.toString(),
-  ).outputs
+  const outputs = inspectPset(wasm, pset.toString()).outputs
+  const borrowerNftOutput = outputs[CREATION_OUTPUT.borrowerNft]
+  const lenderNftOutput = outputs[CREATION_OUTPUT.lenderNft]
+  const offerOutput = outputs[CREATION_OUTPUT.pendingOffer]
   if (
     offerOutput === undefined ||
     borrowerNftOutput.asset === null ||
@@ -369,7 +381,7 @@ async function lenderView(ctx: Context, txid: string): Promise<void> {
   out(`  repayment    ${opened.repaymentAmount()} TEST units`)
   out(`  interest     ${opened.repaymentAmount() - opened.principalAmount()} TEST units`)
   out(`  expires at   block ${opened.loanExpirationTime()}`)
-  out(`  offer        ${txid}:3`)
+  out(`  offer        ${txid}:${CREATION_OUTPUT.pendingOffer}`)
   out(`  borrower NFT ${opened.borrowerNft()}`)
   out(`  lender NFT   ${opened.lenderNft()}`)
 }
@@ -449,7 +461,10 @@ function assertAcceptanceOutputs(
   lenderNftScript: string,
 ): void {
   const opened = offer.opened
-  const [active, principal, lenderNft] = inspectPset(wasm, pset.toString()).outputs
+  const outputs = inspectPset(wasm, pset.toString()).outputs
+  const active = outputs[ACCEPTANCE_OUTPUT.activeOffer]
+  const principal = outputs[ACCEPTANCE_OUTPUT.principal]
+  const lenderNft = outputs[ACCEPTANCE_OUTPUT.lenderNft]
   const checks: [string, boolean][] = [
     [
       'output 0 is the active offer with the pinned active collateral',
@@ -470,7 +485,7 @@ function assertAcceptanceOutputs(
       lenderNft !== undefined &&
         lenderNft.script === lenderNftScript &&
         lenderNft.asset === opened.lenderNft() &&
-        lenderNft.amount === 1n &&
+        lenderNft.amount === NFT_AMOUNT &&
         lenderNft.blindingKey === null &&
         lenderNft.assetCommitment === null &&
         lenderNft.amountCommitment === null,
@@ -488,14 +503,16 @@ function assertAcceptanceOutputs(
  */
 function assertClaimOutputs(pset: lwk.Pset, offer: VerifiedOffer, receiver: lwk.Address): void {
   const opened = offer.opened
-  const [nft, principal] = inspectPset(wasm, pset.toString()).outputs
+  const outputs = inspectPset(wasm, pset.toString()).outputs
+  const nft = outputs[PRINCIPAL_CLAIM_OUTPUT.borrowerNft]
+  const principal = outputs[PRINCIPAL_CLAIM_OUTPUT.principal]
   const checks: [string, boolean][] = [
     [
       'output 0 is the borrower NFT to the borrower, explicit',
       nft !== undefined &&
         nft.script === receiver.toUnconfidential().scriptPubkey().toString() &&
         nft.asset === opened.borrowerNft() &&
-        nft.amount === 1n &&
+        nft.amount === NFT_AMOUNT &&
         nft.blindingKey === null &&
         nft.assetCommitment === null &&
         nft.amountCommitment === null,
@@ -540,15 +557,26 @@ function walletAddressIndex(wallet: SeedWallet, script: string): number | undefi
   return undefined
 }
 
-/** Prints the witness weight of each named input of a broadcast transaction. */
-async function reportWitnessWeights(ctx: Context, txid: string, names: string[]): Promise<void> {
+/**
+ * Prints the witness weight of the given inputs of a broadcast transaction, and throws unless
+ * each is at most the max-weight-to-satisfy its builder gives LWK for the fee.
+ */
+async function assertWitnessWeights(
+  ctx: Context,
+  txid: string,
+  inputs: { index: number; name: string; limit: number }[],
+): Promise<void> {
   const witnesses = await ctx.chain.fetchWitnesses(txid)
   out('witness weights (serialized script witness, WU):')
-  names.forEach((name, index) => {
+  for (const { index, name, limit } of inputs) {
     const items = witnesses[index] ?? []
+    const weight = witnessWeight(items)
     const sizes = items.map(item => item.length / 2).join(' + ')
-    out(`  input ${index} ${name.padEnd(28)} ${witnessWeight(items)} (items ${sizes})`)
-  })
+    out(`  input ${index} ${name.padEnd(28)} ${weight} <= ${limit} (items ${sizes})`)
+    if (items.length === 0 || weight > limit) {
+      throw new Error(`input ${index} (${name}) weighs ${weight}, over its constant ${limit}`)
+    }
+  }
 }
 
 /**
@@ -608,18 +636,29 @@ async function acceptStage(ctx: Context): Promise<void> {
 
   // The lender NFT is an explicit output, which LWK does not list among the wallet's coins.
   const acceptanceTx = await ctx.chain.fetchTx(txid)
-  const lenderNft = acceptanceTx.outputs[2]
+  const lenderNft = acceptanceTx.outputs[ACCEPTANCE_OUTPUT.lenderNft]
   if (
     lenderNft?.asset()?.toString() !== offer.opened.lenderNft() ||
-    lenderNft.value() !== 1n ||
+    lenderNft.value() !== NFT_AMOUNT ||
     walletAddressIndex(ctx.wallets.lender, lenderNft.scriptPubkey().toString()) === undefined
   ) {
     throw new Error('the confirmed acceptance does not pay the lender NFT to the lender')
   }
-  out(`lender NFT ${offer.opened.lenderNft()} at ${txid}:2 (a lender address)`)
-  await reportWitnessWeights(ctx, txid, [
-    'offer (OfferAcceptance)',
-    'lender NFT lock (script_auth)',
+  out(
+    `lender NFT ${offer.opened.lenderNft()} at ${txid}:${ACCEPTANCE_OUTPUT.lenderNft} ` +
+      '(a lender address)',
+  )
+  await assertWitnessWeights(ctx, txid, [
+    {
+      index: ACCEPTANCE_INPUT.offer,
+      name: 'offer (OfferAcceptance)',
+      limit: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.OfferAcceptance,
+    },
+    {
+      index: ACCEPTANCE_INPUT.lenderNft,
+      name: 'lender NFT lock (script_auth)',
+      limit: SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY,
+    },
   ])
   out('\naccept: ok')
 }
@@ -634,10 +673,10 @@ async function acceptDryStage(ctx: Context): Promise<void> {
 /** The borrower NFT's outpoint: creation output 0, or the claim's output 0 once it confirmed. */
 function borrowerNftOutpoint(): string {
   const claim = getRecord('claim-principal')
-  if (claim?.status === 'confirmed') return `${claim.txid}:0`
+  if (claim?.status === 'confirmed') return `${claim.txid}:${PRINCIPAL_CLAIM_OUTPUT.borrowerNft}`
   const create = getRecord('create')
   if (!create) throw new Error('no offer: run the create stage')
-  return `${create.txid}:0`
+  return `${create.txid}:${CREATION_OUTPUT.borrowerNft}`
 }
 
 function requireAcceptance(): string {
@@ -657,7 +696,7 @@ async function buildSignedClaim(
   out(`fee coins ${feeCoins.map(outpointOf).join(', ')}`)
 
   const built = await buildPrincipalClaim(flowDeps(borrower, ctx.chain), offer, {
-    principalOutpoint: `${acceptTxid}:1`,
+    principalOutpoint: `${acceptTxid}:${ACCEPTANCE_OUTPUT.principal}`,
     borrowerNftOutpoint: borrowerNftOutpoint(),
     feeCoins,
     receiver,
@@ -707,15 +746,16 @@ async function claimPrincipalStage(ctx: Context): Promise<void> {
     out,
   )
 
-  const coin = await waitForWalletCoin(borrower, `${txid}:1`)
+  const claimed = `${txid}:${PRINCIPAL_CLAIM_OUTPUT.principal}`
+  const coin = await waitForWalletCoin(borrower, claimed)
   const secrets = coin.unblinded()
   if (
     secrets.asset().toString() !== offer.opened.principalAsset() ||
     secrets.value() !== offer.opened.principalAmount()
   ) {
-    throw new Error(`${txid}:1 holds ${secrets.value()} of ${secrets.asset().toString()}`)
+    throw new Error(`${claimed} holds ${secrets.value()} of ${secrets.asset().toString()}`)
   }
-  out(`the borrower's wallet holds ${txid}:1, ${secrets.value()} TEST units`)
+  out(`the borrower's wallet holds ${claimed}, ${secrets.value()} TEST units`)
   const after = confirmedBalance(borrower, TESTNET_ASSETS.principal)
   if (before !== undefined) {
     out(`borrower TEST (confirmed): ${before} -> ${after}`)
@@ -725,7 +765,18 @@ async function claimPrincipalStage(ctx: Context): Promise<void> {
   } else {
     out(`borrower TEST (confirmed): ${after}`)
   }
-  await reportWitnessWeights(ctx, txid, ['principal (asset_auth)', 'borrower NFT (p2wpkh)'])
+  await assertWitnessWeights(ctx, txid, [
+    {
+      index: PRINCIPAL_CLAIM_INPUT.principal,
+      name: 'principal (asset_auth)',
+      limit: ASSET_AUTH_MAX_WEIGHT_TO_SATISFY,
+    },
+    {
+      index: PRINCIPAL_CLAIM_INPUT.borrowerNft,
+      name: 'borrower NFT (p2wpkh)',
+      limit: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
+    },
+  ])
   out('\nclaim-principal: ok')
 }
 

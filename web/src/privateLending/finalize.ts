@@ -23,6 +23,7 @@ import { buildCovenantSpendInfo } from '@/simplicity/taproot'
 import { toUint32 } from '@/utils/uint'
 
 import type { PrivateFlowDeps } from './deps'
+import { wasmStep } from './flows/shared'
 import type { VerifiedOffer } from './verify'
 
 /** The two asset_auth outputs of an offer. */
@@ -30,11 +31,6 @@ export type PinnedAuthOutput = 'principal' | 'repayment'
 
 function sameScript(a: Script, b: Script): boolean {
   return a.toString() === b.toString()
-}
-
-function finalizeError(what: string, error: unknown): Error {
-  const text = typeof error === 'string' ? error : error instanceof Error ? error.message : ''
-  return new Error(`Finalizing ${what}: ${text || 'unknown error'}`, { cause: error })
 }
 
 /**
@@ -80,8 +76,8 @@ export function finalizePrivateOfferInput(
     throw new Error(`${branch} spends the ${active ? 'pending' : 'active'} offer`)
   }
   const spendInfo = active ? offer.scripts.activeSpendInfo : offer.scripts.pendingSpendInfo
-  try {
-    return offer.scripts.program.finalizeTransactionWithSpendInfo(
+  return wasmStep(`Finalizing the offer input ${inputIndex} (${branch})`, () =>
+    offer.scripts.program.finalizeTransactionWithSpendInfo(
       tx,
       spendInfo,
       prevouts,
@@ -89,10 +85,8 @@ export function finalizePrivateOfferInput(
       buildPrivateLendingWitness(branch),
       deps.network,
       deps.lwk.SimplicityLogLevel.None,
-    )
-  } catch (error) {
-    throw finalizeError(`the offer input ${inputIndex} (${branch})`, error)
-  }
+    ),
+  )
 }
 
 /**
@@ -112,8 +106,8 @@ export function finalizeScriptAuthInput(
   if (!sameScript(spendInfo.scriptPubkey, offer.scripts.lenderNftLock)) {
     throw new Error("The script_auth program does not give the offer's lender NFT lock")
   }
-  try {
-    return program.finalizeTransactionWithSpendInfo(
+  return wasmStep(`Finalizing the lender NFT lock input ${inputIndex} (script_auth)`, () =>
+    program.finalizeTransactionWithSpendInfo(
       tx,
       spendInfo,
       prevouts,
@@ -121,10 +115,8 @@ export function finalizeScriptAuthInput(
       buildScriptAuthWitness(toUint32(offerInputIndex, 'offerInputIndex')),
       deps.network,
       deps.lwk.SimplicityLogLevel.None,
-    )
-  } catch (error) {
-    throw finalizeError(`the lender NFT lock input ${inputIndex} (script_auth)`, error)
-  }
+    ),
+  )
 }
 
 /**
@@ -141,8 +133,8 @@ export function finalizeAssetAuthInput(
   nft: { inputIndex: number; outputIndex: number },
 ): Transaction {
   const { program } = pinnedAuthCovenant(deps, offer, output)
-  try {
-    return program.finalizeTransactionWithSpendInfo(
+  return wasmStep(`Finalizing the ${output} input ${inputIndex} (asset_auth)`, () =>
+    program.finalizeTransactionWithSpendInfo(
       tx,
       buildCovenantSpendInfo(program),
       prevouts,
@@ -153,8 +145,6 @@ export function finalizeAssetAuthInput(
       }),
       deps.network,
       deps.lwk.SimplicityLogLevel.None,
-    )
-  } catch (error) {
-    throw finalizeError(`the ${output} input ${inputIndex} (asset_auth)`, error)
-  }
+    ),
+  )
 }

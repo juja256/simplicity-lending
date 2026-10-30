@@ -19,9 +19,7 @@ import { hexToBytes } from '@/utils/hex'
 import { toBytes32, toUint32, toUint64 } from '@/utils/uint'
 import type { ContractArguments } from '@/wasm/private-lending/private_lending_wasm'
 
-// Output indexes of the creation transaction (private-lending-core `creation`).
-const LENDER_NFT_OUTPUT_INDEX = 1
-const PENDING_OFFER_OUTPUT_INDEX = 3
+import { CREATION_OUTPUT, NFT_AMOUNT } from './layout'
 
 export interface PrivateLendingSources {
   privateLending: string
@@ -99,7 +97,7 @@ export function privateAssetAuthProgram(
     sources.assetAuth,
     buildAssetAuthArguments({
       assetId: toBytes32(hexToBytes(nftAssetId), 'assetId'),
-      assetAmount: toUint64(1n),
+      assetAmount: toUint64(NFT_AMOUNT),
       withAssetBurn,
     }),
   )
@@ -179,8 +177,8 @@ export function verifyOfferAddresses(
   creationTx: Transaction,
 ): boolean {
   const outputs = creationTx.outputs
-  const pending = outputs[PENDING_OFFER_OUTPUT_INDEX]
-  const lenderNft = outputs[LENDER_NFT_OUTPUT_INDEX]
+  const pending = outputs[CREATION_OUTPUT.pendingOffer]
+  const lenderNft = outputs[CREATION_OUTPUT.lenderNft]
   if (!pending || !lenderNft) return false
   return (
     sameScript(pending.scriptPubkey(), scripts.pendingOffer) &&

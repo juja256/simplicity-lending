@@ -11,6 +11,14 @@ import type { Address, WalletTxOut } from '@lilbonekit/lwk-web'
 import type { UpdatedPset } from '@/lwk/updatedPset'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { ASSET_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/asset-auth/witness'
+import {
+  ACCEPTANCE_INPUT,
+  ACCEPTANCE_OUTPUT,
+  CREATION_OUTPUT,
+  NFT_AMOUNT,
+  PRINCIPAL_CLAIM_INPUT,
+  PRINCIPAL_CLAIM_OUTPUT,
+} from '@/simplicity/private-lending/layout'
 
 import type { PrivateFlowDeps } from '../deps'
 import { finalizeAssetAuthInput, pinnedAuthCovenant } from '../finalize'
@@ -29,14 +37,12 @@ import {
   wasmStep,
 } from './shared'
 
-const PRINCIPAL_INPUT = 0
-const BORROWER_NFT_INPUT = 1
-const BORROWER_NFT_OUTPUT = 0
-const PRINCIPAL_OUTPUT = 1
-const NFT_AMOUNT = 1n
-
 export interface PrincipalClaimParams {
-  /** The acceptance's principal output, `"<acceptance txid>:1"`. */
+  /**
+   * The acceptance's principal output, `"<acceptance txid>:1"`. The builder checks that the
+   * transaction spends this offer's pending offer at input 0: the acceptance covenant then pinned
+   * this output to the principal.
+   */
   principalOutpoint: string
   /**
    * The borrower NFT: an explicit output at a wallet address, `"<creation txid>:0"` until a
@@ -99,6 +105,18 @@ export async function buildPrincipalClaim(
     deps.fetchTx(principalRef.txid),
     deps.fetchTx(nftRef.txid),
   ])
+  // Only this offer's acceptance or cancellation spends its pending offer, at input 0. The
+  // acceptance covenant pins output 1 to the principal; a cancellation burns there, which the
+  // script check below rejects. That ties the outpoint to this offer.
+  const pendingOffer = `${offer.creationTx.txid().toString()}:${CREATION_OUTPUT.pendingOffer}`
+  const acceptanceOffer = principalTx.inputs[ACCEPTANCE_INPUT.offer]?.outpoint()
+  if (
+    principalRef.vout !== ACCEPTANCE_OUTPUT.principal ||
+    acceptanceOffer === undefined ||
+    `${acceptanceOffer.txid().toString()}:${acceptanceOffer.vout()}` !== pendingOffer
+  ) {
+    throw new Error("The principal outpoint is not output 1 of this offer's acceptance")
+  }
   const principalAuth = pinnedAuthCovenant(deps, offer, 'principal')
   const principalOutput = requireOutput(principalTx, principalRef.vout, 'The principal')
   if (principalOutput.scriptPubkey().toString() !== principalAuth.script.toString()) {
@@ -186,10 +204,10 @@ export async function buildPrincipalClaim(
     wasm.blindPset(
       unblinded.toString(),
       [
-        opened.inputSecret(wasm.PinnedRole.Principal, PRINCIPAL_INPUT),
-        wasm.InputSecret.explicit(BORROWER_NFT_INPUT, borrowerNft, NFT_AMOUNT),
+        opened.inputSecret(wasm.PinnedRole.Principal, PRINCIPAL_CLAIM_INPUT.principal),
+        wasm.InputSecret.explicit(PRINCIPAL_CLAIM_INPUT.borrowerNft, borrowerNft, NFT_AMOUNT),
         ...params.feeCoins.map((coin, index) =>
-          walletInputSecret(deps, coin, BORROWER_NFT_INPUT + 1 + index),
+          walletInputSecret(deps, coin, PRINCIPAL_CLAIM_INPUT.borrowerNft + 1 + index),
         ),
       ],
       [],
@@ -220,8 +238,11 @@ export async function buildPrincipalClaim(
         offer,
         'principal',
         prevouts(),
-        PRINCIPAL_INPUT,
-        { inputIndex: BORROWER_NFT_INPUT, outputIndex: BORROWER_NFT_OUTPUT },
+        PRINCIPAL_CLAIM_INPUT.principal,
+        {
+          inputIndex: PRINCIPAL_CLAIM_INPUT.borrowerNft,
+          outputIndex: PRINCIPAL_CLAIM_OUTPUT.borrowerNft,
+        },
       )
       const txid = finalizedTx.txid().toString()
       if (txid !== builtTxid) throw new Error('Finalizing changed the principal claim')
@@ -230,8 +251,8 @@ export async function buildPrincipalClaim(
       return {
         finalizedTx,
         summary: {
-          principalOutpoint: `${txid}:${PRINCIPAL_OUTPUT}`,
-          borrowerNftOutpoint: `${txid}:${BORROWER_NFT_OUTPUT}`,
+          principalOutpoint: `${txid}:${PRINCIPAL_CLAIM_OUTPUT.principal}`,
+          borrowerNftOutpoint: `${txid}:${PRINCIPAL_CLAIM_OUTPUT.borrowerNft}`,
           principal: principal.amount,
         },
       }

@@ -1,6 +1,7 @@
-// Helpers shared by the private flow builders.
+// Helpers shared by the private flow builders, and the one PSET layout checker they all use.
 import type { Pset, Transaction, TxOut, TxOutSecrets, WalletTxOut } from '@lilbonekit/lwk-web'
 
+import { NFT_AMOUNT, NO_REISSUANCE_TOKEN } from '@/simplicity/private-lending/layout'
 import type { PinnedOutputInfo } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from '../deps'
@@ -18,7 +19,10 @@ export function parseOutpoint(outpoint: string): { txid: string; vout: number } 
   return { txid: match[1], vout: Number(match[2]) }
 }
 
-/** Runs a wasm call, turning its thrown `"<code>: <message>"` string into an `Error`. */
+/**
+ * Runs a wasm call (the private lending module's or LWK's), turning what it throws, often a bare
+ * `"<code>: <message>"` string, into an `Error` that names the step.
+ */
 export function wasmStep<T>(step: string, run: () => T): T {
   try {
     return run()
@@ -93,13 +97,21 @@ export interface ExpectedOutput {
   blinding: ExpectedBlinding
 }
 
-/** What a PSET spending an offer's outputs must hold, checked after `finish` and after blinding. */
+/** What a private flow's PSET must hold, checked after `finish` and again after blinding. */
 export interface SpendLayout {
-  /** The prevouts, in input order; none of them issues anything. */
+  /** The prevouts, in input order. */
   inputs: string[]
+  /**
+   * The NFT each input newly issues, by input index: exactly one explicit unit, no reissuance
+   * token, the issuance unblinded. An input with no entry (or `undefined`) issues nothing.
+   */
+  issuances?: (string | undefined)[]
   /** The leading outputs; change and the fee follow. */
   outputs: ExpectedOutput[]
-  /** Assets no other output may carry: the offer's NFTs. */
+  /**
+   * Assets no other output may carry: the offer's NFTs. The issued NFTs and their reissuance
+   * token ids are added to them.
+   */
   restrictedAssets: string[]
   /** Scripts no other output may pay: the offer's covenants. */
   restrictedScripts: string[]
@@ -128,11 +140,32 @@ export function assertSpendLayout(
   if (inputs.length !== layout.inputs.length) {
     fail(`${inputs.length} inputs instead of ${layout.inputs.length}`)
   }
+  const issued: string[] = []
   inputs.forEach((input, index) => {
     if (input.prevout !== layout.inputs[index]) {
       fail(`input ${index} spends ${input.prevout} instead of ${layout.inputs[index]}`)
     }
-    if (input.issuance !== null) fail(`input ${index} issues ${input.issuance.assetId}`)
+    const nft = layout.issuances?.[index]
+    const issuance = input.issuance
+    if (nft === undefined) {
+      if (issuance !== null) fail(`input ${index} issues ${issuance.assetId}`)
+      return
+    }
+    if (issuance === null) fail(`input ${index} does not issue ${nft}`)
+    issued.push(nft, issuance.tokenId)
+    if (issuance.assetId !== nft || issuance.isReissuance) {
+      fail(`input ${index} does not newly issue ${nft}`)
+    }
+    if (issuance.amount !== NFT_AMOUNT || issuance.amountCommitment !== null) {
+      fail(`input ${index} does not issue exactly one explicit unit`)
+    }
+    if (
+      !(issuance.inflationKeys === null || issuance.inflationKeys === NO_REISSUANCE_TOKEN) ||
+      issuance.inflationKeysCommitment !== null
+    ) {
+      fail(`input ${index} issues reissuance tokens`)
+    }
+    if (issuance.blindedIssuance !== 0) fail(`input ${index}'s issuance is not marked unblinded`)
   })
 
   // the expected outputs, then at least the fee
@@ -177,12 +210,14 @@ export function assertSpendLayout(
     }
   })
 
-  const restrictedAssets = new Set(layout.restrictedAssets)
+  const restrictedAssets = new Set([...layout.restrictedAssets, ...issued])
   const restrictedScripts = new Set(layout.restrictedScripts)
   for (let index = layout.outputs.length; index < outputs.length; index += 1) {
     const output = outputs[index]
     if (output.asset === null) fail(`output ${index} has no explicit asset`)
-    if (restrictedAssets.has(output.asset)) fail(`output ${index} carries an NFT of the offer`)
+    if (restrictedAssets.has(output.asset)) {
+      fail(`output ${index} carries an NFT of the offer or its token`)
+    }
     if (restrictedScripts.has(output.script)) fail(`output ${index} pays a covenant of the offer`)
   }
   const fee = outputs[outputs.length - 1]
