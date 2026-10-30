@@ -7,6 +7,7 @@ import {
   type WalletTxOut,
   type Wollet,
 } from '@lilbonekit/lwk-web'
+import { useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { env } from '@/constants/env'
@@ -29,6 +30,7 @@ import {
   type WalletBalances,
 } from '@/lib/wallet-core/wallet/sync'
 import { createEsploraClient } from '@/lwk'
+import { removePrivateSessionQueries } from '@/privateLending/hooks/queryKeys'
 import { getPrivateLendingWasm } from '@/privateLending/wasm'
 import { useLwk } from '@/providers/lwk/useLwk'
 import { ErrorHandler } from '@/utils/errorHandler'
@@ -59,6 +61,7 @@ const MIN_SYNC_GAP_MS = 15_000
 
 export function WalletProvider({ children }: { children: React.ReactNode }) {
   const { lwkNetwork, network } = useLwk()
+  const queryClient = useQueryClient()
 
   const sessionRef = useRef<WalletSession | null>(null)
   const connectingRef = useRef(false)
@@ -102,6 +105,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   // Frees the held lending key. Called right after `sessionRef` stops pointing at its session, so
   // a derivation still in flight sees the change and never creates a key (see getLendingKey).
+  // What was read or opened with the key (its identity, offers, terms) leaves the cache with it.
   const releaseLendingKey = useCallback(() => {
     const held = lendingKeyRef.current
     lendingKeyRef.current = null
@@ -109,7 +113,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       key => key.free(),
       () => {},
     )
-  }, [])
+    removePrivateSessionQueries(queryClient)
+  }, [queryClient])
 
   useEffect(() => releaseLendingKey, [releaseLendingKey])
 

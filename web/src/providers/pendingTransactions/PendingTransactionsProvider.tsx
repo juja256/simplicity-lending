@@ -57,6 +57,35 @@ type TrackedRecord = Pick<
   'txid' | 'confirmationStatus' | 'confirmations' | 'finalizedAt'
 >
 
+/** What the sweep reads: common to public and private records. */
+type SweptRecord = TrackedRecord & Pick<PendingTxRecord, 'createdAt'>
+
+/** The patch of a record the sweep gives up on. */
+const TRACKING_TIMED_OUT = {
+  confirmationStatus: 'failed',
+  errorMessage: 'Transaction tracking timed out.',
+} as const satisfies Partial<PendingTxRecord>
+
+/**
+ * What the sweep does with a record: give up on one still not finalized after
+ * `MAX_PENDING_AGE_MS` (`fail`), forget a finalized one after `FINALIZED_CLEANUP_GRACE_MS`
+ * (`remove`), or nothing. One rule for public and private records, so the two cannot drift.
+ */
+function sweepAction(record: SweptRecord, now: number): 'fail' | 'remove' | null {
+  if (record.confirmationStatus === 'failed') return null
+  if (record.confirmationStatus !== 'finalized' && now - record.createdAt > MAX_PENDING_AGE_MS) {
+    return 'fail'
+  }
+  if (
+    record.confirmationStatus === 'finalized' &&
+    record.finalizedAt &&
+    now - record.finalizedAt > FINALIZED_CLEANUP_GRACE_MS
+  ) {
+    return 'remove'
+  }
+  return null
+}
+
 function usePendingTxConfirmationTracking(
   records: TrackedRecord[],
   onUpdate: (txid: string, patch: Partial<TrackedRecord>) => void,
@@ -249,14 +278,15 @@ function useCreateBorrowerAccountCleanupPolling({
 /**
  * The wallet's private lending transactions: saved finalized before their first broadcast,
  * tracked to finality like public ones, then forgotten. Separate from the public records, so
- * public pages (blocking banners, toasts, the bell) never see them.
+ * public pages (blocking banners, toasts, the bell) never see them. Disabled for wallets that
+ * cannot run private loans: then it opens no database and runs no timer.
  */
-function usePrivateTxStore(scriptPubkey: string | null) {
+function usePrivateTxStore(scriptPubkey: string | null, enabled: boolean) {
   const [privateTxs, setPrivateTxs] = useState<PrivateTxRecord[]>([])
   const privateTxsRef = useLatestRef(privateTxs)
 
   useEffect(() => {
-    if (!scriptPubkey) return
+    if (!scriptPubkey || !enabled) return
     let cancelled = false
     loadPrivateTxsForWallet(scriptPubkey)
       .catch(error => {
@@ -274,11 +304,12 @@ function usePrivateTxStore(scriptPubkey: string | null) {
     return () => {
       cancelled = true
     }
-  }, [scriptPubkey])
+  }, [scriptPubkey, enabled])
 
   const savePrivateTx = useCallback(
     async (input: SavePrivateTxInput) => {
       if (!scriptPubkey) throw new Error('No wallet is connected')
+      if (!enabled) throw new Error('Private loans need Jade or the seed wallet')
       const now = Date.now()
       const record: PrivateTxRecord = {
         ...input,
@@ -293,11 +324,12 @@ function usePrivateTxStore(scriptPubkey: string | null) {
       await putPrivateTx(record)
       setPrivateTxs(prev => [...prev.filter(saved => saved.txid !== record.txid), record])
     },
-    [scriptPubkey],
+    [scriptPubkey, enabled],
   )
 
   const updatePrivateTx = useCallback(
     async (txid: string, patch: Partial<PrivateTxRecord>) => {
+      if (!enabled) return
       const updatedAt = Date.now()
       setPrivateTxs(prev =>
         prev.map(record => (record.txid === txid ? { ...record, ...patch, updatedAt } : record)),
@@ -311,17 +343,21 @@ function usePrivateTxStore(scriptPubkey: string | null) {
         console.warn('[PendingTransactions] Failed to persist private transaction', error)
       }
     },
-    [privateTxsRef],
+    [enabled, privateTxsRef],
   )
 
-  const removePrivateTx = useCallback(async (txid: string) => {
-    setPrivateTxs(prev => prev.filter(record => record.txid !== txid))
-    try {
-      await deletePrivateTx(txid)
-    } catch (error) {
-      console.warn('[PendingTransactions] Failed to delete private transaction', error)
-    }
-  }, [])
+  const removePrivateTx = useCallback(
+    async (txid: string) => {
+      if (!enabled) return
+      setPrivateTxs(prev => prev.filter(record => record.txid !== txid))
+      try {
+        await deletePrivateTx(txid)
+      } catch (error) {
+        console.warn('[PendingTransactions] Failed to delete private transaction', error)
+      }
+    },
+    [enabled],
+  )
 
   const trackedPrivateTxs = useMemo(
     () => privateTxs.filter(record => record.confirmationStatus !== 'failed'),
@@ -337,31 +373,18 @@ function usePrivateTxStore(scriptPubkey: string | null) {
   )
   usePendingTxConfirmationTracking(trackedPrivateTxs, onPrivateTxStatus)
 
-  // The public sweep's rules: give up after a day, forget a finalized one after a grace period.
   useEffect(() => {
+    if (!enabled) return
     const id = setInterval(() => {
       const now = Date.now()
       for (const record of privateTxsRef.current) {
-        if (record.confirmationStatus === 'failed') continue
-        if (
-          record.confirmationStatus !== 'finalized' &&
-          now - record.createdAt > MAX_PENDING_AGE_MS
-        ) {
-          void updatePrivateTx(record.txid, {
-            confirmationStatus: 'failed',
-            errorMessage: 'Transaction tracking timed out.',
-          })
-        } else if (
-          record.confirmationStatus === 'finalized' &&
-          record.finalizedAt &&
-          now - record.finalizedAt > FINALIZED_CLEANUP_GRACE_MS
-        ) {
-          void removePrivateTx(record.txid)
-        }
+        const action = sweepAction(record, now)
+        if (action === 'fail') void updatePrivateTx(record.txid, TRACKING_TIMED_OUT)
+        else if (action === 'remove') void removePrivateTx(record.txid)
       }
     }, SWEEP_INTERVAL_MS)
     return () => clearInterval(id)
-  }, [privateTxsRef, updatePrivateTx, removePrivateTx])
+  }, [enabled, privateTxsRef, updatePrivateTx, removePrivateTx])
 
   return { privateTxs, savePrivateTx, updatePrivateTx, removePrivateTx }
 }
@@ -373,9 +396,11 @@ function usePrivateTxStore(scriptPubkey: string | null) {
  */
 function PendingTransactionsStore({
   scriptPubkey,
+  privateCapable,
   children,
 }: {
   scriptPubkey: string | null
+  privateCapable: boolean
   children: ReactNode
 }) {
   const queryClient = useQueryClient()
@@ -528,22 +553,9 @@ function PendingTransactionsStore({
     const id = setInterval(() => {
       const now = Date.now()
       for (const record of pendingTxs) {
-        if (record.confirmationStatus === 'failed') continue
-        if (
-          record.confirmationStatus !== 'finalized' &&
-          now - record.createdAt > MAX_PENDING_AGE_MS
-        ) {
-          void updatePendingTx(record.txid, {
-            confirmationStatus: 'failed',
-            errorMessage: 'Transaction tracking timed out.',
-          })
-        } else if (
-          record.confirmationStatus === 'finalized' &&
-          record.finalizedAt &&
-          now - record.finalizedAt > FINALIZED_CLEANUP_GRACE_MS
-        ) {
-          removeByTxid(record.txid)
-        }
+        const action = sweepAction(record, now)
+        if (action === 'fail') void updatePendingTx(record.txid, TRACKING_TIMED_OUT)
+        else if (action === 'remove') removeByTxid(record.txid)
       }
     }, SWEEP_INTERVAL_MS)
     return () => clearInterval(id)
@@ -598,8 +610,10 @@ function PendingTransactionsStore({
     onChecked: markChecked,
   })
   usePendingTxToasts(pendingTxs, surfacedTxids)
-  const { privateTxs, savePrivateTx, updatePrivateTx, removePrivateTx } =
-    usePrivateTxStore(scriptPubkey)
+  const { privateTxs, savePrivateTx, updatePrivateTx, removePrivateTx } = usePrivateTxStore(
+    scriptPubkey,
+    privateCapable,
+  )
 
   const contextValue = useMemo(
     () => ({
@@ -642,10 +656,14 @@ function PendingTransactionsStore({
 }
 
 export function PendingTransactionsProvider({ children }: PropsWithChildren) {
-  const { scriptPubkey } = useWallet()
+  const { scriptPubkey, privateCapable } = useWallet()
 
   return (
-    <PendingTransactionsStore key={scriptPubkey ?? 'disconnected'} scriptPubkey={scriptPubkey}>
+    <PendingTransactionsStore
+      key={scriptPubkey ?? 'disconnected'}
+      scriptPubkey={scriptPubkey}
+      privateCapable={privateCapable}
+    >
       {children}
     </PendingTransactionsStore>
   )
