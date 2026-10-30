@@ -1,6 +1,6 @@
 # Private lending: session handoff (2026-10-29)
 
-Read this file first, then the spec. It lists what exists, what comes next, and the decisions a new session cannot recover from the code.
+Read this file first, then the spec. **Part C2 is in progress: read `docs/superpowers/handoff/2026-10-30-private-lending-c2.md` for its current state.** It lists what exists, what comes next, and the decisions a new session cannot recover from the code.
 
 - Spec (the binding design): `docs/superpowers/specs/2026-10-28-private-lending-design.md`
 - Plan, part A (executed): `docs/superpowers/plans/2026-10-28-private-lending-core-and-contract.md`
