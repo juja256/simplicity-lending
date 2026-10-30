@@ -16,11 +16,16 @@ import * as lwk from '@lilbonekit/lwk-web'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { buildPrivateAcceptance } from '@/privateLending/flows/acceptance'
 import { buildPrincipalClaim } from '@/privateLending/flows/claimPrincipal'
+import { buildRepaymentClaim } from '@/privateLending/flows/claimRepayment'
 import { buildPrivateCreation } from '@/privateLending/flows/creation'
+import { buildPrivateRepayment } from '@/privateLending/flows/repayment'
 import { outpointOf } from '@/privateLending/flows/shared'
 import { type InspectedOutput, inspectPset } from '@/privateLending/inspectPset'
 import { openAndVerifyOffer, type VerifiedOffer } from '@/privateLending/verify'
-import { ASSET_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/asset-auth/witness'
+import {
+  ASSET_AUTH_BURN_MAX_WEIGHT_TO_SATISFY,
+  ASSET_AUTH_MAX_WEIGHT_TO_SATISFY,
+} from '@/simplicity/asset-auth/witness'
 import {
   ACCEPTANCE_INPUT,
   ACCEPTANCE_OUTPUT,
@@ -28,6 +33,10 @@ import {
   NFT_AMOUNT,
   PRINCIPAL_CLAIM_INPUT,
   PRINCIPAL_CLAIM_OUTPUT,
+  REPAYMENT_CLAIM_INPUT,
+  REPAYMENT_CLAIM_OUTPUT,
+  REPAYMENT_INPUT,
+  REPAYMENT_OUTPUT,
 } from '@/simplicity/private-lending/layout'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
 import { SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/script-auth/witness'
@@ -557,6 +566,13 @@ function walletAddressIndex(wallet: SeedWallet, script: string): number | undefi
   return undefined
 }
 
+/** An input whose witness weight is checked against the constant its builder gives LWK. */
+interface WeightedInput {
+  index: number
+  name: string
+  limit: number
+}
+
 /**
  * Prints the witness weight of the given inputs of a broadcast transaction, and throws unless
  * each is at most the max-weight-to-satisfy its builder gives LWK for the fee.
@@ -564,10 +580,29 @@ function walletAddressIndex(wallet: SeedWallet, script: string): number | undefi
 async function assertWitnessWeights(
   ctx: Context,
   txid: string,
-  inputs: { index: number; name: string; limit: number }[],
+  inputs: WeightedInput[],
 ): Promise<void> {
-  const witnesses = await ctx.chain.fetchWitnesses(txid)
-  out('witness weights (serialized script witness, WU):')
+  checkWitnessWeights(
+    await ctx.chain.fetchWitnesses(txid),
+    inputs,
+    'witness weights (serialized script witness, WU):',
+  )
+}
+
+/**
+ * The same check on a finalized transaction before it is saved or broadcast: LWK sized its fee
+ * with these constants, so a heavier witness would pay less than the fee rate.
+ */
+function assertFinalizedWeights(tx: lwk.Transaction, inputs: WeightedInput[]): void {
+  checkWitnessWeights(
+    tx.inputs.map(input => input.witness().scriptWitness),
+    inputs,
+    'witness weights of the finalized transaction (WU):',
+  )
+}
+
+function checkWitnessWeights(witnesses: string[][], inputs: WeightedInput[], title: string): void {
+  out(title)
   for (const { index, name, limit } of inputs) {
     const items = witnesses[index] ?? []
     const weight = witnessWeight(items)
@@ -679,10 +714,15 @@ function borrowerNftOutpoint(): string {
   return `${create.txid}:${CREATION_OUTPUT.borrowerNft}`
 }
 
+/** The txid of `stage`, which must be confirmed. */
+function requireConfirmed(stage: Stage): string {
+  const record = getRecord(stage)
+  if (record?.status !== 'confirmed') throw new Error(`no confirmed ${stage}: run that stage`)
+  return record.txid
+}
+
 function requireAcceptance(): string {
-  const accept = getRecord('accept')
-  if (accept?.status !== 'confirmed') throw new Error('no confirmed acceptance: run accept')
-  return accept.txid
+  return requireConfirmed('accept')
 }
 
 async function buildSignedClaim(
@@ -712,15 +752,19 @@ async function buildSignedClaim(
   return { hex: finalizedTx.toString(), txid: finalizedTx.txid().toString() }
 }
 
-/** Syncs until the wallet lists `outpoint` as a confirmed coin. */
+/**
+ * Syncs until the wallet lists `outpoint` among its confirmed outputs, spent or not: a re-run
+ * checks a stage whose coin a later stage may have spent (the repayment spends the claimed
+ * principal).
+ */
 async function waitForWalletCoin(wallet: SeedWallet, outpoint: string): Promise<lwk.WalletTxOut> {
   for (let attempt = 0; ; attempt += 1) {
     await wallet.sync()
-    const coin = wallet
-      .utxos()
-      .find(utxo => outpointOf(utxo) === outpoint && utxo.height() !== undefined)
+    const coin = wallet.wollet
+      .txos()
+      .find(txo => outpointOf(txo) === outpoint && txo.height() !== undefined)
     if (coin) return coin
-    if (attempt >= 11) throw new Error(`the wallet does not list ${outpoint} as a confirmed coin`)
+    if (attempt >= 11) throw new Error(`the wallet does not list ${outpoint} as a confirmed output`)
     await new Promise(resolve => setTimeout(resolve, 10_000))
   }
 }
@@ -755,7 +799,7 @@ async function claimPrincipalStage(ctx: Context): Promise<void> {
   ) {
     throw new Error(`${claimed} holds ${secrets.value()} of ${secrets.asset().toString()}`)
   }
-  out(`the borrower's wallet holds ${claimed}, ${secrets.value()} TEST units`)
+  out(`the borrower's wallet received ${claimed}, ${secrets.value()} TEST units`)
   const after = confirmedBalance(borrower, TESTNET_ASSETS.principal)
   if (before !== undefined) {
     out(`borrower TEST (confirmed): ${before} -> ${after}`)
@@ -788,6 +832,350 @@ async function claimPrincipalDryStage(ctx: Context): Promise<void> {
   out(`\nclaim-principal-dry: ok (${txid} finalized, not saved or broadcast)`)
 }
 
+/** Whether an inspected output is an explicit OP_RETURN that burns exactly one unit of `nft`. */
+function burnsNft(output: InspectedOutput | undefined, nft: string): boolean {
+  return (
+    output !== undefined &&
+    output.script.startsWith('6a') &&
+    output.asset === nft &&
+    output.amount === NFT_AMOUNT &&
+    output.blindingKey === null &&
+    output.assetCommitment === null &&
+    output.amountCommitment === null
+  )
+}
+
+/** Whether a confirmed transaction's output `vout` is an OP_RETURN holding one explicit `nft`. */
+function burnsNftOnChain(tx: lwk.Transaction, vout: number, nft: string): boolean {
+  const output = tx.outputs[vout]
+  return (
+    output !== undefined &&
+    output.scriptPubkey().toString().startsWith('6a') &&
+    output.asset()?.toString() === nft &&
+    output.value() === NFT_AMOUNT
+  )
+}
+
+/**
+ * The stage's own checks of a blinded repayment PSET: the borrower NFT burned, the pinned
+ * repayment at the offer's repayment asset_auth, blinded to the lender, and the collateral back
+ * to the borrower, blinded to its wallet.
+ */
+function assertRepaymentOutputs(
+  pset: lwk.Pset,
+  offer: VerifiedOffer,
+  collateralReceiver: lwk.Address,
+): void {
+  const opened = offer.opened
+  const outputs = inspectPset(wasm, pset.toString()).outputs
+  const repayment = outputs[REPAYMENT_OUTPUT.repayment]
+  const collateral = outputs[REPAYMENT_OUTPUT.collateral]
+  const checks: [string, boolean][] = [
+    [
+      'output 0 burns the borrower NFT, explicit',
+      burnsNft(outputs[REPAYMENT_OUTPUT.borrowerNftBurn], opened.borrowerNft()),
+    ],
+    [
+      'output 1 is the repayment asset_auth with the pinned repayment, blinded to the lender',
+      pinnedMatches(opened.pinned(wasm.PinnedRole.Repayment), repayment) &&
+        scriptHash(repayment.script) === offer.scripts.repaymentOutputScriptHash &&
+        repayment.blindingKey === opened.lenderBlindingKey() &&
+        repayment.ecdhPubkey !== null,
+    ],
+    [
+      'output 2 is the collateral to the borrower, blinded',
+      collateral !== undefined &&
+        collateral.script === collateralReceiver.scriptPubkey().toString() &&
+        collateral.asset === opened.collateralAsset() &&
+        collateral.amount === opened.collateralAmount() &&
+        collateral.blindingKey !== null &&
+        collateral.assetCommitment !== null &&
+        collateral.amountCommitment !== null &&
+        collateral.ecdhPubkey !== null,
+    ],
+  ]
+  for (const [what, ok] of checks) {
+    if (!ok) throw new Error(`repayment PSET: not true that ${what}`)
+    out(`  ok: ${what}`)
+  }
+}
+
+/** The repayment's inputs that LWK sized with a max-weight-to-satisfy constant. */
+const REPAYMENT_WEIGHTS: WeightedInput[] = [
+  {
+    index: REPAYMENT_INPUT.borrowerNft,
+    name: 'borrower NFT (p2wpkh)',
+    limit: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
+  },
+  {
+    index: REPAYMENT_INPUT.offer,
+    name: 'offer (FullRepayment)',
+    limit: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.FullRepayment,
+  },
+]
+
+/**
+ * The borrower's full repayment of the `create` offer, accepted and with its principal claimed:
+ * built, checked by the stage, signed and finalized (which runs the covenant).
+ */
+async function buildSignedRepayment(
+  ctx: Context,
+  offer: VerifiedOffer,
+  acceptTxid: string,
+): Promise<{ hex: string; txid: string }> {
+  const { borrower } = ctx.wallets
+  const collateralReceiver = new lwk.Address(borrower.address())
+  const principalCoins = pickCoins(
+    borrower,
+    TESTNET_ASSETS.principal,
+    offer.opened.repaymentAmount(),
+    'borrower repayment',
+  )
+  const feeCoins = pickCoins(borrower, TESTNET_ASSETS.policy, FEE_BUDGET, 'borrower fee')
+  out(`principal coins ${principalCoins.map(outpointOf).join(', ')}`)
+  out(`fee coins       ${feeCoins.map(outpointOf).join(', ')}`)
+
+  const built = await buildPrivateRepayment(flowDeps(borrower, ctx.chain), offer, {
+    activeOfferOutpoint: `${acceptTxid}:${ACCEPTANCE_OUTPUT.activeOffer}`,
+    borrowerNftOutpoint: borrowerNftOutpoint(),
+    principalCoins,
+    feeCoins,
+    collateralReceiver,
+  })
+  out('blinded repayment PSET:')
+  describeOutputs(built.pset, {
+    borrowerNft: offer.opened.borrowerNft(),
+    lenderNft: offer.opened.lenderNft(),
+  })
+  assertRepaymentOutputs(built.pset, offer, collateralReceiver)
+  const { finalizedTx, summary } = built.finalize(borrower.signer.sign(built.pset))
+  assertFinalizedWeights(finalizedTx, REPAYMENT_WEIGHTS)
+  out(
+    `finalized: repayment ${summary.repaymentOutpoint} (${summary.repayment} TEST units, ` +
+      `interest ${summary.interest}), collateral to ${summary.collateralOutpoint}`,
+  )
+  return { hex: finalizedTx.toString(), txid: finalizedTx.txid().toString() }
+}
+
+async function repayStage(ctx: Context): Promise<void> {
+  const { borrower } = ctx.wallets
+  const acceptTxid = requireAcceptance()
+  // the borrower NFT and the principal are back in the wallet
+  requireConfirmed('claim-principal')
+  const offer = await loadCreatedOffer(ctx, 'borrower')
+  let hex: string | undefined
+  let before: bigint | undefined
+  if (!getRecord('repay')) {
+    requireStageNeed(ctx, 'repay')
+    before = confirmedBalance(borrower, TESTNET_ASSETS.principal)
+    hex = (await buildSignedRepayment(ctx, offer, acceptTxid)).hex
+  }
+  const txid = await submitStage(
+    ctx.chain,
+    'repay',
+    () => {
+      if (hex === undefined) throw new Error('unreachable: a record exists')
+      return hex
+    },
+    out,
+  )
+
+  const repayTx = await ctx.chain.fetchTx(txid)
+  const repaymentAuth = repayTx.outputs[REPAYMENT_OUTPUT.repayment]
+  if (
+    !burnsNftOnChain(repayTx, REPAYMENT_OUTPUT.borrowerNftBurn, offer.opened.borrowerNft()) ||
+    repaymentAuth === undefined ||
+    repaymentAuth.scriptPubkey().jet_sha256_hex() !== offer.scripts.repaymentOutputScriptHash
+  ) {
+    throw new Error(
+      'the confirmed repayment does not burn the borrower NFT and pay the repayment asset_auth',
+    )
+  }
+  out(`borrower NFT burned at ${txid}:${REPAYMENT_OUTPUT.borrowerNftBurn}`)
+
+  const collateralOutpoint = `${txid}:${REPAYMENT_OUTPUT.collateral}`
+  const coin = await waitForWalletCoin(borrower, collateralOutpoint)
+  const secrets = coin.unblinded()
+  if (
+    secrets.asset().toString() !== offer.opened.collateralAsset() ||
+    secrets.value() !== offer.opened.collateralAmount()
+  ) {
+    throw new Error(
+      `${collateralOutpoint} holds ${secrets.value()} of ${secrets.asset().toString()}`,
+    )
+  }
+  out(
+    `the borrower's collateral came back to its wallet: ${collateralOutpoint}, ` +
+      `${secrets.value()} tL-sats`,
+  )
+  const after = confirmedBalance(borrower, TESTNET_ASSETS.principal)
+  if (before !== undefined) {
+    out(`borrower TEST (confirmed): ${before} -> ${after}`)
+    if (before - after !== offer.opened.repaymentAmount()) {
+      throw new Error(`the borrower's TEST balance fell by ${before - after}, not the repayment`)
+    }
+  } else {
+    out(`borrower TEST (confirmed): ${after}`)
+  }
+  await assertWitnessWeights(ctx, txid, REPAYMENT_WEIGHTS)
+  out('\nrepay: ok')
+}
+
+/** A repayment built, checked, signed and finalized, but never saved or broadcast. */
+async function repayDryStage(ctx: Context): Promise<void> {
+  requireStageNeed(ctx, 'repay')
+  requireConfirmed('claim-principal')
+  const offer = await loadCreatedOffer(ctx, 'borrower')
+  const { txid } = await buildSignedRepayment(ctx, offer, requireAcceptance())
+  out(`\nrepay-dry: ok (${txid} finalized, not saved or broadcast)`)
+}
+
+/**
+ * The stage's own checks of a blinded repayment claim PSET: the lender NFT burned, and the
+ * repayment to the lender's wallet, blinded to it.
+ */
+function assertRepaymentClaimOutputs(
+  pset: lwk.Pset,
+  offer: VerifiedOffer,
+  receiver: lwk.Address,
+): void {
+  const opened = offer.opened
+  const outputs = inspectPset(wasm, pset.toString()).outputs
+  const repayment = outputs[REPAYMENT_CLAIM_OUTPUT.repayment]
+  const checks: [string, boolean][] = [
+    [
+      'output 0 burns the lender NFT, explicit',
+      burnsNft(outputs[REPAYMENT_CLAIM_OUTPUT.lenderNftBurn], opened.lenderNft()),
+    ],
+    [
+      'output 1 is the repayment to the lender, blinded',
+      repayment !== undefined &&
+        repayment.script === receiver.scriptPubkey().toString() &&
+        repayment.asset === opened.principalAsset() &&
+        repayment.amount === opened.repaymentAmount() &&
+        repayment.blindingKey !== null &&
+        repayment.assetCommitment !== null &&
+        repayment.amountCommitment !== null &&
+        repayment.ecdhPubkey !== null,
+    ],
+  ]
+  for (const [what, ok] of checks) {
+    if (!ok) throw new Error(`repayment claim PSET: not true that ${what}`)
+    out(`  ok: ${what}`)
+  }
+}
+
+/** The repayment claim's inputs that LWK sized with a max-weight-to-satisfy constant. */
+const REPAYMENT_CLAIM_WEIGHTS: WeightedInput[] = [
+  {
+    index: REPAYMENT_CLAIM_INPUT.repayment,
+    name: 'repayment (asset_auth, burn)',
+    limit: ASSET_AUTH_BURN_MAX_WEIGHT_TO_SATISFY,
+  },
+  {
+    index: REPAYMENT_CLAIM_INPUT.lenderNft,
+    name: 'lender NFT (p2wpkh)',
+    limit: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
+  },
+]
+
+/**
+ * The lender's claim of the repayment: built, checked by the stage, signed and finalized (which
+ * runs the asset_auth). The lender NFT is still where the acceptance paid it.
+ */
+async function buildSignedRepaymentClaim(
+  ctx: Context,
+  offer: VerifiedOffer,
+  acceptTxid: string,
+  repayTxid: string,
+): Promise<{ hex: string; txid: string }> {
+  const { lender } = ctx.wallets
+  const receiver = new lwk.Address(lender.address())
+  const feeCoins = pickCoins(lender, TESTNET_ASSETS.policy, FEE_BUDGET, 'lender fee')
+  out(`fee coins ${feeCoins.map(outpointOf).join(', ')}`)
+
+  const built = await buildRepaymentClaim(flowDeps(lender, ctx.chain), offer, {
+    repaymentOutpoint: `${repayTxid}:${REPAYMENT_OUTPUT.repayment}`,
+    lenderNftOutpoint: `${acceptTxid}:${ACCEPTANCE_OUTPUT.lenderNft}`,
+    feeCoins,
+    receiver,
+  })
+  out('blinded repayment claim PSET:')
+  describeOutputs(built.pset, {
+    borrowerNft: offer.opened.borrowerNft(),
+    lenderNft: offer.opened.lenderNft(),
+  })
+  assertRepaymentClaimOutputs(built.pset, offer, receiver)
+  const { finalizedTx, summary } = built.finalize(lender.signer.sign(built.pset))
+  assertFinalizedWeights(finalizedTx, REPAYMENT_CLAIM_WEIGHTS)
+  out(`finalized: repayment to ${summary.repaymentOutpoint}`)
+  return { hex: finalizedTx.toString(), txid: finalizedTx.txid().toString() }
+}
+
+async function claimRepaymentStage(ctx: Context): Promise<void> {
+  const { lender } = ctx.wallets
+  const acceptTxid = requireAcceptance()
+  const repayTxid = requireConfirmed('repay')
+  const offer = await loadCreatedOffer(ctx, 'lender')
+  let hex: string | undefined
+  let before: bigint | undefined
+  if (!getRecord('claim-repayment')) {
+    requireStageNeed(ctx, 'claim-repayment')
+    before = confirmedBalance(lender, TESTNET_ASSETS.principal)
+    hex = (await buildSignedRepaymentClaim(ctx, offer, acceptTxid, repayTxid)).hex
+  }
+  const txid = await submitStage(
+    ctx.chain,
+    'claim-repayment',
+    () => {
+      if (hex === undefined) throw new Error('unreachable: a record exists')
+      return hex
+    },
+    out,
+  )
+
+  const claimTx = await ctx.chain.fetchTx(txid)
+  if (!burnsNftOnChain(claimTx, REPAYMENT_CLAIM_OUTPUT.lenderNftBurn, offer.opened.lenderNft())) {
+    throw new Error('the confirmed repayment claim does not burn the lender NFT')
+  }
+  out(`lender NFT burned at ${txid}:${REPAYMENT_CLAIM_OUTPUT.lenderNftBurn}`)
+
+  const claimed = `${txid}:${REPAYMENT_CLAIM_OUTPUT.repayment}`
+  const coin = await waitForWalletCoin(lender, claimed)
+  const secrets = coin.unblinded()
+  if (
+    secrets.asset().toString() !== offer.opened.principalAsset() ||
+    secrets.value() !== offer.opened.repaymentAmount()
+  ) {
+    throw new Error(`${claimed} holds ${secrets.value()} of ${secrets.asset().toString()}`)
+  }
+  out(`the lender's wallet received ${claimed}, ${secrets.value()} TEST units`)
+  const after = confirmedBalance(lender, TESTNET_ASSETS.principal)
+  if (before !== undefined) {
+    out(`lender TEST (confirmed): ${before} -> ${after}`)
+    if (after - before !== offer.opened.repaymentAmount()) {
+      throw new Error(`the lender's TEST balance rose by ${after - before}, not the repayment`)
+    }
+  } else {
+    out(`lender TEST (confirmed): ${after}`)
+  }
+  await assertWitnessWeights(ctx, txid, REPAYMENT_CLAIM_WEIGHTS)
+  out('\nclaim-repayment: ok')
+}
+
+/** A repayment claim built, checked, signed and finalized, but never saved or broadcast. */
+async function claimRepaymentDryStage(ctx: Context): Promise<void> {
+  requireStageNeed(ctx, 'claim-repayment')
+  const offer = await loadCreatedOffer(ctx, 'lender')
+  const { txid } = await buildSignedRepaymentClaim(
+    ctx,
+    offer,
+    requireAcceptance(),
+    requireConfirmed('repay'),
+  )
+  out(`\nclaim-repayment-dry: ok (${txid} finalized, not saved or broadcast)`)
+}
+
 const STAGES: Record<string, (ctx: Context) => Promise<void>> = {
   wallets: walletsStage,
   'create-dry': createDryStage,
@@ -796,6 +1184,10 @@ const STAGES: Record<string, (ctx: Context) => Promise<void>> = {
   accept: acceptStage,
   'claim-principal-dry': claimPrincipalDryStage,
   'claim-principal': claimPrincipalStage,
+  'repay-dry': repayDryStage,
+  repay: repayStage,
+  'claim-repayment-dry': claimRepaymentDryStage,
+  'claim-repayment': claimRepaymentStage,
 }
 
 /**

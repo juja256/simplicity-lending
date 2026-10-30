@@ -1,5 +1,12 @@
 // Helpers shared by the private flow builders, and the one PSET layout checker they all use.
-import type { Pset, Transaction, TxOut, TxOutSecrets, WalletTxOut } from '@lilbonekit/lwk-web'
+import type {
+  Pset,
+  Script,
+  Transaction,
+  TxOut,
+  TxOutSecrets,
+  WalletTxOut,
+} from '@lilbonekit/lwk-web'
 
 import { NFT_AMOUNT, NO_REISSUANCE_TOKEN } from '@/simplicity/private-lending/layout'
 import type { PinnedOutputInfo } from '@/wasm/private-lending/private_lending_wasm'
@@ -38,6 +45,14 @@ export function requireOutput(tx: Transaction, vout: number, label: string): TxO
   if (!output)
     throw new Error(`${label}: transaction ${tx.txid().toString()} has no output ${vout}`)
   return output
+}
+
+/**
+ * The script an NFT is burned to: `OP_RETURN "burn"`, as the contracts' core burns. The covenants
+ * accept any OP_RETURN (null data) holding the one explicit unit.
+ */
+export function burnScript(deps: PrivateFlowDeps): Script {
+  return deps.lwk.Script.newOpReturn(new TextEncoder().encode('burn'))
 }
 
 /** The LWK secrets of a pinned output, for spending it as an `ExternalUtxo`. */
