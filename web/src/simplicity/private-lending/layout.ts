@@ -44,3 +44,34 @@ export const REPAYMENT_CLAIM_INPUT = { repayment: 0, lenderNft: 1 } as const
  * follow.
  */
 export const REPAYMENT_CLAIM_OUTPUT = { lenderNftBurn: 0, repayment: 1 } as const
+
+/**
+ * The cancellation's inputs (`attach_cancellation`): the pending offer, the lender NFT at its
+ * script_auth lock, then the borrower NFT; fee coins follow.
+ */
+export const CANCELLATION_INPUT = { offer: 0, lenderNft: 1, borrowerNft: 2 } as const
+
+/**
+ * The cancellation's outputs: both NFTs burned (`attach_cancellation`), then the collateral back
+ * to the borrower; change and fee follow.
+ */
+export const CANCELLATION_OUTPUT = { lenderNftBurn: 0, borrowerNftBurn: 1, collateral: 2 } as const
+
+/** The liquidation's inputs (`attach_liquidation`): the active offer, then the lender NFT. */
+export const LIQUIDATION_INPUT = { offer: 0, lenderNft: 1 } as const
+
+/**
+ * The liquidation's outputs: the lender NFT burned (`attach_liquidation`), then the collateral to
+ * the lender; change and fee follow.
+ */
+export const LIQUIDATION_OUTPUT = { lenderNftBurn: 0, collateral: 1 } as const
+
+/** Lock times from here on are timestamps, which a block height never reaches. */
+export const LOCK_TIME_THRESHOLD = 500_000_000
+
+/**
+ * nSequence of the liquidated offer's input: 0xfffffffe (ENABLE_LOCKTIME_NO_RBF), as the
+ * contracts' core sets it. Simplicity's `check_lock_height` reads the lock time as 0 when every
+ * input is final (0xffffffff, LWK's default).
+ */
+export const LOCK_TIME_ENABLING_SEQUENCE = 0xfffffffe

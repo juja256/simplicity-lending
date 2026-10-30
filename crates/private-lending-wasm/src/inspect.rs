@@ -1,13 +1,13 @@
 //! Reading the PSET fields that the private flows check before signing and that LWK's JS API
-//! does not expose: the blinding keys, nonces, commitments and blind proofs of outputs, and the
-//! issuances of inputs.
+//! does not expose: the blinding keys, nonces, commitments and blind proofs of outputs, the
+//! issuances and sequences of inputs, and the lock time.
 
 use elements::pset::{Input, Output, PartiallySignedTransaction};
 use elements::secp256k1_zkp::ZERO_TWEAK;
 use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
 
-use crate::error::encode_hex;
+use crate::error::{bad_input, encode_hex};
 use crate::scan::parse;
 
 /// The issuance of an input, or null.
@@ -35,6 +35,7 @@ fn issuance_json(input: &Input) -> Value {
 fn input_json(input: &Input) -> Value {
     json!({
         "prevout": format!("{}:{}", input.previous_txid, input.previous_output_index),
+        "sequence": input.sequence.map(|sequence| sequence.to_consensus_u32()),
         "issuance": issuance_json(input),
     })
 }
@@ -57,9 +58,13 @@ fn output_json(output: &Output) -> Value {
 }
 
 /// The fields of a PSET (base64) that the private flows check before signing, as JSON:
-/// `{ inputs: [{ prevout, issuance }], outputs: [{ script, asset, amount, assetCommitment,
-/// amountCommitment, ecdhPubkey, blindingKey, blinderIndex, hasBlindValueProof,
+/// `{ lockTime, inputs: [{ prevout, sequence, issuance }], outputs: [{ script, asset, amount,
+/// assetCommitment, amountCommitment, ecdhPubkey, blindingKey, blinderIndex, hasBlindValueProof,
 /// hasBlindAssetProof }] }`.
+///
+/// `lockTime` is the consensus value the extracted transaction gets: the inputs' required lock
+/// times if any, else the fallback, else 0. `sequence` is null when the input sets none (the
+/// extracted transaction then has `0xffffffff`).
 ///
 /// `issuance` is null for an input without one, else `{ assetId, tokenId, isReissuance, amount,
 /// amountCommitment, inflationKeys, inflationKeysCommitment, blindedIssuance }`. Every absent
@@ -68,7 +73,11 @@ fn output_json(output: &Output) -> Value {
 #[wasm_bindgen(js_name = inspectPset)]
 pub fn inspect_pset(pset_base64: &str) -> Result<String, String> {
     let pset: PartiallySignedTransaction = parse("PSET", pset_base64)?;
+    let lock_time = pset
+        .locktime()
+        .map_err(|error| bad_input(format!("the PSET's lock time: {error}")))?;
     Ok(json!({
+        "lockTime": lock_time.to_consensus_u32(),
         "inputs": pset.inputs().iter().map(input_json).collect::<Vec<_>>(),
         "outputs": pset.outputs().iter().map(output_json).collect::<Vec<_>>(),
     })
@@ -166,6 +175,41 @@ mod tests {
         let inspected = inspect(&pset.to_string());
         assert_eq!(inspected["inputs"][0]["issuance"]["inflationKeys"], "5");
         assert_eq!(inspected["inputs"][1]["issuance"], Value::Null);
+    }
+
+    #[test]
+    fn inspects_the_lock_time_and_the_sequences() {
+        use elements::{LockTime, Sequence};
+
+        let offer = build_offer(10_000).unwrap();
+        let (mut pset, _) = creation_pset(&offer);
+        let unset = inspect(&pset.to_string());
+        assert_eq!(unset["lockTime"], 0);
+        for input in unset["inputs"].as_array().unwrap() {
+            assert_eq!(input["sequence"], Value::Null);
+        }
+
+        // a liquidation: the fallback lock time at the expiry, enabled by the offer input
+        pset.global.tx_data.fallback_locktime = Some(LockTime::from_height(2_683_570).unwrap());
+        pset.inputs_mut()[0].sequence = Some(Sequence::ENABLE_LOCKTIME_NO_RBF);
+        let set = inspect(&pset.to_string());
+        assert_eq!(set["lockTime"], 2_683_570);
+        assert_eq!(set["inputs"][0]["sequence"], 0xffff_fffe_u32);
+        assert_eq!(set["inputs"][1]["sequence"], Value::Null);
+
+        // an input's required height outranks the fallback
+        pset.inputs_mut()[1].required_height_locktime =
+            Some(elements::locktime::Height::from_consensus(2_683_600).unwrap());
+        assert_eq!(inspect(&pset.to_string())["lockTime"], 2_683_600);
+
+        // required heights and times that exclude each other are a bad PSET
+        pset.inputs_mut()[0].required_time_locktime =
+            Some(elements::locktime::Time::from_consensus(1_700_000_000).unwrap());
+        assert!(
+            inspect_pset(&pset.to_string())
+                .unwrap_err()
+                .starts_with("bad-input: the PSET's lock time")
+        );
     }
 
     #[test]

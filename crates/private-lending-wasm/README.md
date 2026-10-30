@@ -103,10 +103,12 @@ Building and blinding:
   covenant and wallet inputs.
 - `blindPset(psetBase64, inputSecrets, blindings)`: blind a PSET.
 - `inspectPset(psetBase64)`: JSON of the PSET fields LWK's JS API does not expose, which the flows
-  check before signing: each input's prevout and issuance (asset and token ids, amounts or
-  commitments, inflation keys, `blinded_issuance`), and each output's script, explicit asset and
-  amount, commitments, nonce (`ecdhPubkey`), blinding key, blinder index and blind proofs. Absent
-  fields are `null`; amounts are decimal strings.
+  check before signing: the lock time the extracted transaction gets (`lockTime`), each input's
+  prevout, sequence and issuance (asset and token ids, amounts or commitments, inflation keys,
+  `blinded_issuance`), and each output's script, explicit asset and amount, commitments, nonce
+  (`ecdhPubkey`), blinding key, blinder index and blind proofs. Absent fields are `null` (an input
+  with no sequence is extracted with `0xffffffff`); amounts are decimal strings. `bad-input` for
+  inputs whose required lock times conflict.
 
 LWK helpers:
 
