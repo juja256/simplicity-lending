@@ -3,7 +3,8 @@
 // (`privateQueryKeys.all()`, invalidated by `invalidateEventQueries`).
 //
 // A listed result is only what a past sync found. An action must load its `VerifiedOffer` fresh
-// with `useLoadVerifiedOffer`, never trust a listed `verified`.
+// with `useLoadVerifiedOffer`, never trust a listed `verified`. The offers and their terms are
+// dropped from the cache when the session ends (`removePrivateSessionQueries`).
 import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback } from 'react'
 
@@ -25,6 +26,7 @@ import { useLwk } from '@/providers/lwk/useLwk'
 import { useWallet } from '@/providers/wallet/useWallet'
 import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
+import { privateOfferTermsQueryKey } from './queryKeys'
 import { PRIVATE_API_BASE_URL, usePrivateFlowDeps } from './usePrivateFlowDeps'
 
 /** An offer's terms for display, opened through the gate in this session and never stored. */
@@ -144,7 +146,7 @@ async function offerItem(
   queryClient: QueryClient,
   deps: PrivateFlowDeps,
   key: LendingKey,
-  scope: readonly unknown[],
+  scope: { network: string; fingerprint: string },
   txid: string,
   scanned: ScanResult,
 ): Promise<PrivateOfferItem> {
@@ -153,7 +155,13 @@ async function offerItem(
       ? Promise.resolve(null)
       : queryClient
           .fetchQuery({
-            queryKey: ['private-offer-terms', ...scope, txid, scanned.role],
+            queryKey: privateOfferTermsQueryKey(
+              scope.network,
+              PRIVATE_API_BASE_URL,
+              scope.fingerprint,
+              txid,
+              scanned.role,
+            ),
             queryFn: () => openTerms(deps, key, txid, scanned.role),
             staleTime: Infinity,
             gcTime: TERMS_GC_MS,
@@ -195,11 +203,13 @@ export function usePrivateOffers() {
   return useQuery({
     queryKey: privateQueryKeys.offers(network, PRIVATE_API_BASE_URL, scriptPubkey ?? ''),
     enabled: isReady && privateCapable && scriptPubkey !== null,
-    queryFn: async (): Promise<PrivateOffers> => {
+    queryFn: async ({ signal }): Promise<PrivateOffers> => {
       const [deps, key, kv] = await Promise.all([getDeps(), getLendingKey(), getScanKv()])
-      const scope = [network, PRIVATE_API_BASE_URL, key.fingerprint()] as const
+      const scope = { network, fingerprint: key.fingerprint() }
       const store = kvScanStore(kv, { network, apiBaseUrl: PRIVATE_API_BASE_URL })
       const state = await syncOffers(deps, key, PRIVATE_API_BASE_URL, store)
+      // A sync outlived by its session (or its last viewer) opens no terms into the cache.
+      signal.throwIfAborted()
       const items = await Promise.all(
         Object.entries(state.offers).map(([txid, scanned]) =>
           offerItem(queryClient, deps, key, scope, txid, scanned),

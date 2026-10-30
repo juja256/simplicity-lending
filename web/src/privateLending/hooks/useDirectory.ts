@@ -1,17 +1,14 @@
 // The lender directory: the whole list with a lookup by x-only key, the wallet's own entry, and
 // the signed writes. Names are chosen by whoever holds a key and are never verified: always show
 // them (inside <bdi>) next to the key's fingerprint.
+//
+// Reads never carry the wallet's key: its own entry is found in the list. The x-only key leaves
+// the browser only in a write (and in the offers it creates).
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useMemo } from 'react'
 
-import { ApiError } from '@/api/errors'
-import {
-  type DirectoryEntry,
-  fetchDirectory,
-  fetchDirectoryEntry,
-  indexerErrorMessage,
-} from '@/api/indexer/private'
-import { privateQueryKeys } from '@/api/indexer/queryKeys'
+import { type DirectoryEntry, fetchDirectory, indexerErrorMessage } from '@/api/indexer/private'
+import { privateDirectoryQueryKeys } from '@/api/indexer/queryKeys'
 import { registerInDirectory, removeFromDirectory } from '@/privateLending/directory'
 import { getPrivateLendingWasm } from '@/privateLending/wasm'
 import { useWallet } from '@/providers/wallet/useWallet'
@@ -23,6 +20,8 @@ import { PRIVATE_API_BASE_URL, useLendingKeyIdentity } from './usePrivateFlowDep
 const DIRECTORY_PAGE_LIMIT = 100
 /** A bound on the pages read, against an indexer that never ends the list. */
 const MAX_DIRECTORY_PAGES = 50
+/** No block changes the directory: it refreshes after its own writes, or once this old. */
+const DIRECTORY_STALE_MS = 5 * 60_000
 
 /** Every entry, in the indexer's order, up to `MAX_DIRECTORY_PAGES` pages. */
 async function fetchWholeDirectory(signal: AbortSignal): Promise<DirectoryEntry[]> {
@@ -55,28 +54,12 @@ function toDirectoryWriteError(error: unknown): unknown {
 export function useDirectory() {
   const queryClient = useQueryClient()
   const { getLendingKey } = useWallet()
-  const identity = useLendingKeyIdentity()
-  const own = identity.data
-  const ownPubkey = own?.pubkey
+  const own = useLendingKeyIdentity().data
 
   const directory = useQuery({
-    queryKey: privateQueryKeys.directory(PRIVATE_API_BASE_URL),
+    queryKey: privateDirectoryQueryKeys.list(PRIVATE_API_BASE_URL),
     queryFn: ({ signal }) => fetchWholeDirectory(signal),
-  })
-
-  // Read on its own, so the wallet's entry shows even past the pages the list reads.
-  const ownEntryQuery = useQuery({
-    queryKey: privateQueryKeys.directoryEntry(PRIVATE_API_BASE_URL, ownPubkey ?? ''),
-    enabled: ownPubkey !== undefined,
-    queryFn: async ({ signal }): Promise<DirectoryEntry | null> => {
-      if (ownPubkey === undefined) return null
-      try {
-        return await fetchDirectoryEntry(ownPubkey, PRIVATE_API_BASE_URL, { signal })
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 404) return null
-        throw error
-      }
-    },
+    staleTime: DIRECTORY_STALE_MS,
   })
 
   const entries = useMemo(() => directory.data ?? [], [directory.data])
@@ -87,10 +70,20 @@ export function useDirectory() {
     [byPubkey],
   )
 
-  // Covers the list and the wallet's entry.
+  /** Applies a write the indexer accepted to the loaded list, until the refetch replaces it. */
+  const updateList = useCallback(
+    (update: (entries: DirectoryEntry[]) => DirectoryEntry[]) =>
+      queryClient.setQueryData<DirectoryEntry[]>(
+        privateDirectoryQueryKeys.list(PRIVATE_API_BASE_URL),
+        loaded => (loaded === undefined ? loaded : update(loaded)),
+      ),
+    [queryClient],
+  )
   const invalidateDirectory = useCallback(
     () =>
-      queryClient.invalidateQueries({ queryKey: privateQueryKeys.directory(PRIVATE_API_BASE_URL) }),
+      queryClient.invalidateQueries({
+        queryKey: privateDirectoryQueryKeys.list(PRIVATE_API_BASE_URL),
+      }),
     [queryClient],
   )
 
@@ -104,18 +97,27 @@ export function useDirectory() {
         throw toDirectoryWriteError(error)
       }
     },
+    onSuccess: entry =>
+      updateList(loaded =>
+        loaded.some(listed => listed.pubkey === entry.pubkey)
+          ? loaded.map(listed => (listed.pubkey === entry.pubkey ? entry : listed))
+          : [...loaded, entry],
+      ),
     onSettled: invalidateDirectory,
   })
 
   /** Removes the wallet's entry; fails with the indexer's message if there is none. */
   const remove = useMutation({
     mutationFn: async (): Promise<void> => {
+      let pubkey: string
       try {
         const [wasm, key] = await Promise.all([getPrivateLendingWasm(), getLendingKey()])
+        pubkey = key.xOnlyPublicKey()
         await removeFromDirectory({ wasm }, key, PRIVATE_API_BASE_URL)
       } catch (error) {
         throw toDirectoryWriteError(error)
       }
+      updateList(loaded => loaded.filter(listed => listed.pubkey !== pubkey))
     },
     onSettled: invalidateDirectory,
   })
@@ -128,8 +130,11 @@ export function useDirectory() {
     lookup,
     /** The wallet's lending-key identity; undefined until known (or without a capable wallet). */
     own,
-    /** The wallet's entry: undefined while unknown, null if it has none. */
-    ownEntry: ownEntryQuery.data,
+    /**
+     * The wallet's entry, found in the loaded list: undefined until the list and the identity are
+     * known, null if the list does not have it.
+     */
+    ownEntry: own !== undefined && directory.isSuccess ? (lookup(own.pubkey) ?? null) : undefined,
     register,
     remove,
   }

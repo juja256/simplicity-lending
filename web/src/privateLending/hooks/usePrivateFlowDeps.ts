@@ -17,6 +17,8 @@ import { useLwk } from '@/providers/lwk/useLwk'
 import { useWallet } from '@/providers/wallet/useWallet'
 import type { PrivateLendingSources } from '@/simplicity/private-lending/scripts'
 
+import { lendingKeyIdentityQueryKey } from './queryKeys'
+
 /** The indexer every private hook reads and writes. */
 export const PRIVATE_API_BASE_URL = env.VITE_API_URL
 
@@ -86,12 +88,13 @@ export interface LendingKeyIdentity {
 
 /**
  * The connected wallet's lending-key identity, for display, directory writes and the lender field
- * of offers. Disabled unless a private-capable wallet is ready. Only the public parts are kept.
+ * of offers. Computed locally: nothing is requested with it. Disabled unless a private-capable
+ * wallet is ready. Only the public parts are kept, and only for the session.
  */
 export function useLendingKeyIdentity() {
   const { isReady, privateCapable, scriptPubkey, getLendingKey } = useWallet()
   return useQuery({
-    queryKey: ['lending-key-identity', scriptPubkey],
+    queryKey: lendingKeyIdentityQueryKey(scriptPubkey),
     enabled: isReady && privateCapable && scriptPubkey !== null,
     staleTime: Infinity,
     retry: false,
