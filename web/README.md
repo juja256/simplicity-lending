@@ -98,6 +98,16 @@ With no stage named, every stage below runs in this order.
   refused with `expiry-not-reached` before anything is fetched or built: it is tried once the
   acceptance is broadcast, and again once it confirmed. The script then waits for the expiry and
   liquidates (`liquidate`).
+- `scan`: reads the local testnet indexer (below) and broadcasts nothing. Each wallet syncs its
+  offers from an empty store: the lender must find exactly the three e2e offers (`create`,
+  `cancel-create`, `liquidate-create`), verified as lender, and the borrower the same three as
+  borrower. The sync must page as the indexer's sync recipe says and fetch only the transactions
+  of candidates that pass the view-tag or own-nonce check, and a re-sync must start right after
+  the stored height and keep the same offers. A fresh random key must find nothing. A local proxy
+  then plays a hostile indexer that serves `create`'s candidate with `cancel-create`'s
+  transaction: `create` must come out invalid, never verified. Last, the lender registers "E2E
+  Lender" in the directory, sees it listed, gets a 401 for a write signed over another name, and
+  removes the entry.
 
 Each stage prints its txids and the PSET it built, with the checks it ran. It fails if a covenant
 or NFT input's witness outweighs the constant its builder gives LWK for the fee: on chain, and in
@@ -111,6 +121,35 @@ stage's transaction from the wallets' current coins, and never save or broadcast
 only when named, and need the records the real transaction would spend: `cancel-dry` rebuilds the
 cancellation of the `cancel-create` offer, and `liquidate-dry` the liquidation of the
 `liquidate-accept` one, which below the expiry checks the refusal instead.
+
+### Local testnet indexer
+
+The `scan` stage, and the app on testnet (`VITE_API_URL` in `.env.liquidtestnet`, which the e2e
+script reads too), use a local indexer of Liquid testnet with its own database,
+`lending-indexer-testnet`. Never point the indexer tests at that database, nor run them while this
+indexer uses Postgres. From `crates/indexer`, with Postgres on `localhost:5432`:
+
+```bash
+# Once: sqlx-cli, then the database and its migrations.
+cargo install --version='~0.8' sqlx-cli --no-default-features --features rustls,postgres --locked
+DATABASE_URL=postgres://postgres:password@localhost:5432/lending-indexer-testnet sqlx database create
+DATABASE_URL=postgres://postgres:password@localhost:5432/lending-indexer-testnet sqlx migrate run
+
+# Two processes, each in its own shell with these exports.
+export SQLX_OFFLINE=true DATABASE__DATABASE_NAME=lending-indexer-testnet
+export ESPLORA__BASE_URL=https://blockstream.info/liquidtestnet/api
+RUN_MODE=indexer INDEXER__LAST_INDEXED_HEIGHT=2682200 cargo run -p lending-indexer
+RUN_MODE=api cargo run -p lending-indexer
+```
+
+- `INDEXER__LAST_INDEXED_HEIGHT` is the block before the first one indexed: it must be below the
+  first e2e creation (`create` is in block 2 682 289 in the current state). It applies only to an
+  empty database; afterwards the stored sync height wins.
+- `ESPLORA__BASE_URL` replaces `configuration/base.yaml`'s `liquid.network` esplora with the one
+  the e2e script uses.
+- The API listens on `http://localhost:8000`. The indexer catches up at 30 to 45 blocks a minute;
+  `curl 'http://localhost:8000/private/candidates?limit=1'` shows its `last_indexed_height`, and
+  `scan` fails until it has passed every e2e creation.
 
 ### State and resume
 

@@ -39,6 +39,8 @@ export interface E2eEnv {
   waterfallsUrl: string
   waterfallsRecipient: string
   esploraApi: string
+  /** The indexer API (`VITE_API_URL`), which the `scan` stage reads; the app's default if unset. */
+  apiUrl: string
   borrowerMnemonic: string
   lenderMnemonic: string
 }
@@ -53,7 +55,9 @@ export function loadEnv(): E2eEnv {
     if (!value) throw new Error(`${name} is not set (.env.liquidtestnet / .env.e2e.local)`)
     return value
   }
+  const apiUrl = process.env.VITE_API_URL ?? merged.VITE_API_URL ?? 'http://localhost:8000'
   return {
+    apiUrl: apiUrl.replace(/\/+$/, ''),
     waterfallsUrl: need('VITE_WATERFALLS_URL'),
     waterfallsRecipient: need('VITE_WATERFALLS_RECIPIENT'),
     esploraApi: `${need('VITE_ESPLORA_BASE_URL').replace(/\/+$/, '')}/api`,
@@ -81,7 +85,8 @@ export interface Need {
  * The state records of the transactions that spend from the wallets, one per transaction. Most
  * stages broadcast one; `cancel` broadcasts its own creation (`cancel-create`), then the
  * cancellation, and `liquidate` its creation (`liquidate-create`), the lender's acceptance
- * (`liquidate-accept`), then the liquidation.
+ * (`liquidate-accept`), then the liquidation. `scan` broadcasts nothing (it reads the indexer and
+ * writes the directory, off-chain), so it never has a record.
  */
 export type Stage =
   | 'create'
@@ -94,13 +99,14 @@ export type Stage =
   | 'liquidate-create'
   | 'liquidate-accept'
   | 'liquidate'
+  | 'scan'
 
 const NONE: Need = { lbtc: 0n, test: 0n }
 
 /**
  * What each record's transaction needs from each wallet when it is built. A creation needs two
  * coins besides the collateral (2 × COLLATERAL, as the coins come) and a fee. The `wallets` stage
- * only moves coins within a wallet and checks its split itself.
+ * only moves coins within a wallet and checks its split itself; `scan` needs nothing.
  */
 export const STAGE_NEEDS: Record<Stage, Record<Wallet, Need>> = {
   create: {
@@ -146,6 +152,13 @@ export const STAGE_NEEDS: Record<Stage, Record<Wallet, Need>> = {
     borrower: NONE,
     lender: { lbtc: FEE_BUDGET, test: 0n },
   },
+  scan: { borrower: NONE, lender: NONE },
+}
+
+/** Whether `stage` needs nothing from either wallet, as `scan`, which spends no coins. */
+export function needsNothing(stage: Stage): boolean {
+  const { borrower, lender } = STAGE_NEEDS[stage]
+  return borrower.lbtc === 0n && borrower.test === 0n && lender.lbtc === 0n && lender.test === 0n
 }
 
 export const STAGE_NAMES = Object.keys(STAGE_NEEDS) as Stage[]
