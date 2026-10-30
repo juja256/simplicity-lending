@@ -32,7 +32,8 @@ export const PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY: Record<PrivateLendingBranch,
   // testnet acceptance baf52dd7…b55b2: 2 998 (1 + 2 861 + 32 + 97 bytes, with length prefixes)
   OfferAcceptance: 3298,
   OfferCancellation: 4000,
-  FullRepayment: 4000,
+  // testnet repayment 1d30ea1c…11aa: 3 028 (1 + 2 891 + 32 + 97 bytes, with length prefixes)
+  FullRepayment: 3331,
   Liquidation: 4000,
 }
 
