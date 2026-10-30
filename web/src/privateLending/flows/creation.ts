@@ -10,6 +10,7 @@ import type { Address, Contract, WalletTxOut } from '@lilbonekit/lwk-web'
 import type { AsyncUpdatedPset } from '@/lwk/updatedPset'
 import {
   CREATION_OUTPUT,
+  LOCK_TIME_THRESHOLD,
   NFT_AMOUNT,
   NO_REISSUANCE_TOKEN,
 } from '@/simplicity/private-lending/layout'
@@ -21,9 +22,6 @@ import type { PrivateFlowDeps } from '../deps'
 import { walletInputSecret } from '../secrets'
 import { openAndVerifyOffer, PrivateOfferError, type VerifiedOffer } from '../verify'
 import { assertSpendLayout, outpointOf, type SpendLayout, wasmStep } from './shared'
-
-/** Lock times from here on are timestamps, which a block height never reaches. */
-const LOCK_TIME_THRESHOLD = 500_000_000
 
 /**
  * The NFTs' asset contracts, never published. What matters is their fresh issuer key: it gives

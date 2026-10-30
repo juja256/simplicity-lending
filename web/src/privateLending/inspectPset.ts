@@ -20,6 +20,8 @@ export interface InspectedIssuance {
 export interface InspectedInput {
   /** `"<txid>:<vout>"`. */
   prevout: string
+  /** The input's nSequence; null when unset, which the extracted transaction makes 0xffffffff. */
+  sequence: number | null
   issuance: InspectedIssuance | null
 }
 
@@ -41,6 +43,8 @@ export interface InspectedOutput {
 }
 
 export interface InspectedPset {
+  /** The extracted transaction's nLockTime: the inputs' required lock times, else the fallback. */
+  lockTime: number
   inputs: InspectedInput[]
   outputs: InspectedOutput[]
 }
@@ -50,7 +54,8 @@ type Raw<T> = {
 }
 
 interface RawPset {
-  inputs: { prevout: string; issuance: Raw<InspectedIssuance> | null }[]
+  lockTime: number
+  inputs: { prevout: string; sequence: number | null; issuance: Raw<InspectedIssuance> | null }[]
   outputs: Raw<InspectedOutput>[]
 }
 
@@ -69,8 +74,10 @@ export function inspectPset(wasm: PrivateFlowDeps['wasm'], psetBase64: string): 
   }
   const raw = JSON.parse(json) as RawPset
   return {
+    lockTime: raw.lockTime,
     inputs: raw.inputs.map(input => ({
       prevout: input.prevout,
+      sequence: input.sequence,
       issuance:
         input.issuance === null
           ? null

@@ -21,13 +21,25 @@ async function get(base: string, route: string): Promise<Response> {
   return response
 }
 
+/** What esplora reports of a transaction's timelock and confirmation. */
+export interface TxTimelock {
+  lockTime: number
+  /** Each input's nSequence. */
+  sequences: number[]
+  /** The confirming block's height, or null while unconfirmed. */
+  blockHeight: number | null
+}
+
 export interface Chain {
   fetchTx(txid: string): Promise<Transaction>
   /** Each input's script witness, as esplora reports it: one hex string per stack item. */
   fetchWitnesses(txid: string): Promise<string[][]>
+  fetchTimelock(txid: string): Promise<TxTimelock>
   broadcast(hex: string): Promise<string>
   tipHeight(): Promise<number>
   waitForConfirmation(txid: string): Promise<void>
+  /** Polls until the tip reaches `height`; returns the tip. */
+  waitForTip(height: number): Promise<number>
 }
 
 export function createChain(esploraApi: string): Chain {
@@ -42,6 +54,21 @@ export function createChain(esploraApi: string): Chain {
         vin: { witness?: string[] }[]
       }
       return tx.vin.map(input => input.witness ?? [])
+    },
+    async fetchTimelock(txid) {
+      const tx = (await (await get(esploraApi, `/tx/${txid}`)).json()) as {
+        locktime: number
+        vin: { sequence: number }[]
+        status: { confirmed: boolean; block_height?: number }
+      }
+      return {
+        lockTime: tx.locktime,
+        sequences: tx.vin.map(input => input.sequence),
+        blockHeight:
+          tx.status.confirmed && tx.status.block_height !== undefined
+            ? tx.status.block_height
+            : null,
+      }
     },
     async broadcast(hex) {
       const response = await fetch(`${esploraApi}/tx`, { method: 'POST', body: hex })
@@ -63,6 +90,15 @@ export function createChain(esploraApi: string): Chain {
         await new Promise(resolve => setTimeout(resolve, POLL_MS))
       }
     },
+    async waitForTip(height) {
+      const deadline = Date.now() + TIMEOUT_MS
+      for (;;) {
+        const tip = await chain.tipHeight()
+        if (tip >= height) return tip
+        if (Date.now() > deadline) throw new Error(`the tip did not reach ${height} in 10 minutes`)
+        await new Promise(resolve => setTimeout(resolve, POLL_MS))
+      }
+    },
   }
   return chain
 }
@@ -72,13 +108,15 @@ const ALREADY_KNOWN = /already|txn-same-nonwitness-data-in-mempool/i
 /**
  * Runs one transaction stage so that a crash never makes a re-run build a different transaction.
  * A `built`/`broadcast` record rebroadcasts its saved hex ("already known" counts as success) and
- * waits for confirmation; only a stage without a record calls `build`.
+ * waits for confirmation; only a stage without a record calls `build`. `afterBroadcast` runs after
+ * each (re)broadcast, before the wait.
  */
 export async function submitStage(
   chain: Chain,
   stage: string,
   build: () => string,
   log: (line: string) => void,
+  afterBroadcast?: (txid: string) => Promise<void>,
 ): Promise<string> {
   let record = getRecord(stage)
   if (record?.status === 'confirmed') {
@@ -108,6 +146,7 @@ export async function submitStage(
       if (!ALREADY_KNOWN.test(error instanceof Error ? error.message : String(error))) throw error
     }
   }
+  if (afterBroadcast) await afterBroadcast(record.txid)
   await chain.waitForConfirmation(record.txid)
   saveRecord({ ...record, status: 'confirmed' })
   log(`${stage}: confirmed`)

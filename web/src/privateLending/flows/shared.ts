@@ -132,6 +132,11 @@ export interface SpendLayout {
   restrictedScripts: string[]
   /** The fee asset; the last output must be the fee. */
   policyAsset: string
+  /**
+   * For a branch that checks a lock height: the transaction's exact nLockTime, and the sequence
+   * each listed input must set explicitly (by input index). Unchecked when absent.
+   */
+  lockTime?: { height: number; sequences: Record<number, number> }
 }
 
 /**
@@ -150,10 +155,19 @@ export function assertSpendLayout(
   function fail(what: string): never {
     throw new Error(`${label} PSET ${blinded ? 'after blinding' : 'after finish'}: ${what}`)
   }
-  const { inputs, outputs } = inspectPset(deps.wasm, pset.toString())
+  const { lockTime, inputs, outputs } = inspectPset(deps.wasm, pset.toString())
 
   if (inputs.length !== layout.inputs.length) {
     fail(`${inputs.length} inputs instead of ${layout.inputs.length}`)
+  }
+  if (layout.lockTime !== undefined) {
+    if (lockTime !== layout.lockTime.height) {
+      fail(`the lock time is ${lockTime}, not ${layout.lockTime.height}`)
+    }
+    for (const [index, sequence] of Object.entries(layout.lockTime.sequences)) {
+      const actual = inputs[Number(index)]?.sequence
+      if (actual !== sequence) fail(`input ${index}'s sequence is ${actual}, not ${sequence}`)
+    }
   }
   const issued: string[] = []
   inputs.forEach((input, index) => {

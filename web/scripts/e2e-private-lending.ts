@@ -1,6 +1,7 @@
 // Testnet end-to-end run of the private lending flows.
 //   npx pnpm@10.33.0 e2e:private [stage...]
-// Stages run in the order given. Seed phrases come from `.env.e2e.local` and are never printed.
+// Stages run in the order given; with none, every real stage runs (see `web/README.md`). Seed
+// phrases come from `.env.e2e.local` and are never printed.
 //
 // Resuming: every transaction is finalized and saved to `.e2e-private/state.json` (status
 // `built`) BEFORE it is broadcast, then marked `broadcast` and `confirmed`. A re-run
@@ -14,10 +15,17 @@
 import * as lwk from '@lilbonekit/lwk-web'
 
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
+import type { PrivateFlowDeps } from '@/privateLending/deps'
 import { buildPrivateAcceptance } from '@/privateLending/flows/acceptance'
+import { buildPrivateCancellation } from '@/privateLending/flows/cancellation'
 import { buildPrincipalClaim } from '@/privateLending/flows/claimPrincipal'
 import { buildRepaymentClaim } from '@/privateLending/flows/claimRepayment'
 import { buildPrivateCreation } from '@/privateLending/flows/creation'
+import {
+  buildPrivateLiquidation,
+  ExpiryNotReachedError,
+  type LiquidationParams,
+} from '@/privateLending/flows/liquidation'
 import { buildPrivateRepayment } from '@/privateLending/flows/repayment'
 import { outpointOf } from '@/privateLending/flows/shared'
 import { type InspectedOutput, inspectPset } from '@/privateLending/inspectPset'
@@ -29,7 +37,11 @@ import {
 import {
   ACCEPTANCE_INPUT,
   ACCEPTANCE_OUTPUT,
+  CANCELLATION_INPUT,
+  CANCELLATION_OUTPUT,
   CREATION_OUTPUT,
+  LIQUIDATION_INPUT,
+  LIQUIDATION_OUTPUT,
   NFT_AMOUNT,
   PRINCIPAL_CLAIM_INPUT,
   PRINCIPAL_CLAIM_OUTPUT,
@@ -408,10 +420,30 @@ async function createDryStage(ctx: Context): Promise<void> {
   out('\ncreate-dry: ok (nothing signed, broadcast or saved)')
 }
 
+/** The records of the e2e offers' creations, and the stage that runs each. */
+const CREATION_STAGES = {
+  create: 'create',
+  'cancel-create': 'cancel',
+  'liquidate-create': 'liquidate',
+} as const
+
+type CreationRecord = keyof typeof CREATION_STAGES
+
 /** The `create` offer, fetched from chain and opened through the gate as `role`. */
 async function loadCreatedOffer(ctx: Context, role: Wallet): Promise<VerifiedOffer> {
-  const record = getRecord('create')
-  if (record?.status !== 'confirmed') throw new Error('no confirmed offer: run the create stage')
+  return loadOffer(ctx, 'create', role)
+}
+
+/** The offer of a confirmed creation record, fetched from chain and opened as `role`. */
+async function loadOffer(
+  ctx: Context,
+  creation: CreationRecord,
+  role: Wallet,
+): Promise<VerifiedOffer> {
+  const record = getRecord(creation)
+  if (record?.status !== 'confirmed') {
+    throw new Error(`no confirmed ${creation}: run the ${CREATION_STAGES[creation]} stage`)
+  }
   const wallet = ctx.wallets[role]
   const creationTx = await ctx.chain.fetchTx(record.txid)
   return openAndVerifyOffer(
@@ -614,9 +646,23 @@ function checkWitnessWeights(witnesses: string[][], inputs: WeightedInput[], tit
   }
 }
 
+/** The acceptance's inputs that LWK sized with a max-weight-to-satisfy constant. */
+const ACCEPTANCE_WEIGHTS: WeightedInput[] = [
+  {
+    index: ACCEPTANCE_INPUT.offer,
+    name: 'offer (OfferAcceptance)',
+    limit: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.OfferAcceptance,
+  },
+  {
+    index: ACCEPTANCE_INPUT.lenderNft,
+    name: 'lender NFT lock (script_auth)',
+    limit: SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY,
+  },
+]
+
 /**
- * The lender's acceptance of the `create` offer: built, checked by the stage, signed and
- * finalized (which runs the covenants). The caller saves and broadcasts it, or not.
+ * The lender's acceptance of an offer: built, checked by the stage, signed and finalized (which
+ * runs the covenants). The caller saves and broadcasts it, or not.
  */
 async function buildSignedAcceptance(
   ctx: Context,
@@ -645,27 +691,37 @@ async function buildSignedAcceptance(
     lenderNftReceiver.toUnconfidential().scriptPubkey().toString(),
   )
   const { finalizedTx, summary } = built.finalize(lender.signer.sign(built.pset))
+  assertFinalizedWeights(finalizedTx, ACCEPTANCE_WEIGHTS)
   out(
     `finalized: active offer ${summary.activeOfferOutpoint}, principal ${summary.principalOutpoint}`,
   )
   return { hex: finalizedTx.toString(), txid: finalizedTx.txid().toString() }
 }
 
-async function acceptStage(ctx: Context): Promise<void> {
-  const offer = await loadCreatedOffer(ctx, 'lender')
+/**
+ * The lender's acceptance of `offer` under the record `stage`: built only without a record, saved,
+ * broadcast (then `afterBroadcast` runs) and confirmed, then checked on chain. Returns its txid.
+ */
+async function submitAcceptance(
+  ctx: Context,
+  stage: 'accept' | 'liquidate-accept',
+  offer: VerifiedOffer,
+  afterBroadcast?: (txid: string) => Promise<void>,
+): Promise<string> {
   let hex: string | undefined
-  if (!getRecord('accept')) {
-    requireStageNeed(ctx, 'accept')
+  if (!getRecord(stage)) {
+    requireStageNeed(ctx, stage)
     hex = (await buildSignedAcceptance(ctx, offer)).hex
   }
   const txid = await submitStage(
     ctx.chain,
-    'accept',
+    stage,
     () => {
       if (hex === undefined) throw new Error('unreachable: a record exists')
       return hex
     },
     out,
+    afterBroadcast,
   )
   await ctx.wallets.lender.sync()
 
@@ -683,18 +739,12 @@ async function acceptStage(ctx: Context): Promise<void> {
     `lender NFT ${offer.opened.lenderNft()} at ${txid}:${ACCEPTANCE_OUTPUT.lenderNft} ` +
       '(a lender address)',
   )
-  await assertWitnessWeights(ctx, txid, [
-    {
-      index: ACCEPTANCE_INPUT.offer,
-      name: 'offer (OfferAcceptance)',
-      limit: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.OfferAcceptance,
-    },
-    {
-      index: ACCEPTANCE_INPUT.lenderNft,
-      name: 'lender NFT lock (script_auth)',
-      limit: SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY,
-    },
-  ])
+  await assertWitnessWeights(ctx, txid, ACCEPTANCE_WEIGHTS)
+  return txid
+}
+
+async function acceptStage(ctx: Context): Promise<void> {
+  await submitAcceptance(ctx, 'accept', await loadCreatedOffer(ctx, 'lender'))
   out('\naccept: ok')
 }
 
@@ -1176,6 +1226,469 @@ async function claimRepaymentDryStage(ctx: Context): Promise<void> {
   out(`\nclaim-repayment-dry: ok (${txid} finalized, not saved or broadcast)`)
 }
 
+/** Whether an inspected output pays `amount` of `asset` to `receiver`, blinded to it. */
+function paysBlinded(
+  output: InspectedOutput | undefined,
+  receiver: lwk.Address,
+  asset: string,
+  amount: bigint,
+): boolean {
+  return (
+    output !== undefined &&
+    output.script === receiver.scriptPubkey().toString() &&
+    output.asset === asset &&
+    output.amount === amount &&
+    output.blindingKey !== null &&
+    output.assetCommitment !== null &&
+    output.amountCommitment !== null &&
+    output.ecdhPubkey !== null
+  )
+}
+
+/**
+ * Checks that the wallet received the collateral at `outpoint`, and on the build path (`before`
+ * set) that its confirmed tL-BTC moved by exactly the collateral less the transaction's fee: the
+ * collateral is tL-BTC, the fee asset, and the wallet paid only the fee.
+ */
+async function assertCollateralReceived(
+  wallet: SeedWallet,
+  name: Wallet,
+  tx: lwk.Transaction,
+  outpoint: string,
+  offer: VerifiedOffer,
+  before: bigint | undefined,
+): Promise<void> {
+  const opened = offer.opened
+  const secrets = (await waitForWalletCoin(wallet, outpoint)).unblinded()
+  if (
+    secrets.asset().toString() !== opened.collateralAsset() ||
+    secrets.value() !== opened.collateralAmount()
+  ) {
+    throw new Error(`${outpoint} holds ${secrets.value()} of ${secrets.asset().toString()}`)
+  }
+  out(`the ${name}'s wallet received the collateral: ${outpoint}, ${secrets.value()} tL-sats`)
+  const after = confirmedBalance(wallet, TESTNET_ASSETS.policy)
+  if (before === undefined) {
+    out(`${name} tL-BTC (confirmed): ${after}`)
+    return
+  }
+  const fee = tx.fee(lwk.AssetId.fromString(TESTNET_ASSETS.policy))
+  out(
+    `${name} tL-BTC (confirmed): ${before} -> ${after} (+ collateral ${secrets.value()} - fee ${fee})`,
+  )
+  if (after - before !== secrets.value() - fee) {
+    throw new Error(
+      `the ${name}'s tL-BTC moved by ${after - before}, not the collateral less the fee`,
+    )
+  }
+}
+
+/**
+ * The stage's own checks of a blinded cancellation PSET: both NFTs burned, and the collateral back
+ * to the borrower, blinded to its wallet.
+ */
+function assertCancellationOutputs(
+  pset: lwk.Pset,
+  offer: VerifiedOffer,
+  collateralReceiver: lwk.Address,
+): void {
+  const opened = offer.opened
+  const outputs = inspectPset(wasm, pset.toString()).outputs
+  const checks: [string, boolean][] = [
+    [
+      'output 0 burns the lender NFT, explicit',
+      burnsNft(outputs[CANCELLATION_OUTPUT.lenderNftBurn], opened.lenderNft()),
+    ],
+    [
+      'output 1 burns the borrower NFT, explicit',
+      burnsNft(outputs[CANCELLATION_OUTPUT.borrowerNftBurn], opened.borrowerNft()),
+    ],
+    [
+      'output 2 is the collateral back to the borrower, blinded',
+      paysBlinded(
+        outputs[CANCELLATION_OUTPUT.collateral],
+        collateralReceiver,
+        opened.collateralAsset(),
+        opened.collateralAmount(),
+      ),
+    ],
+  ]
+  for (const [what, ok] of checks) {
+    if (!ok) throw new Error(`cancellation PSET: not true that ${what}`)
+    out(`  ok: ${what}`)
+  }
+}
+
+/** The cancellation's inputs that LWK sized with a max-weight-to-satisfy constant. */
+const CANCELLATION_WEIGHTS: WeightedInput[] = [
+  {
+    index: CANCELLATION_INPUT.offer,
+    name: 'offer (OfferCancellation)',
+    limit: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.OfferCancellation,
+  },
+  {
+    index: CANCELLATION_INPUT.lenderNft,
+    name: 'lender NFT lock (script_auth)',
+    limit: SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY,
+  },
+  {
+    index: CANCELLATION_INPUT.borrowerNft,
+    name: 'borrower NFT (p2wpkh)',
+    limit: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
+  },
+]
+
+/**
+ * The borrower's cancellation of the `cancel` offer: built, checked by the stage, signed and
+ * finalized (which runs the covenants). The borrower NFT is still where the creation paid it.
+ */
+async function buildSignedCancellation(
+  ctx: Context,
+  offer: VerifiedOffer,
+  creationTxid: string,
+): Promise<{ hex: string; txid: string }> {
+  const { borrower } = ctx.wallets
+  const collateralReceiver = new lwk.Address(borrower.address())
+  const feeCoins = pickCoins(borrower, TESTNET_ASSETS.policy, FEE_BUDGET, 'borrower fee')
+  out(`fee coins ${feeCoins.map(outpointOf).join(', ')}`)
+
+  const built = await buildPrivateCancellation(flowDeps(borrower, ctx.chain), offer, {
+    borrowerNftOutpoint: `${creationTxid}:${CREATION_OUTPUT.borrowerNft}`,
+    feeCoins,
+    collateralReceiver,
+  })
+  out('blinded cancellation PSET:')
+  describeOutputs(built.pset, {
+    borrowerNft: offer.opened.borrowerNft(),
+    lenderNft: offer.opened.lenderNft(),
+  })
+  assertCancellationOutputs(built.pset, offer, collateralReceiver)
+  const { finalizedTx, summary } = built.finalize(borrower.signer.sign(built.pset))
+  assertFinalizedWeights(finalizedTx, CANCELLATION_WEIGHTS)
+  out(`finalized: collateral back to ${summary.collateralOutpoint} (${summary.collateral} tL-sats)`)
+  return { hex: finalizedTx.toString(), txid: finalizedTx.txid().toString() }
+}
+
+/** A new offer from the borrower to the lender, which the borrower then cancels. */
+async function cancelStage(ctx: Context): Promise<void> {
+  const { borrower } = ctx.wallets
+  const creationTxid = await submitCreation(
+    ctx,
+    'cancel-create',
+    'cancel-create',
+    OFFER_EXPIRY_BLOCKS,
+  )
+  await lenderView(ctx, creationTxid)
+  const offer = await loadOffer(ctx, 'cancel-create', 'borrower')
+
+  let hex: string | undefined
+  let before: bigint | undefined
+  if (!getRecord('cancel')) {
+    requireStageNeed(ctx, 'cancel')
+    before = confirmedBalance(borrower, TESTNET_ASSETS.policy)
+    hex = (await buildSignedCancellation(ctx, offer, creationTxid)).hex
+  }
+  const txid = await submitStage(
+    ctx.chain,
+    'cancel',
+    () => {
+      if (hex === undefined) throw new Error('unreachable: a record exists')
+      return hex
+    },
+    out,
+  )
+
+  const cancelTx = await ctx.chain.fetchTx(txid)
+  if (
+    !burnsNftOnChain(cancelTx, CANCELLATION_OUTPUT.lenderNftBurn, offer.opened.lenderNft()) ||
+    !burnsNftOnChain(cancelTx, CANCELLATION_OUTPUT.borrowerNftBurn, offer.opened.borrowerNft())
+  ) {
+    throw new Error('the confirmed cancellation does not burn both NFTs')
+  }
+  out(
+    `lender NFT burned at ${txid}:${CANCELLATION_OUTPUT.lenderNftBurn}, ` +
+      `borrower NFT at ${txid}:${CANCELLATION_OUTPUT.borrowerNftBurn}`,
+  )
+  await assertCollateralReceived(
+    borrower,
+    'borrower',
+    cancelTx,
+    `${txid}:${CANCELLATION_OUTPUT.collateral}`,
+    offer,
+    before,
+  )
+  await assertWitnessWeights(ctx, txid, CANCELLATION_WEIGHTS)
+  out('\ncancel: ok')
+}
+
+/** A cancellation built, checked, signed and finalized, but never saved or broadcast. */
+async function cancelDryStage(ctx: Context): Promise<void> {
+  requireStageNeed(ctx, 'cancel')
+  const creationTxid = requireConfirmed('cancel-create')
+  const offer = await loadOffer(ctx, 'cancel-create', 'borrower')
+  const { txid } = await buildSignedCancellation(ctx, offer, creationTxid)
+  out(`\ncancel-dry: ok (${txid} finalized, not saved or broadcast)`)
+}
+
+/** Blocks from the tip to the `liquidate` offer's loan expiration. */
+const LIQUIDATION_EXPIRY_BLOCKS = 3
+
+/** nSequence that enables the lock time without signalling RBF, from LWK, not the builders. */
+function enableLocktimeNoRbf(): number {
+  return lwk.TxSequence.enableLocktimeNoRbf().toConsensusU32()
+}
+
+/**
+ * The stage's own checks of a blinded liquidation PSET: the lender NFT burned, the collateral to
+ * the lender, blinded to its wallet, and the expiry as the lock time, enabled by the offer input.
+ */
+function assertLiquidationOutputs(
+  pset: lwk.Pset,
+  offer: VerifiedOffer,
+  collateralReceiver: lwk.Address,
+): void {
+  const opened = offer.opened
+  const expiry = opened.loanExpirationTime()
+  const { lockTime, inputs, outputs } = inspectPset(wasm, pset.toString())
+  const checks: [string, boolean][] = [
+    [
+      'output 0 burns the lender NFT, explicit',
+      burnsNft(outputs[LIQUIDATION_OUTPUT.lenderNftBurn], opened.lenderNft()),
+    ],
+    [
+      'output 1 is the collateral to the lender, blinded',
+      paysBlinded(
+        outputs[LIQUIDATION_OUTPUT.collateral],
+        collateralReceiver,
+        opened.collateralAsset(),
+        opened.collateralAmount(),
+      ),
+    ],
+    [`the lock time is the expiry, block ${expiry}`, lockTime === expiry],
+    [
+      `input 0, the offer, has sequence 0x${enableLocktimeNoRbf().toString(16)}, which enables it`,
+      inputs[LIQUIDATION_INPUT.offer]?.sequence === enableLocktimeNoRbf(),
+    ],
+  ]
+  for (const [what, ok] of checks) {
+    if (!ok) throw new Error(`liquidation PSET: not true that ${what}`)
+    out(`  ok: ${what}`)
+  }
+}
+
+/** The liquidation's inputs that LWK sized with a max-weight-to-satisfy constant. */
+const LIQUIDATION_WEIGHTS: WeightedInput[] = [
+  {
+    index: LIQUIDATION_INPUT.offer,
+    name: 'offer (Liquidation)',
+    limit: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.Liquidation,
+  },
+  {
+    index: LIQUIDATION_INPUT.lenderNft,
+    name: 'lender NFT (p2wpkh)',
+    limit: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
+  },
+]
+
+/** The lender's liquidation of the offer accepted by `acceptTxid`, at `tipHeight`. */
+function liquidationParams(ctx: Context, acceptTxid: string, tipHeight: number): LiquidationParams {
+  const { lender } = ctx.wallets
+  return {
+    activeOfferOutpoint: `${acceptTxid}:${ACCEPTANCE_OUTPUT.activeOffer}`,
+    lenderNftOutpoint: `${acceptTxid}:${ACCEPTANCE_OUTPUT.lenderNft}`,
+    feeCoins: pickCoins(lender, TESTNET_ASSETS.policy, FEE_BUDGET, 'lender fee'),
+    collateralReceiver: new lwk.Address(lender.address()),
+    tipHeight,
+  }
+}
+
+/**
+ * Tries the liquidation at the current tip. Below the expiry the builder must refuse with
+ * `expiry-not-reached` before it fetches a transaction or starts a PSET. Returns whether the tip
+ * was below the expiry, so that the refusal was checked.
+ */
+async function tryEarlyLiquidation(
+  ctx: Context,
+  offer: VerifiedOffer,
+  acceptTxid: string,
+): Promise<boolean> {
+  const expiry = offer.opened.loanExpirationTime()
+  const tip = await ctx.chain.tipHeight()
+  if (tip >= expiry) {
+    out(`early liquidation: not tried, the tip ${tip} has reached the expiry ${expiry}`)
+    return false
+  }
+  // what the builder touches before it refuses: nothing
+  const touched: string[] = []
+  const base = flowDeps(ctx.wallets.lender, ctx.chain)
+  const deps: PrivateFlowDeps = {
+    ...base,
+    lwk: {
+      ...lwk,
+      TxBuilder: new Proxy(lwk.TxBuilder, {
+        construct(target, args) {
+          touched.push('new TxBuilder')
+          return Reflect.construct(target, args) as object
+        },
+      }),
+    },
+    fetchTx: txid => {
+      touched.push(`fetchTx ${txid}`)
+      return base.fetchTx(txid)
+    },
+    walletUtxos: () => {
+      touched.push('walletUtxos')
+      return base.walletUtxos()
+    },
+  }
+  try {
+    await buildPrivateLiquidation(deps, offer, liquidationParams(ctx, acceptTxid, tip))
+  } catch (error) {
+    if (!(error instanceof ExpiryNotReachedError) || error.code !== 'expiry-not-reached') {
+      throw error
+    }
+    if (touched.length > 0) throw new Error(`the refused liquidation did ${touched.join(', ')}`)
+    out(
+      `early liquidation at tip ${tip}, below the expiry ${expiry}: refused, nothing fetched or built`,
+    )
+    out(`  ${error.message}`)
+    return true
+  }
+  throw new Error(`the liquidation was built at tip ${tip}, below the expiry ${expiry}`)
+}
+
+/**
+ * The lender's liquidation of the `liquidate` offer, at a tip at or past the expiry: built, checked
+ * by the stage, signed and finalized (which runs the covenant and its lock height check).
+ */
+async function buildSignedLiquidation(
+  ctx: Context,
+  offer: VerifiedOffer,
+  acceptTxid: string,
+  tipHeight: number,
+): Promise<{ hex: string; txid: string }> {
+  const { lender } = ctx.wallets
+  const params = liquidationParams(ctx, acceptTxid, tipHeight)
+  out(`fee coins ${params.feeCoins.map(outpointOf).join(', ')}`)
+
+  const built = await buildPrivateLiquidation(flowDeps(lender, ctx.chain), offer, params)
+  out('blinded liquidation PSET:')
+  describeOutputs(built.pset, {
+    borrowerNft: offer.opened.borrowerNft(),
+    lenderNft: offer.opened.lenderNft(),
+  })
+  assertLiquidationOutputs(built.pset, offer, params.collateralReceiver)
+  const { finalizedTx, summary } = built.finalize(lender.signer.sign(built.pset))
+  assertFinalizedWeights(finalizedTx, LIQUIDATION_WEIGHTS)
+  out(
+    `finalized: collateral to ${summary.collateralOutpoint} (${summary.collateral} tL-sats), ` +
+      `lock time ${summary.lockTime}`,
+  )
+  return { hex: finalizedTx.toString(), txid: finalizedTx.txid().toString() }
+}
+
+/**
+ * A new offer from the borrower to the lender that expires three blocks after the tip. The lender
+ * accepts it; a liquidation is refused while the tip is below the expiry (tried once the
+ * acceptance is broadcast, and again once it confirmed), then the lender liquidates at the expiry.
+ */
+async function liquidateStage(ctx: Context): Promise<void> {
+  const { lender } = ctx.wallets
+  const creationTxid = await submitCreation(
+    ctx,
+    'liquidate-create',
+    'liquidate-create',
+    LIQUIDATION_EXPIRY_BLOCKS,
+  )
+  await lenderView(ctx, creationTxid)
+  const offer = await loadOffer(ctx, 'liquidate-create', 'lender')
+  const expiry = offer.opened.loanExpirationTime()
+
+  let refusals = 0
+  const tryEarly = async (acceptTxid: string): Promise<void> => {
+    if (await tryEarlyLiquidation(ctx, offer, acceptTxid)) refusals += 1
+  }
+  const acceptedNow = getRecord('liquidate-accept') === undefined
+  const acceptTxid = await submitAcceptance(ctx, 'liquidate-accept', offer, tryEarly)
+
+  let hex: string | undefined
+  let before: bigint | undefined
+  if (!getRecord('liquidate')) {
+    await tryEarly(acceptTxid)
+    if (refusals === 0) {
+      // a run that accepted the offer had the whole window below the expiry
+      if (acceptedNow) throw new Error('the liquidation was never tried below the expiry')
+      out('early liquidation: not tried in this run, which resumed at or past the expiry')
+    }
+    out(`waiting for the tip to reach the expiry, block ${expiry}`)
+    const tip = await ctx.chain.waitForTip(expiry)
+    out(`tip ${tip}`)
+    requireStageNeed(ctx, 'liquidate')
+    before = confirmedBalance(lender, TESTNET_ASSETS.policy)
+    hex = (await buildSignedLiquidation(ctx, offer, acceptTxid, tip)).hex
+  }
+  const txid = await submitStage(
+    ctx.chain,
+    'liquidate',
+    () => {
+      if (hex === undefined) throw new Error('unreachable: a record exists')
+      return hex
+    },
+    out,
+  )
+
+  const liquidationTx = await ctx.chain.fetchTx(txid)
+  if (!burnsNftOnChain(liquidationTx, LIQUIDATION_OUTPUT.lenderNftBurn, offer.opened.lenderNft())) {
+    throw new Error('the confirmed liquidation does not burn the lender NFT')
+  }
+  out(`lender NFT burned at ${txid}:${LIQUIDATION_OUTPUT.lenderNftBurn}`)
+  const timelock = await ctx.chain.fetchTimelock(txid)
+  const sequence = timelock.sequences[LIQUIDATION_INPUT.offer]
+  if (
+    timelock.lockTime !== expiry ||
+    sequence !== enableLocktimeNoRbf() ||
+    timelock.blockHeight === null ||
+    timelock.blockHeight <= expiry
+  ) {
+    throw new Error(
+      `the confirmed liquidation has lock time ${timelock.lockTime}, offer input sequence ` +
+        `${sequence} and block ${timelock.blockHeight}; expected the expiry ${expiry}, ` +
+        `${enableLocktimeNoRbf()} and a block after the expiry`,
+    )
+  }
+  out(
+    `lock time ${timelock.lockTime} (the expiry), offer input sequence 0x${sequence.toString(16)}, ` +
+      `mined in block ${timelock.blockHeight}, after the expiry`,
+  )
+  await assertCollateralReceived(
+    lender,
+    'lender',
+    liquidationTx,
+    `${txid}:${LIQUIDATION_OUTPUT.collateral}`,
+    offer,
+    before,
+  )
+  await assertWitnessWeights(ctx, txid, LIQUIDATION_WEIGHTS)
+  out('\nliquidate: ok')
+}
+
+/**
+ * The liquidation of the `liquidate` offer at the current tip: below the expiry it must be
+ * refused; past it, it is built, checked, signed and finalized, but never saved or broadcast.
+ */
+async function liquidateDryStage(ctx: Context): Promise<void> {
+  requireStageNeed(ctx, 'liquidate')
+  const acceptTxid = requireConfirmed('liquidate-accept')
+  const offer = await loadOffer(ctx, 'liquidate-create', 'lender')
+  if (await tryEarlyLiquidation(ctx, offer, acceptTxid)) {
+    out('\nliquidate-dry: ok (refused below the expiry, nothing built)')
+    return
+  }
+  const tip = await ctx.chain.tipHeight()
+  const { txid } = await buildSignedLiquidation(ctx, offer, acceptTxid, tip)
+  out(`\nliquidate-dry: ok (${txid} finalized at tip ${tip}, not saved or broadcast)`)
+}
+
 const STAGES: Record<string, (ctx: Context) => Promise<void>> = {
   wallets: walletsStage,
   'create-dry': createDryStage,
@@ -1188,6 +1701,10 @@ const STAGES: Record<string, (ctx: Context) => Promise<void>> = {
   repay: repayStage,
   'claim-repayment-dry': claimRepaymentDryStage,
   'claim-repayment': claimRepaymentStage,
+  'cancel-dry': cancelDryStage,
+  cancel: cancelStage,
+  'liquidate-dry': liquidateDryStage,
+  liquidate: liquidateStage,
 }
 
 /**

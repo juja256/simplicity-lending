@@ -77,23 +77,30 @@ export interface Need {
   test: bigint
 }
 
-/** The stages that spend from the wallets, by the state record that marks each one done. */
+/**
+ * The state records of the transactions that spend from the wallets, one per transaction. Most
+ * stages broadcast one; `cancel` broadcasts its own creation (`cancel-create`), then the
+ * cancellation, and `liquidate` its creation (`liquidate-create`), the lender's acceptance
+ * (`liquidate-accept`), then the liquidation.
+ */
 export type Stage =
   | 'create'
   | 'accept'
   | 'claim-principal'
   | 'repay'
   | 'claim-repayment'
+  | 'cancel-create'
   | 'cancel'
+  | 'liquidate-create'
+  | 'liquidate-accept'
   | 'liquidate'
 
 const NONE: Need = { lbtc: 0n, test: 0n }
 
 /**
- * What each stage needs from each wallet when it builds. A creation needs two coins besides the
- * collateral (2 × COLLATERAL, as the coins come) and a fee; `cancel` and `liquidate` include their
- * own creation, and `liquidate` its acceptance. The `wallets` stage only moves coins within a
- * wallet and checks its split itself.
+ * What each record's transaction needs from each wallet when it is built. A creation needs two
+ * coins besides the collateral (2 × COLLATERAL, as the coins come) and a fee. The `wallets` stage
+ * only moves coins within a wallet and checks its split itself.
  */
 export const STAGE_NEEDS: Record<Stage, Record<Wallet, Need>> = {
   create: {
@@ -117,15 +124,27 @@ export const STAGE_NEEDS: Record<Stage, Record<Wallet, Need>> = {
     borrower: NONE,
     lender: { lbtc: FEE_BUDGET, test: 0n },
   },
-  cancel: {
-    // its creation, then the cancellation
-    borrower: { lbtc: 2n * COLLATERAL + 2n * FEE_BUDGET, test: 0n },
+  'cancel-create': {
+    borrower: { lbtc: 2n * COLLATERAL + FEE_BUDGET, test: 0n },
     lender: NONE,
   },
-  liquidate: {
-    // its creation; the lender accepts, then liquidates
+  cancel: {
+    // the collateral comes back from the offer
+    borrower: { lbtc: FEE_BUDGET, test: 0n },
+    lender: NONE,
+  },
+  'liquidate-create': {
     borrower: { lbtc: 2n * COLLATERAL + FEE_BUDGET, test: 0n },
-    lender: { lbtc: 2n * FEE_BUDGET, test: PRINCIPAL },
+    lender: NONE,
+  },
+  'liquidate-accept': {
+    borrower: NONE,
+    lender: { lbtc: FEE_BUDGET, test: PRINCIPAL },
+  },
+  liquidate: {
+    // the collateral comes from the offer
+    borrower: NONE,
+    lender: { lbtc: FEE_BUDGET, test: 0n },
   },
 }
 
