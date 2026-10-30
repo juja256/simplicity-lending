@@ -6,6 +6,7 @@
 // never from transaction bytes); a fetched transaction must have the candidate's txid; and every
 // match is opened through the verification gate. The store keeps only the synced height and each
 // offer's verification result, never terms or secrets.
+import { ApiError } from '@/api/errors'
 import {
   fetchPrivateCandidates,
   fetchPrivateCreationTx,
@@ -41,13 +42,22 @@ export interface ScanStore {
  */
 export const CREATION_TX_MISMATCH = 'creation-tx-mismatch'
 
+/**
+ * Codes that say nothing final about the offer: the indexer's answer (`CREATION_TX_MISMATCH`), or
+ * a failure inside the gate that may be a local fault (`unknown`). Each sync checks these offers
+ * again; every other result is final.
+ */
+const INDETERMINATE_CODES: ReadonlySet<string> = new Set([CREATION_TX_MISMATCH, 'unknown'])
+
 /** The indexer's largest page. */
 const CANDIDATE_PAGE_LIMIT = 500
 
 /**
  * Scans the candidates the indexer added since the stored state, opens the ones addressed to
- * `key`, saves the new state and returns it. An offer already in the state is not opened again.
- * Nothing is saved if a request fails, so the next sync scans the same heights again.
+ * `key`, saves the new state and returns it. An offer already in the state is not opened again,
+ * unless its result is indeterminate (`INDETERMINATE_CODES`): it is checked again, by txid, in
+ * its stored role. Nothing is saved if a request fails or a cheap check hits a local fault, so the
+ * next sync scans the same heights again.
  */
 export async function syncOffers(
   deps: PrivateFlowDeps,
@@ -60,6 +70,18 @@ export async function syncOffers(
   const storedHeight = stored?.syncedHeight ?? null
   const offers: Record<string, ScanResult> = { ...stored?.offers }
   const fromHeight = storedHeight === null ? 0 : storedHeight + 1
+
+  for (const [txid, stale] of Object.entries(offers)) {
+    if (stale.result !== 'invalid' || !INDETERMINATE_CODES.has(stale.code)) continue
+    try {
+      const result = await checkOffer(deps, key, txid, [stale.role], apiBaseUrl)
+      if (result === undefined) delete offers[txid]
+      else offers[txid] = result
+    } catch (error) {
+      // An indexer that no longer knows the offer (a re-indexed database) leaves it as it was.
+      if (!(error instanceof ApiError && error.status === 404)) throw error
+    }
+  }
 
   // The first page's sync height bounds every later page, so candidates indexed meanwhile wait
   // for the next sync instead of shifting the pages.
@@ -138,12 +160,17 @@ async function fetchCreationTx(
   }
 }
 
-/** A wasm check of indexer data; malformed data (`bad-input`) is simply no match. */
+/**
+ * A wasm check of indexer data: malformed data (`bad-input`) is simply no match. Any other error
+ * is a local fault (a key from another wasm instance, a freed key, a broken instance) and is
+ * rethrown: taken as "no match", it would advance the synced height past offers never checked.
+ */
 function passes(check: () => boolean): boolean {
   try {
     return check()
-  } catch {
-    return false
+  } catch (error) {
+    if (typeof error === 'string' && error.startsWith('bad-input:')) return false
+    throw error
   }
 }
 
@@ -172,10 +199,7 @@ function candidateRoles(
   return roles
 }
 
-/**
- * The result for one candidate, or undefined if it is not addressed to `key`. The first role whose
- * opening gets past "not addressed" decides; the offer is not opened in the other role.
- */
+/** The result for one candidate, or undefined if it is not addressed to `key`. */
 async function scanCandidate(
   deps: PrivateFlowDeps,
   key: LendingKey,
@@ -184,8 +208,22 @@ async function scanCandidate(
 ): Promise<ScanResult | undefined> {
   const roles = candidateRoles(deps, key, candidate)
   if (roles.length === 0) return undefined
+  return checkOffer(deps, key, candidate.creation_txid, roles, apiBaseUrl)
+}
 
-  const hex = await fetchCreationTx(deps, candidate.creation_txid, apiBaseUrl)
+/**
+ * Fetches the creation transaction `txid`, requires that txid, and opens it through the gate in
+ * `roles`, in order: the first role whose opening gets past "not addressed" decides, and the offer
+ * is not opened in the other. Undefined if it is addressed to `key` in none of them.
+ */
+async function checkOffer(
+  deps: PrivateFlowDeps,
+  key: LendingKey,
+  txid: string,
+  roles: OfferRole[],
+  apiBaseUrl: string,
+): Promise<ScanResult | undefined> {
+  const hex = await fetchCreationTx(deps, txid, apiBaseUrl)
   if (hex === undefined) return { role: roles[0], result: 'invalid', code: CREATION_TX_MISMATCH }
 
   for (const role of roles) {
@@ -196,8 +234,8 @@ async function scanCandidate(
       if (!(error instanceof PrivateOfferError)) {
         // The gate throws other errors only once the offer opened, while it builds the offer's
         // scripts: the offer is addressed to the key. An offer that always throws must not stop
-        // every later sync, so it is listed as invalid.
-        console.error(`private offer ${candidate.creation_txid}:`, error)
+        // every later sync, so it is listed as invalid, `unknown`, and checked again next sync.
+        console.error(`private offer ${txid}:`, error)
         return { role, result: 'invalid', code: 'unknown' }
       }
       if (error.addressedToKey) return { role, result: 'invalid', code: error.code }
