@@ -5,24 +5,23 @@
 //            2… collateral coins;
 //   outputs  0 borrower NFT to the borrower, 1 lender NFT at the lender-NFT lock, 2 OP_RETURN
 //            marker, 3 pending offer; change and fee follow.
-import type { Address, Contract, Pset, WalletTxOut } from '@lilbonekit/lwk-web'
+import type { Address, Contract, WalletTxOut } from '@lilbonekit/lwk-web'
 
 import type { AsyncUpdatedPset } from '@/lwk/updatedPset'
+import {
+  CREATION_OUTPUT,
+  NFT_AMOUNT,
+  NO_REISSUANCE_TOKEN,
+} from '@/simplicity/private-lending/layout'
 import { privateOfferScripts, toPrivateOfferArguments } from '@/simplicity/private-lending/scripts'
 import { hexToBytes } from '@/utils/hex'
 import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from '../deps'
-import { inspectPset } from '../inspectPset'
 import { walletInputSecret } from '../secrets'
 import { openAndVerifyOffer, PrivateOfferError, type VerifiedOffer } from '../verify'
-import { outpointOf, wasmStep } from './shared'
+import { assertSpendLayout, outpointOf, type SpendLayout, wasmStep } from './shared'
 
-const LENDER_NFT_OUTPUT = 1
-const PENDING_OFFER_OUTPUT = 3
-const NFT_AMOUNT = 1n
-/** No reissuance token: the one unit issued is each NFT's whole supply. */
-const NO_REISSUANCE_TOKEN = 0n
 /** Lock times from here on are timestamps, which a block height never reaches. */
 const LOCK_TIME_THRESHOLD = 500_000_000
 
@@ -65,24 +64,6 @@ export interface CreationSummary {
   interest: bigint
 }
 
-interface ExpectedOutput {
-  script: string
-  asset: string
-  amount: bigint
-  /** The key the output must be blinded to, or null for an explicit output. */
-  blindingKey: string | null
-}
-
-/** What the creation PSET must hold, checked after `finish` and again after blinding. */
-interface CreationLayout {
-  inputs: string[]
-  /** The asset each input issues, by input index. */
-  issuances: (string | undefined)[]
-  outputs: ExpectedOutput[]
-  /** The pending collateral's pinned commitments, which blinding must produce at output 3. */
-  pendingCollateral: { assetCommitment: string; valueCommitment: string }
-}
-
 /** The terms' interest rate, for display only: the interest is repayment − principal. */
 function interestRateBps(principal: bigint, repayment: bigint): number {
   if (principal <= 0n) throw new Error('The principal must be positive')
@@ -102,121 +83,6 @@ function freshNftContract(deps: PrivateFlowDeps, nft: keyof typeof NFT_CONTRACTS
     ticker,
     0,
   )
-}
-
-function assertCreationLayout(
-  deps: PrivateFlowDeps,
-  pset: Pset,
-  layout: CreationLayout,
-  blinded: boolean,
-): void {
-  function fail(what: string): never {
-    throw new Error(`Creation PSET ${blinded ? 'after blinding' : 'after finish'}: ${what}`)
-  }
-  const { inputs, outputs } = inspectPset(deps.wasm, pset.toString())
-
-  if (inputs.length !== layout.inputs.length) {
-    fail(`${inputs.length} inputs instead of ${layout.inputs.length}`)
-  }
-  const tokens = new Set<string>()
-  inputs.forEach((input, index) => {
-    if (input.prevout !== layout.inputs[index]) {
-      fail(`input ${index} spends ${input.prevout} instead of ${layout.inputs[index]}`)
-    }
-    const nft = layout.issuances[index]
-    const issuance = input.issuance
-    if (nft === undefined) {
-      if (issuance !== null) fail(`input ${index} issues ${issuance.assetId}`)
-      return
-    }
-    if (issuance === null) fail(`input ${index} does not issue ${nft}`)
-    tokens.add(issuance.tokenId)
-    if (issuance.assetId !== nft || issuance.isReissuance) {
-      fail(`input ${index} does not newly issue ${nft}`)
-    }
-    if (issuance.amount !== NFT_AMOUNT || issuance.amountCommitment !== null) {
-      fail(`input ${index} does not issue exactly one explicit unit`)
-    }
-    if (
-      !(issuance.inflationKeys === null || issuance.inflationKeys === NO_REISSUANCE_TOKEN) ||
-      issuance.inflationKeysCommitment !== null
-    ) {
-      fail(`input ${index} issues reissuance tokens`)
-    }
-    if (issuance.blindedIssuance !== 0) fail(`input ${index}'s issuance is not marked unblinded`)
-  })
-
-  // the expected outputs, then at least the fee
-  if (outputs.length <= layout.outputs.length) fail(`only ${outputs.length} outputs`)
-  layout.outputs.forEach((expected, index) => {
-    const output = outputs[index]
-    if (output.script !== expected.script) {
-      fail(`output ${index} pays ${output.script}, not ${expected.script}`)
-    }
-    if (output.asset !== expected.asset || output.amount !== expected.amount) {
-      fail(`output ${index} holds ${output.amount} of ${output.asset}`)
-    }
-    if (output.blindingKey !== expected.blindingKey) {
-      fail(`output ${index} has blinding key ${output.blindingKey}, not ${expected.blindingKey}`)
-    }
-    if (expected.blindingKey === null) {
-      if (
-        output.assetCommitment !== null ||
-        output.amountCommitment !== null ||
-        output.ecdhPubkey !== null
-      ) {
-        fail(`output ${index} is blinded`)
-      }
-    } else if (output.blinderIndex === null) {
-      fail(`output ${index} has no blinder index`)
-    }
-  })
-  const covenantScripts = new Set([
-    layout.outputs[LENDER_NFT_OUTPUT].script,
-    layout.outputs[PENDING_OFFER_OUTPUT].script,
-  ])
-  for (let index = layout.outputs.length; index < outputs.length; index += 1) {
-    const output = outputs[index]
-    if (output.asset === null) fail(`output ${index} has no explicit asset`)
-    if (layout.issuances.includes(output.asset) || tokens.has(output.asset)) {
-      fail(`output ${index} carries an issued asset`)
-    }
-    if (covenantScripts.has(output.script)) {
-      fail(`output ${index} pays a covenant script of the offer`)
-    }
-  }
-
-  if (!blinded) {
-    // `skipBlinding`: nothing is blinded before `blindPset`
-    outputs.forEach((output, index) => {
-      if (output.assetCommitment !== null || output.amountCommitment !== null) {
-        fail(`output ${index} is blinded already`)
-      }
-    })
-    return
-  }
-  const offer = outputs[PENDING_OFFER_OUTPUT]
-  if (
-    offer.assetCommitment !== layout.pendingCollateral.assetCommitment ||
-    offer.amountCommitment !== layout.pendingCollateral.valueCommitment ||
-    offer.ecdhPubkey === null
-  ) {
-    fail(`output ${PENDING_OFFER_OUTPUT} is not blinded to the pinned pending collateral`)
-  }
-  // the hardware wallet checks the pinned output against its explicit values with these proofs
-  if (!offer.hasBlindValueProof || !offer.hasBlindAssetProof) {
-    fail(`output ${PENDING_OFFER_OUTPUT} lacks its blind value or asset proof`)
-  }
-  outputs.forEach((output, index) => {
-    if (
-      output.blindingKey !== null &&
-      (output.assetCommitment === null ||
-        output.amountCommitment === null ||
-        output.ecdhPubkey === null)
-    ) {
-      fail(`output ${index} has a blinding key but was not blinded`)
-    }
-  })
 }
 
 /**
@@ -324,7 +190,8 @@ export async function buildPrivateCreation(
   )
   const marker = lwk.Script.newOpReturn(hexToBytes(newOffer.marker()))
 
-  const layout: CreationLayout = {
+  // inputs 0 and 1 issue the NFTs; outputs in `CREATION_OUTPUT` order
+  const layout: SpendLayout = {
     inputs: outpoints,
     issuances: [borrowerNft, lenderNft],
     outputs: [
@@ -332,23 +199,30 @@ export async function buildPrivateCreation(
         script: borrowerNftReceiver.scriptPubkey().toString(),
         asset: borrowerNft,
         amount: NFT_AMOUNT,
-        blindingKey: null,
+        blinding: { kind: 'explicit' },
       },
       {
         script: scripts.lenderNftLock.toString(),
         asset: lenderNft,
         amount: NFT_AMOUNT,
-        blindingKey: null,
+        blinding: { kind: 'explicit' },
       },
-      { script: marker.toString(), asset: deps.assets.policy, amount: 0n, blindingKey: null },
+      {
+        script: marker.toString(),
+        asset: deps.assets.policy,
+        amount: 0n,
+        blinding: { kind: 'explicit' },
+      },
       {
         script: scripts.pendingOffer.toString(),
         asset: deps.assets.collateral,
         amount: params.collateralAmount,
-        blindingKey: collateralBlindingKey,
+        blinding: { kind: 'pinned', blindingKey: collateralBlindingKey, pinned: pendingCollateral },
       },
     ],
-    pendingCollateral,
+    restrictedAssets: [borrowerNft, lenderNft],
+    restrictedScripts: [scripts.lenderNftLock.toString(), scripts.pendingOffer.toString()],
+    policyAsset: deps.assets.policy,
   }
 
   // 4. The unblinded PSET.
@@ -382,20 +256,20 @@ export async function buildPrivateCreation(
   const unblinded = builder.finish(deps.wollet)
 
   // 5. The layout LWK built.
-  assertCreationLayout(deps, unblinded, layout, false)
+  assertSpendLayout(deps, unblinded, layout, false, 'Creation')
 
   // 6. Blinding: the pending collateral with its pinned blinders, the rest freshly.
   const blindedBase64 = wasmStep('Blinding the creation', () =>
     wasm.blindPset(
       unblinded.toString(),
       coins.map((coin, index) => walletInputSecret(deps, coin, index)),
-      [newOffer.collateralBlinding(PENDING_OFFER_OUTPUT)],
+      [newOffer.collateralBlinding(CREATION_OUTPUT.pendingOffer)],
     ),
   )
   const blinded = new lwk.Pset(blindedBase64)
 
   // 7. The layout again, now blinded.
-  assertCreationLayout(deps, blinded, layout, true)
+  assertSpendLayout(deps, blinded, layout, true, 'Creation')
   const builtTxid = new lwk.Pset(blindedBase64).extractTx().txid().toString()
 
   // 8. Sign (by the caller), then finalize and self-check.
@@ -448,7 +322,7 @@ export async function buildPrivateCreation(
         finalizedTx,
         summary: {
           creationTxHex,
-          offerOutpoint: `${txid}:${PENDING_OFFER_OUTPUT}`,
+          offerOutpoint: `${txid}:${CREATION_OUTPUT.pendingOffer}`,
           borrowerNft,
           lenderNft,
           interest,

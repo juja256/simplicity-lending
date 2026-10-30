@@ -10,6 +10,12 @@
 import type { Address, WalletTxOut } from '@lilbonekit/lwk-web'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
+import {
+  ACCEPTANCE_INPUT,
+  ACCEPTANCE_OUTPUT,
+  CREATION_OUTPUT,
+  NFT_AMOUNT,
+} from '@/simplicity/private-lending/layout'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
 import { SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/script-auth/witness'
 
@@ -29,17 +35,6 @@ import {
   type SpendLayout,
   wasmStep,
 } from './shared'
-
-// The creation transaction's outputs that acceptance spends.
-const CREATION_LENDER_NFT_OUTPUT = 1
-const CREATION_PENDING_OFFER_OUTPUT = 3
-
-const OFFER_INPUT = 0
-const LENDER_NFT_INPUT = 1
-const ACTIVE_OFFER_OUTPUT = 0
-const PRINCIPAL_OUTPUT = 1
-const LENDER_NFT_OUTPUT = 2
-const NFT_AMOUNT = 1n
 
 export interface AcceptanceParams {
   /** The lender's coins of the principal asset, which pay the principal. */
@@ -78,8 +73,8 @@ export async function buildPrivateAcceptance(
   const opened = offer.opened
   const creationTx = offer.creationTx
   const creationTxid = creationTx.txid().toString()
-  const offerInput = `${creationTxid}:${CREATION_PENDING_OFFER_OUTPUT}`
-  const lenderNftInput = `${creationTxid}:${CREATION_LENDER_NFT_OUTPUT}`
+  const offerInput = `${creationTxid}:${CREATION_OUTPUT.pendingOffer}`
+  const lenderNftInput = `${creationTxid}:${CREATION_OUTPUT.lenderNft}`
   const borrowerNft = opened.borrowerNft()
   const lenderNft = opened.lenderNft()
   const principalAsset = opened.principalAsset()
@@ -113,7 +108,7 @@ export async function buildPrivateAcceptance(
   }
 
   // 2. The covenant inputs: the creation outputs the gate verified.
-  const lockOutput = requireOutput(creationTx, CREATION_LENDER_NFT_OUTPUT, 'The lender NFT lock')
+  const lockOutput = requireOutput(creationTx, CREATION_OUTPUT.lenderNft, 'The lender NFT lock')
   if (lockOutput.asset()?.toString() !== lenderNft || lockOutput.value() !== NFT_AMOUNT) {
     throw new Error('The lender NFT lock does not hold exactly the lender NFT')
   }
@@ -216,14 +211,14 @@ export async function buildPrivateAcceptance(
     .setInputOrder(inputs.map(outpoint => new lwk.OutPoint(outpoint)))
     .addExternalUtxos([
       new lwk.ExternalUtxo(
-        CREATION_PENDING_OFFER_OUTPUT,
+        CREATION_OUTPUT.pendingOffer,
         creationTx,
         pinnedTxOutSecrets(deps, pendingCollateral),
         PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.OfferAcceptance,
         true,
       ),
       new lwk.ExternalUtxo(
-        CREATION_LENDER_NFT_OUTPUT,
+        CREATION_OUTPUT.lenderNft,
         creationTx,
         lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(lenderNft), NFT_AMOUNT),
         SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY,
@@ -264,15 +259,15 @@ export async function buildPrivateAcceptance(
     wasm.blindPset(
       unblinded.toString(),
       [
-        opened.inputSecret(wasm.PinnedRole.PendingCollateral, OFFER_INPUT),
-        wasm.InputSecret.explicit(LENDER_NFT_INPUT, lenderNft, NFT_AMOUNT),
+        opened.inputSecret(wasm.PinnedRole.PendingCollateral, ACCEPTANCE_INPUT.offer),
+        wasm.InputSecret.explicit(ACCEPTANCE_INPUT.lenderNft, lenderNft, NFT_AMOUNT),
         ...walletCoins.map((coin, index) =>
-          walletInputSecret(deps, coin, LENDER_NFT_INPUT + 1 + index),
+          walletInputSecret(deps, coin, ACCEPTANCE_INPUT.lenderNft + 1 + index),
         ),
       ],
       [
-        opened.pinnedBlinding(wasm.PinnedRole.ActiveCollateral, ACTIVE_OFFER_OUTPUT),
-        opened.pinnedBlinding(wasm.PinnedRole.Principal, PRINCIPAL_OUTPUT),
+        opened.pinnedBlinding(wasm.PinnedRole.ActiveCollateral, ACCEPTANCE_OUTPUT.activeOffer),
+        opened.pinnedBlinding(wasm.PinnedRole.Principal, ACCEPTANCE_OUTPUT.principal),
       ],
     ),
   )
@@ -282,8 +277,8 @@ export async function buildPrivateAcceptance(
   assertSpendLayout(deps, blinded, layout, true, 'Acceptance')
   const builtTxid = new lwk.Pset(blindedBase64).extractTx().txid().toString()
   const prevouts = () => [
-    requireOutput(creationTx, CREATION_PENDING_OFFER_OUTPUT, 'The pending offer'),
-    requireOutput(creationTx, CREATION_LENDER_NFT_OUTPUT, 'The lender NFT lock'),
+    requireOutput(creationTx, CREATION_OUTPUT.pendingOffer, 'The pending offer'),
+    requireOutput(creationTx, CREATION_OUTPUT.lenderNft, 'The lender NFT lock'),
     ...prevoutsOf(walletPrevoutTxs, walletInputs),
   ]
 
@@ -301,7 +296,7 @@ export async function buildPrivateAcceptance(
         offer,
         false,
         prevouts(),
-        OFFER_INPUT,
+        ACCEPTANCE_INPUT.offer,
         'OfferAcceptance',
       )
       const finalizedTx = finalizeScriptAuthInput(
@@ -309,8 +304,8 @@ export async function buildPrivateAcceptance(
         withOffer,
         offer,
         prevouts(),
-        LENDER_NFT_INPUT,
-        OFFER_INPUT,
+        ACCEPTANCE_INPUT.lenderNft,
+        ACCEPTANCE_INPUT.offer,
       )
       const txid = finalizedTx.txid().toString()
       if (txid !== builtTxid) throw new Error('Finalizing changed the acceptance')
@@ -319,9 +314,9 @@ export async function buildPrivateAcceptance(
       return {
         finalizedTx,
         summary: {
-          activeOfferOutpoint: `${txid}:${ACTIVE_OFFER_OUTPUT}`,
-          principalOutpoint: `${txid}:${PRINCIPAL_OUTPUT}`,
-          lenderNftOutpoint: `${txid}:${LENDER_NFT_OUTPUT}`,
+          activeOfferOutpoint: `${txid}:${ACCEPTANCE_OUTPUT.activeOffer}`,
+          principalOutpoint: `${txid}:${ACCEPTANCE_OUTPUT.principal}`,
+          lenderNftOutpoint: `${txid}:${ACCEPTANCE_OUTPUT.lenderNft}`,
           collateral: activeCollateral.amount,
           principal: principalAmount,
           interest: opened.repaymentAmount() - principalAmount,
