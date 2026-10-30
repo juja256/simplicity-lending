@@ -12,10 +12,25 @@
 // stages without a `confirmed` record still need (the sum of their `STAGE_NEEDS`, env.ts), and
 // exits 1 naming each shortfall and the address to fund. Each stage checks its own need again
 // right before it builds.
+import { randomBytes } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
+
 import * as lwk from '@lilbonekit/lwk-web'
 
+import { ApiError } from '@/api/errors'
+import {
+  fetchDirectory,
+  fetchDirectoryEntry,
+  fetchPrivateCandidate,
+  fetchPrivateCandidates,
+  indexerErrorMessage,
+  type PrivateCandidate,
+  putDirectoryEntry,
+  requestDirectoryChallenge,
+} from '@/api/indexer/private'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import type { PrivateFlowDeps } from '@/privateLending/deps'
+import { registerInDirectory, removeFromDirectory } from '@/privateLending/directory'
 import { buildPrivateAcceptance } from '@/privateLending/flows/acceptance'
 import { buildPrivateCancellation } from '@/privateLending/flows/cancellation'
 import { buildPrincipalClaim } from '@/privateLending/flows/claimPrincipal'
@@ -29,7 +44,13 @@ import {
 import { buildPrivateRepayment } from '@/privateLending/flows/repayment'
 import { outpointOf } from '@/privateLending/flows/shared'
 import { type InspectedOutput, inspectPset } from '@/privateLending/inspectPset'
-import { openAndVerifyOffer, type VerifiedOffer } from '@/privateLending/verify'
+import {
+  loadVerifiedOffer,
+  type ScanResult,
+  type ScanState,
+  syncOffers,
+} from '@/privateLending/scan'
+import { openAndVerifyOffer, PrivateOfferError, type VerifiedOffer } from '@/privateLending/verify'
 import {
   ASSET_AUTH_BURN_MAX_WEIGHT_TO_SATISFY,
   ASSET_AUTH_MAX_WEIGHT_TO_SATISFY,
@@ -60,6 +81,7 @@ import {
   FEE_BUDGET,
   loadEnv,
   type Need,
+  needsNothing,
   PRINCIPAL,
   REPAYMENT,
   SPLITS,
@@ -70,12 +92,15 @@ import {
   TESTNET_ASSETS,
   type Wallet,
 } from './e2e/env'
+import { type IndexerProxy, memoryScanStore, startIndexerProxy } from './e2e/indexer'
 import { getRecord } from './e2e/state'
 import { fingerprintGroups, flowDeps, initRuntime, type SeedWallet, seedWallet } from './e2e/wallet'
 
 interface Context {
   chain: ReturnType<typeof createChain>
   wallets: Record<Wallet, SeedWallet>
+  /** The indexer API that `scan` reads. */
+  apiUrl: string
 }
 
 const NAMES: Wallet[] = ['borrower', 'lender']
@@ -125,10 +150,13 @@ function shortfalls(ctx: Context, needs: Record<Wallet, Need>): string[] {
 
 /**
  * Exits 1 unless the wallets cover every stage without a `confirmed` record: a `built` or
- * `broadcast` one still counts, as its coins are not spent until it confirms.
+ * `broadcast` one still counts, as its coins are not spent until it confirms. A stage that needs
+ * nothing (`scan`, which never has a record) is never left.
  */
 function requireFunding(ctx: Context): void {
-  const remaining = STAGE_NAMES.filter(stage => getRecord(stage)?.status !== 'confirmed')
+  const remaining = STAGE_NAMES.filter(
+    stage => !needsNothing(stage) && getRecord(stage)?.status !== 'confirmed',
+  )
   const short = shortfalls(ctx, sumNeeds(remaining))
   if (short.length > 0) {
     console.error(
@@ -1689,6 +1717,375 @@ async function liquidateDryStage(ctx: Context): Promise<void> {
   out(`\nliquidate-dry: ok (${txid} finalized at tip ${tip}, not saved or broadcast)`)
 }
 
+/** An e2e offer, which the borrower created for the lender. */
+interface Creation {
+  stage: CreationRecord
+  txid: string
+}
+
+/** The candidate-list requests among `requests`, with their height bounds. */
+function candidatePages(requests: URL[]): { from: string | null; to: string | null }[] {
+  return requests
+    .filter(url => url.pathname === '/private/candidates')
+    .map(url => ({
+      from: url.searchParams.get('from_height'),
+      to: url.searchParams.get('to_height'),
+    }))
+}
+
+/** The creation txids whose transaction `requests` fetched. */
+function fetchedTxs(requests: URL[]): string[] {
+  return requests.flatMap(url => {
+    const match = /^\/private\/candidates\/([0-9a-f]{64})\/tx$/.exec(url.pathname)
+    return match ? [match[1]] : []
+  })
+}
+
+/** Every candidate the indexer lists, and its sync height, paged as the README's sync recipe. */
+async function listCandidates(
+  apiUrl: string,
+): Promise<{ candidates: PrivateCandidate[]; lastIndexed: number | null }> {
+  const first = await fetchPrivateCandidates({ fromHeight: 0, limit: 500 }, apiUrl)
+  const lastIndexed = first.last_indexed_height
+  if (lastIndexed === null) return { candidates: [], lastIndexed }
+  const candidates = [...first.items]
+  for (let page = first; page.items.length > 0; ) {
+    page = await fetchPrivateCandidates(
+      { fromHeight: 0, toHeight: lastIndexed, limit: 500, offset: candidates.length },
+      apiUrl,
+    )
+    candidates.push(...page.items)
+  }
+  return { candidates, lastIndexed }
+}
+
+/** Whether `candidate` passes the lender's view tag or the borrower's own-nonce check. */
+function cheapMatch(key: wasm.LendingKey, candidate: PrivateCandidate): boolean {
+  const { txid, vout } = candidate.first_input
+  return (
+    wasm.viewTagMatches(key, candidate.nonce, candidate.view_tag) ||
+    wasm.isOwnCandidate(
+      key,
+      `${txid}:${vout}`,
+      candidate.borrower_nft_asset_id,
+      candidate.lender_nft_asset_id,
+      candidate.nonce,
+    )
+  )
+}
+
+function describeResult(result: ScanResult | undefined): string {
+  if (result === undefined) return 'absent'
+  return result.result === 'verified'
+    ? `verified (${result.role})`
+    : `invalid: ${result.code} (${result.role})`
+}
+
+/** Throws unless `state` holds exactly the e2e offers, each verified as `role`. */
+function assertScanOffers(
+  state: ScanState,
+  creations: Creation[],
+  role: Wallet,
+  what: string,
+): void {
+  const expected = creations.map(creation => creation.txid).sort()
+  const found = Object.keys(state.offers).sort()
+  if (!isDeepStrictEqual(found, expected)) {
+    throw new Error(
+      `${what} found ${found.join(', ') || 'nothing'}; expected the e2e offers ${expected.join(', ')}`,
+    )
+  }
+  for (const creation of creations) {
+    const result = state.offers[creation.txid]
+    if (result.result !== 'verified' || result.role !== role) {
+      throw new Error(
+        `${what}: ${creation.stage} is ${describeResult(result)}, not verified as ${role}`,
+      )
+    }
+  }
+}
+
+/**
+ * One wallet's scan through the proxy: a first sync from an empty store, which must follow the
+ * sync recipe, fetch only the transactions of candidates that pass a cheap check, and find
+ * exactly the e2e offers; then a re-sync from the stored state, which must start right after the
+ * stored height and keep the same offers.
+ */
+async function scanAs(
+  ctx: Context,
+  proxy: IndexerProxy,
+  name: Wallet,
+  creations: Creation[],
+  candidateCount: number,
+): Promise<void> {
+  const wallet = ctx.wallets[name]
+  const deps = flowDeps(wallet, ctx.chain)
+  const key = wallet.lendingKey
+  const store = memoryScanStore()
+  out(`${name} (${fingerprintGroups(key.fingerprint())})`)
+
+  proxy.requests.length = 0
+  const first = await syncOffers(deps, key, proxy.url, store)
+  const firstRequests = proxy.requests.splice(0)
+  assertScanOffers(first, creations, name, `${name}'s first sync`)
+  const synced = first.syncedHeight
+  if (synced === null) throw new Error(`${name}'s first sync left no synced height`)
+  const pages = candidatePages(firstRequests)
+  const recipe =
+    pages.length >= 2 &&
+    pages[0].from === '0' &&
+    pages[0].to === null &&
+    pages.slice(1).every(page => page.from === '0' && page.to === String(synced))
+  if (!recipe) {
+    throw new Error(
+      `${name}'s first sync paged ${JSON.stringify(pages)}; expected from 0, then to ${synced}`,
+    )
+  }
+  const fetched = fetchedTxs(firstRequests)
+  for (const txid of fetched) {
+    if (!cheapMatch(key, await fetchPrivateCandidate(txid, ctx.apiUrl))) {
+      throw new Error(`${name} fetched ${txid}'s transaction, but its candidate passes no check`)
+    }
+  }
+  if (!isDeepStrictEqual(await store.get(key.fingerprint()), first)) {
+    throw new Error(`${name}'s store does not hold the state its first sync returned`)
+  }
+  out(
+    `  first sync: from block 0 to ${synced} in ${pages.length} pages; fetched the ` +
+      `transaction of ${fetched.length} of ${candidateCount} candidates`,
+  )
+  for (const creation of creations) {
+    out(
+      `    ${creation.stage.padEnd(16)} ${creation.txid} ${describeResult(first.offers[creation.txid])}`,
+    )
+  }
+
+  const second = await syncOffers(deps, key, proxy.url, store)
+  const secondRequests = proxy.requests.splice(0)
+  const resync = candidatePages(secondRequests)
+  if (resync[0]?.from !== String(synced + 1)) {
+    throw new Error(`${name}'s re-sync started at ${resync[0]?.from}, not block ${synced + 1}`)
+  }
+  if (!isDeepStrictEqual(second.offers, first.offers)) {
+    throw new Error(`${name}'s re-sync changed the offers: ${JSON.stringify(second.offers)}`)
+  }
+  if (second.syncedHeight === null || second.syncedHeight < synced) {
+    throw new Error(`${name}'s re-sync moved the synced height back to ${second.syncedHeight}`)
+  }
+  const refetched = fetchedTxs(secondRequests).filter(txid =>
+    creations.some(creation => creation.txid === txid),
+  )
+  if (refetched.length > 0) {
+    throw new Error(`${name}'s re-sync fetched ${refetched.join(', ')} again`)
+  }
+  out(
+    `  re-sync: from block ${synced + 1} in ${resync.length} pages, now synced to ` +
+      `${second.syncedHeight}; the same ${Object.keys(second.offers).length} offers, no known ` +
+      'transaction fetched',
+  )
+
+  const [loaded] = creations
+  const offer = await loadVerifiedOffer(deps, key, loaded.txid, name, ctx.apiUrl)
+  if (
+    offer.role !== name ||
+    offer.creationTx.txid().toString() !== loaded.txid ||
+    offer.opened.principalAmount() !== PRINCIPAL ||
+    offer.opened.repaymentAmount() !== REPAYMENT
+  ) {
+    throw new Error(`${name}: loadVerifiedOffer(${loaded.stage}) returned another offer`)
+  }
+  out(
+    `  loadVerifiedOffer(${loaded.stage}): principal ${offer.opened.principalAmount()}, ` +
+      `repayment ${offer.opened.repaymentAmount()} TEST units`,
+  )
+}
+
+/**
+ * A fresh random key, which no offer is addressed to: its scan must find nothing, and fetch the
+ * transaction only of candidates that pass a cheap check (one in 256 passes the view tag).
+ */
+async function strangerScan(
+  ctx: Context,
+  proxy: IndexerProxy,
+  candidateCount: number,
+): Promise<void> {
+  const key = wasm.LendingKey.fromMasterBlindingKey(randomBytes(32).toString('hex'))
+  // The deps only lend the wasm, LWK, sources and network; no wallet coin is used.
+  const deps = flowDeps(ctx.wallets.lender, ctx.chain)
+  proxy.requests.length = 0
+  const state = await syncOffers(deps, key, proxy.url, memoryScanStore())
+  const fetched = fetchedTxs(proxy.requests.splice(0))
+  if (Object.keys(state.offers).length > 0) {
+    throw new Error(`a fresh key found offers: ${JSON.stringify(state.offers)}`)
+  }
+  for (const txid of fetched) {
+    if (!cheapMatch(key, await fetchPrivateCandidate(txid, ctx.apiUrl))) {
+      throw new Error(
+        `a fresh key fetched ${txid}'s transaction, but its candidate passes no check`,
+      )
+    }
+  }
+  out(
+    `stranger (${fingerprintGroups(key.fingerprint())}): no offers; fetched the transaction of ` +
+      `${fetched.length} of ${candidateCount} candidates`,
+  )
+}
+
+/**
+ * A hostile indexer serves the first e2e offer's candidate with the second's creation
+ * transaction, which is addressed to the same keys. The first offer must come out invalid or
+ * absent, never verified, and `loadVerifiedOffer` must refuse it.
+ */
+async function hostileScan(
+  ctx: Context,
+  proxy: IndexerProxy,
+  creations: Creation[],
+): Promise<void> {
+  const [victim, served, ...rest] = creations
+  out(`hostile indexer: ${victim.stage}'s candidate comes with ${served.stage}'s transaction`)
+  proxy.substitute = { candidate: victim.txid, servedTx: served.txid }
+  try {
+    for (const name of NAMES) {
+      const wallet = ctx.wallets[name]
+      const deps = flowDeps(wallet, ctx.chain)
+      const state = await syncOffers(deps, wallet.lendingKey, proxy.url, memoryScanStore())
+      const result = state.offers[victim.txid]
+      if (result?.result === 'verified') {
+        throw new Error(`${name}: the hostile indexer got ${victim.stage} verified`)
+      }
+      for (const other of [served, ...rest]) {
+        if (state.offers[other.txid]?.result !== 'verified') {
+          throw new Error(`${name}: ${other.stage} is ${describeResult(state.offers[other.txid])}`)
+        }
+      }
+      const refusal = await loadVerifiedOffer(
+        deps,
+        wallet.lendingKey,
+        victim.txid,
+        name,
+        proxy.url,
+      ).then(
+        () => null,
+        (error: unknown) => error,
+      )
+      if (!(refusal instanceof PrivateOfferError)) {
+        if (refusal !== null) throw refusal
+        throw new Error(
+          `${name}: loadVerifiedOffer accepted ${victim.stage} from the hostile indexer`,
+        )
+      }
+      out(
+        `  ${name}: ${victim.stage} ${describeResult(result)}, the others verified; ` +
+          `loadVerifiedOffer refuses it (${refusal.code})`,
+      )
+    }
+  } finally {
+    proxy.substitute = null
+  }
+}
+
+/** The lender registers in the directory, is listed, and removes its entry. */
+async function directoryRoundTrip(ctx: Context): Promise<void> {
+  const { lender } = ctx.wallets
+  const deps = flowDeps(lender, ctx.chain)
+  const key = lender.lendingKey
+  const pubkey = key.xOnlyPublicKey()
+  const name = 'E2E Lender'
+  out(`directory: ${fingerprintGroups(key.fingerprint())}`)
+
+  const entry = await registerInDirectory(deps, key, name, ctx.apiUrl)
+  const fetched = await fetchDirectoryEntry(pubkey, ctx.apiUrl)
+  for (const [what, got] of [
+    ['PUT', entry],
+    ['GET', fetched],
+  ] as const) {
+    if (got.pubkey !== pubkey || got.display_name !== name) {
+      throw new Error(
+        `directory ${what} returned ${JSON.stringify(got)}, not "${name}" for ${pubkey}`,
+      )
+    }
+  }
+  const listed = await fetchDirectory({ limit: 100 }, ctx.apiUrl)
+  if (!listed.items.some(item => item.pubkey === pubkey && item.display_name === name)) {
+    throw new Error('the directory list does not show the new entry')
+  }
+  out(`  registered "${fetched.display_name}"; GET and the list show it`)
+
+  // a signature over another name: refused with 401 and the server's message
+  const { challenge } = await requestDirectoryChallenge(ctx.apiUrl)
+  const signature = wasm.signDirectoryAction(key, wasm.DirectoryAction.Put, challenge, name)
+  const refusal = await putDirectoryEntry(
+    pubkey,
+    { display_name: 'E2E Impostor', challenge, signature },
+    ctx.apiUrl,
+  ).then(
+    () => null,
+    (error: unknown) => error,
+  )
+  if (
+    !(refusal instanceof ApiError) ||
+    refusal.status !== 401 ||
+    indexerErrorMessage(refusal) !== 'invalid signature'
+  ) {
+    throw new Error(`a PUT signed over another name was not refused with 401: ${String(refusal)}`)
+  }
+  out(`  a PUT signed over another name: 401 "${indexerErrorMessage(refusal)}"`)
+
+  await removeFromDirectory(deps, key, ctx.apiUrl)
+  const gone = await fetchDirectoryEntry(pubkey, ctx.apiUrl).then(
+    () => null,
+    (error: unknown) => error,
+  )
+  if (!(gone instanceof ApiError) || gone.status !== 404) {
+    throw new Error(`the entry is still there after the delete: ${String(gone)}`)
+  }
+  out('  removed; GET answers 404')
+}
+
+/**
+ * Both wallets scan the local indexer (`web/README.md`, "Local testnet indexer") for the e2e
+ * offers, a hostile indexer cannot get an offer verified, and the lender writes the directory.
+ * Nothing is broadcast.
+ */
+async function scanStage(ctx: Context): Promise<void> {
+  const creations: Creation[] = (Object.keys(CREATION_STAGES) as CreationRecord[]).map(stage => {
+    const record = getRecord(stage)
+    if (record?.status !== 'confirmed') {
+      throw new Error(`no confirmed ${stage}: run the ${CREATION_STAGES[stage]} stage`)
+    }
+    return { stage, txid: record.txid }
+  })
+  const { candidates, lastIndexed } = await listCandidates(ctx.apiUrl)
+  for (const creation of creations) {
+    const { blockHeight } = await ctx.chain.fetchTimelock(creation.txid)
+    if (blockHeight === null) throw new Error(`${creation.stage} ${creation.txid} is not confirmed`)
+    if (lastIndexed === null || lastIndexed < blockHeight) {
+      throw new Error(
+        `the indexer at ${ctx.apiUrl} has indexed to block ${lastIndexed}, not yet ` +
+          `${creation.stage}'s block ${blockHeight}: let it catch up`,
+      )
+    }
+    if (!candidates.some(candidate => candidate.creation_txid === creation.txid)) {
+      throw new Error(
+        `the indexer does not list ${creation.stage} ${creation.txid} (block ${blockHeight}): ` +
+          'start it below that block (INDEXER__LAST_INDEXED_HEIGHT, web/README.md)',
+      )
+    }
+  }
+  out(`indexer ${ctx.apiUrl}: ${candidates.length} candidates up to block ${lastIndexed}`)
+
+  const proxy = await startIndexerProxy(ctx.apiUrl)
+  try {
+    for (const name of NAMES) await scanAs(ctx, proxy, name, creations, candidates.length)
+    await strangerScan(ctx, proxy, candidates.length)
+    await hostileScan(ctx, proxy, creations)
+  } finally {
+    await proxy.close()
+  }
+  await directoryRoundTrip(ctx)
+  out('\nscan: ok')
+}
+
 const STAGES: Record<string, (ctx: Context) => Promise<void>> = {
   wallets: walletsStage,
   'create-dry': createDryStage,
@@ -1705,6 +2102,7 @@ const STAGES: Record<string, (ctx: Context) => Promise<void>> = {
   cancel: cancelStage,
   'liquidate-dry': liquidateDryStage,
   liquidate: liquidateStage,
+  scan: scanStage,
 }
 
 /**
@@ -1729,6 +2127,7 @@ async function main(): Promise<void> {
       borrower: seedWallet(env, env.borrowerMnemonic),
       lender: seedWallet(env, env.lenderMnemonic),
     },
+    apiUrl: env.apiUrl,
   }
   await ctx.wallets.borrower.sync()
   await ctx.wallets.lender.sync()
