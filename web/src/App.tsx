@@ -13,6 +13,7 @@ import DashboardPage from './pages/Dashboard'
 import DemoPage from './pages/Demo'
 import DesignSystemPage from './pages/DesignSystem'
 import LandingPage from './pages/Landing'
+import PrivatePage from './pages/Private'
 import SupplyPage from './pages/Supply'
 
 function ProvidersLayout() {
@@ -67,6 +68,10 @@ const router = createBrowserRouter([
           {
             path: RoutePath.Supply,
             element: <SupplyPage />,
+          },
+          {
+            path: RoutePath.Private,
+            element: <PrivatePage />,
           },
           ...(env.DEV
             ? [

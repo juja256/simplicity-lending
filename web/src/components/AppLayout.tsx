@@ -10,6 +10,7 @@ import { env } from '@/constants/env'
 import { ExternalLink } from '@/constants/links'
 import { RoutePath } from '@/constants/routes'
 import { useOfferModal } from '@/hooks/useOfferModal'
+import { useWallet } from '@/providers/wallet/useWallet'
 
 const NAV = [
   { to: RoutePath.Dashboard, label: 'Dashboard' },
@@ -23,8 +24,13 @@ const NAV = [
     : []),
 ]
 
+// Private loans need Jade or the seed wallet: the link shows only with one of them connected.
+const PRIVATE_NAV = { to: RoutePath.Private, label: 'Private' }
+
 export default function AppLayout() {
   const { close, isOpen, lastOffer } = useOfferModal()
+  const { privateCapable } = useWallet()
+  const nav = privateCapable ? [...NAV, PRIVATE_NAV] : NAV
   return (
     <main className='bg-surface text-foreground min-h-screen'>
       <div className='mx-auto flex w-full max-w-7xl flex-col gap-8 px-4 pt-6 pb-12 sm:px-8 lg:gap-10 lg:px-20 lg:pt-10 lg:pb-20'>
@@ -64,7 +70,7 @@ export default function AppLayout() {
 
         <footer className='text-muted flex flex-col gap-3 text-xs'>
           <nav className='flex flex-wrap items-center gap-4 font-medium'>
-            {NAV.map(({ to, label }) => (
+            {nav.map(({ to, label }) => (
               <Link key={to} className='text-accent hover:underline' to={to}>
                 {label}
               </Link>
