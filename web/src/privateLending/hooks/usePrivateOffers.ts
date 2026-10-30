@@ -18,9 +18,10 @@ import {
   loadVerifiedOffer,
   type OfferRole,
   type ScanResult,
+  type ScanState,
   syncOffers,
 } from '@/privateLending/scan'
-import { kvScanStore } from '@/privateLending/scanStore'
+import { kvScanStore, type ScanScope, scanStoreKey } from '@/privateLending/scanStore'
 import type { VerifiedOffer } from '@/privateLending/verify'
 import { useLwk } from '@/providers/lwk/useLwk'
 import { useWallet } from '@/providers/wallet/useWallet'
@@ -98,6 +99,39 @@ function getScanKv(): Promise<PersistentKv> {
     throw error
   })
   return scanKv
+}
+
+/** The sync running for each scan state (by store key), and the key it runs with. */
+const runningSyncs = new Map<string, { key: LendingKey; sync: Promise<ScanState> }>()
+
+/**
+ * `syncOffers`, one at a time per scan state. A caller with the same key joins the running sync
+ * (a refetch, or a remount, while it runs). A caller with another key (a new session of the same
+ * wallet) waits for that sync to settle, then syncs. Two syncs never write one state concurrently.
+ */
+function syncOnce(
+  deps: PrivateFlowDeps,
+  key: LendingKey,
+  scope: ScanScope,
+  kv: PersistentKv,
+): Promise<ScanState> {
+  const id = scanStoreKey(scope, key.fingerprint())
+  const running = runningSyncs.get(id)
+  if (running?.key === key) return running.sync
+  const settled = running?.sync.then(
+    () => {},
+    () => {},
+  )
+  const sync = Promise.resolve(settled).then(() =>
+    syncOffers(deps, key, scope.apiBaseUrl, kvScanStore(kv, scope)),
+  )
+  const entry = { key, sync }
+  runningSyncs.set(id, entry)
+  const forget = () => {
+    if (runningSyncs.get(id) === entry) runningSyncs.delete(id)
+  }
+  sync.then(forget, forget)
+  return sync
 }
 
 async function openTerms(
@@ -189,10 +223,11 @@ function compareItems(a: PrivateOfferItem, b: PrivateOfferItem): number {
 }
 
 /**
- * The wallet's private offers. Each run syncs from the stored height, then fetches the candidate
- * of every offer found (and opens the verified ones not opened yet). Enabled only while a
- * private-capable wallet is ready. A failed sync saves nothing and surfaces as the query's error:
- * only network errors are retried, so a key freed by a disconnect mid-sync fails cleanly once.
+ * The wallet's private offers. Each run syncs from the stored height (joining a sync already
+ * running for this scan state), then fetches the candidate of every offer found and opens the
+ * verified ones not opened yet. Enabled only while a private-capable wallet is ready. A failed
+ * sync saves nothing and surfaces as the query's error. Only network errors are retried, so a key
+ * freed by a disconnect mid-sync fails cleanly once.
  */
 export function usePrivateOffers() {
   const { network } = useLwk()
@@ -203,13 +238,19 @@ export function usePrivateOffers() {
   return useQuery({
     queryKey: privateQueryKeys.offers(network, PRIVATE_API_BASE_URL, scriptPubkey ?? ''),
     enabled: isReady && privateCapable && scriptPubkey !== null,
-    queryFn: async ({ signal }): Promise<PrivateOffers> => {
-      const [deps, key, kv] = await Promise.all([getDeps(), getLendingKey(), getScanKv()])
+    queryFn: async (): Promise<PrivateOffers> => {
+      const session = getLendingKey()
+      const [deps, key, kv] = await Promise.all([getDeps(), session, getScanKv()])
+      const state = await syncOnce(deps, key, { network, apiBaseUrl: PRIVATE_API_BASE_URL }, kv)
+      // The session may have ended during the sync, and its private cache been dropped: then no
+      // terms may be opened into the cache. Within one session `getLendingKey` returns the same
+      // promise, so a different promise means another session, or none.
+      const current = getLendingKey()
+      if (current !== session) {
+        current.catch(() => {})
+        throw new Error('The wallet session ended during the sync')
+      }
       const scope = { network, fingerprint: key.fingerprint() }
-      const store = kvScanStore(kv, { network, apiBaseUrl: PRIVATE_API_BASE_URL })
-      const state = await syncOffers(deps, key, PRIVATE_API_BASE_URL, store)
-      // A sync outlived by its session (or its last viewer) opens no terms into the cache.
-      signal.throwIfAborted()
       const items = await Promise.all(
         Object.entries(state.offers).map(([txid, scanned]) =>
           offerItem(queryClient, deps, key, scope, txid, scanned),
