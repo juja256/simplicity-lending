@@ -1,19 +1,19 @@
 import { useMemo } from 'react'
 
+import Notice from '@/components/Notice'
 import { OfferStatusChip } from '@/components/OfferStatusChip'
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
-import type { PrivateFlowDeps } from '@/privateLending/deps'
 import { buildPrivateAcceptance } from '@/privateLending/flows/acceptance'
-import type { VerifiedOffer } from '@/privateLending/verify'
+import { selectAssetCoins, selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
 import { useWallet } from '@/providers/wallet/useWallet'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
 import { SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/script-auth/witness'
 
 import PrivateOfferActionShell, {
+  type FreshOffer,
   type PrivateOfferActionModalProps,
 } from './PrivateOfferActionShell'
-import { selectAssetCoins, selectFeeCoins } from './walletCoins'
 
 // The covenant inputs: the pending offer and the lender NFT at its script_auth lock.
 const ACCEPT_WEIGHT_UNITS =
@@ -32,7 +32,9 @@ export default function AcceptPrivateOfferModal(props: PrivateOfferActionModalPr
   const insufficientBalance =
     BigInt(confirmedBalances[principalAsset.id] ?? 0) < terms.principalAmount
 
-  const build = async (deps: PrivateFlowDeps, offer: VerifiedOffer) => {
+  // The indexer must still list the pending offer unspent (`requires`); the builder spends output
+  // 3 of the creation the gate verified.
+  const build = async ({ deps, offer }: FreshOffer) => {
     if (offer.opened.principalAsset() !== principalAsset.id) {
       throw new Error(`The offer's principal is not ${principalAsset.symbol}`)
     }
@@ -50,12 +52,10 @@ export default function AcceptPrivateOfferModal(props: PrivateOfferActionModalPr
       deps.feeRate,
       principalCoins,
     )
-    const receiveAddress = await getReceiveAddress()
-    if (!receiveAddress) throw new Error('Missing wallet receive address')
     return buildPrivateAcceptance(deps, offer, {
       principalCoins,
       feeCoins,
-      lenderNftReceiver: deps.lwk.Address.parse(receiveAddress, deps.network),
+      lenderNftReceiver: await walletReceiver(deps, getReceiveAddress),
     })
   }
 
@@ -74,6 +74,7 @@ export default function AcceptPrivateOfferModal(props: PrivateOfferActionModalPr
     <PrivateOfferActionShell
       {...props}
       kind='private_accept_offer'
+      requires='pending_offer'
       title='Accept Private Offer'
       chip={<OfferStatusChip status='pending' />}
       label='Accept & Supply'
@@ -82,9 +83,9 @@ export default function AcceptPrivateOfferModal(props: PrivateOfferActionModalPr
       disabled={insufficientBalance}
       notice={
         insufficientBalance && (
-          <div className='border-warning/30 bg-warning/10 text-warning rounded-2xl border px-4 py-3 text-sm'>
+          <Notice>
             Insufficient confirmed {principalAsset.symbol} balance to accept this offer.
-          </div>
+          </Notice>
         )
       }
       build={build}

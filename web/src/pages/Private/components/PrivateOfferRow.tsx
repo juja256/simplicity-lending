@@ -2,18 +2,20 @@ import { Chip } from '@heroui/react'
 import type { ReactNode } from 'react'
 
 import { getTxExplorerUrl } from '@/api/esplora/utils'
+import KeyFingerprint from '@/components/KeyFingerprint'
 import { OfferStatusChip } from '@/components/OfferStatusChip'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import type { PrivateOfferItem } from '@/privateLending/hooks/usePrivateOffers'
-import { formatTermLeft, truncateAddress } from '@/utils/format'
-
-import { displayStatus, usesConfiguredAssets } from '../helpers'
-import KeyFingerprint from './KeyFingerprint'
+import {
+  counterpartyOf,
+  displayStatus,
+  expiryLabel,
+  usesConfiguredAssets,
+} from '@/privateLending/offerView'
+import { truncateAddress } from '@/utils/format'
 
 interface PrivateOfferRowProps {
   item: PrivateOfferItem
-  /** Whose key the row shows: the borrower in the lender's inbox, the lender in one's own offers. */
-  counterparty: 'borrower' | 'lender'
   /** The counterparty's directory name, if it is listed. */
   counterpartyName?: string
   /** The chain tip, or 0 while unknown. */
@@ -34,10 +36,12 @@ function Stat({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
-/** One private offer: its counterparty, its terms (when open), its status and its actions. */
+/**
+ * One private offer: its counterparty (the borrower in the lender's inbox, the lender in one's own
+ * offers), its terms (when open), its status and its actions.
+ */
 export default function PrivateOfferRow({
   item,
-  counterparty,
   counterpartyName,
   tipHeight,
   isProcessing,
@@ -47,23 +51,17 @@ export default function PrivateOfferRow({
   const { formatCollateralDisplay, formatPrincipalAmount } = useFormatAmount()
   const { terms, candidate } = item
   const status = candidate ? displayStatus(candidate) : null
-  const isLive = status === 'pending' || status === 'active'
-  const fingerprint =
-    terms === null
-      ? null
-      : counterparty === 'borrower'
-        ? terms.borrowerFingerprint
-        : terms.lenderFingerprint
+  const counterparty = counterpartyOf(item)
 
   return (
     <li className='bg-surface flex flex-col gap-4 rounded-2xl p-4'>
       <div className='flex flex-wrap items-start justify-between gap-3'>
         <div className='flex min-w-0 flex-col gap-1'>
           <span className='text-muted text-xs'>
-            {counterparty === 'borrower' ? 'Borrower' : 'Lender'}
+            {item.role === 'lender' ? 'Borrower' : 'Lender'}
           </span>
-          {fingerprint !== null ? (
-            <KeyFingerprint fingerprint={fingerprint} name={counterpartyName} />
+          {counterparty !== null ? (
+            <KeyFingerprint fingerprint={counterparty.fingerprint} name={counterpartyName} />
           ) : (
             <span className='text-muted text-sm'>Unknown</span>
           )}
@@ -90,15 +88,7 @@ export default function PrivateOfferRow({
           <Stat label='Principal'>{formatPrincipalAmount(terms.principalAmount)}</Stat>
           <Stat label='Repayment'>{formatPrincipalAmount(terms.repaymentAmount)}</Stat>
           <Stat label='Interest'>{formatPrincipalAmount(terms.interest)}</Stat>
-          <Stat label='Expiry'>
-            #{terms.loanExpirationTime}
-            {isLive && tipHeight > 0 && (
-              <span className='text-muted font-normal'>
-                {' '}
-                ({formatTermLeft(terms.loanExpirationTime - tipHeight)})
-              </span>
-            )}
-          </Stat>
+          <Stat label='Expiry'>{expiryLabel(terms.loanExpirationTime, status, tipHeight)}</Stat>
         </dl>
       )}
 

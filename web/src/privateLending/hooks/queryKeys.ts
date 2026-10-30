@@ -8,6 +8,12 @@ import { privateQueryKeys } from '@/api/indexer/queryKeys'
 
 const LENDING_KEY_IDENTITY_ROOT = 'lending-key-identity'
 const PRIVATE_OFFER_TERMS_ROOT = 'private-offer-terms'
+const PRIVATE_LENDING_WASM_ROOT = 'private-lending-wasm'
+
+/** The private lending wasm module, loaded once. Not session data: it holds no key. */
+export function privateLendingWasmQueryKey() {
+  return [PRIVATE_LENDING_WASM_ROOT] as const
+}
 
 export function lendingKeyIdentityQueryKey(scriptPubkeyHex: string | null) {
   return [LENDING_KEY_IDENTITY_ROOT, scriptPubkeyHex] as const

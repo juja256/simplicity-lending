@@ -2,14 +2,16 @@ import { Chip, Skeleton } from '@heroui/react'
 import { type FormEvent, useState } from 'react'
 
 import UserIcon from '@/components/icons/UserIcon'
+import KeyFingerprint from '@/components/KeyFingerprint'
+import Notice from '@/components/Notice'
 import { OffersLoadError } from '@/components/OffersLoadError'
 import { UiButton } from '@/components/ui/UiButton'
 import { UiTextField } from '@/components/ui/UiTextField'
 import { useDirectory } from '@/privateLending/hooks/useDirectory'
+import { useFingerprintOf } from '@/privateLending/hooks/useFingerprintOf'
 import { ErrorHandler } from '@/utils/errorHandler'
 
-import { displayNameError, MAX_DISPLAY_NAME_CHARS, useFingerprintOf } from '../helpers'
-import KeyFingerprint from './KeyFingerprint'
+import { displayNameError, MAX_DISPLAY_NAME_CHARS } from '../helpers'
 
 /**
  * The lender directory: the wallet's own entry (register, rename, remove) and every listed key.
@@ -165,12 +167,9 @@ export default function DirectorySection() {
         )}
 
         {writeError && (
-          <div
-            role='alert'
-            className='border-danger/30 bg-danger/10 text-danger rounded-2xl border px-4 py-3 text-sm'
-          >
+          <Notice tone='danger' role='alert'>
             Your entry was not changed: {ErrorHandler.describe(writeError)}
-          </div>
+          </Notice>
         )}
       </div>
 

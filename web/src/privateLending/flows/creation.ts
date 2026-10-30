@@ -296,18 +296,24 @@ export async function buildPrivateCreation(
         throw error
       }
       const opened = offer.opened
-      const mismatch = [
-        opened.firstInput() !== firstInput && 'first input',
-        opened.borrowerNft() !== borrowerNft && 'borrower NFT',
-        opened.lenderNft() !== lenderNft && 'lender NFT',
-        opened.lenderPublicKey() !== lender && 'lender',
-        opened.collateralAsset() !== deps.assets.collateral && 'collateral asset',
-        opened.collateralAmount() !== params.collateralAmount && 'collateral',
-        opened.principalAsset() !== deps.assets.principal && 'principal asset',
-        opened.principalAmount() !== params.principalAmount && 'principal',
-        opened.repaymentAmount() !== params.repaymentAmount && 'repayment',
-        opened.loanExpirationTime() !== params.loanExpirationTime && 'loan expiration',
-      ].filter(Boolean)
+      let mismatch: (string | false)[]
+      try {
+        mismatch = [
+          opened.firstInput() !== firstInput && 'first input',
+          opened.borrowerNft() !== borrowerNft && 'borrower NFT',
+          opened.lenderNft() !== lenderNft && 'lender NFT',
+          opened.lenderPublicKey() !== lender && 'lender',
+          opened.collateralAsset() !== deps.assets.collateral && 'collateral asset',
+          opened.collateralAmount() !== params.collateralAmount && 'collateral',
+          opened.principalAsset() !== deps.assets.principal && 'principal asset',
+          opened.principalAmount() !== params.principalAmount && 'principal',
+          opened.repaymentAmount() !== params.repaymentAmount && 'repayment',
+          opened.loanExpirationTime() !== params.loanExpirationTime && 'loan expiration',
+        ].filter(Boolean)
+      } finally {
+        // The opened offer holds the offer's secrets, and nothing reads it after this check.
+        opened.free()
+      }
       if (mismatch.length > 0) {
         throw new PrivateOfferError(
           'terms-mismatch',

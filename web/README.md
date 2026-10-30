@@ -153,6 +153,21 @@ RUN_MODE=api cargo run -p lending-indexer
   `curl 'http://localhost:8000/private/candidates?limit=1'` shows its `last_indexed_height`, and
   `scan` fails until it has passed every e2e creation.
 
+The indexer sends no CORS headers, so a browser cannot read it from the dev server's origin. To
+run the app against it, let the dev server proxy it under its own origin and drop the `/api`
+prefix, which the local indexer does not serve. In `.env.local` (git-ignored), over the testnet
+settings from `.env.liquidtestnet`:
+
+```bash
+VITE_API_URL=/api
+API_PROXY_TARGET=http://127.0.0.1:8000
+API_PROXY_STRIP_PREFIX=true
+```
+
+Then `pnpm dev`. `API_PROXY_STRIP_PREFIX` is off by default, so the proxy to a deployed API (which
+serves under `/api`) is unchanged. The e2e script reads `VITE_API_URL` from `.env.liquidtestnet`,
+not `.env.local`, and keeps calling the indexer directly.
+
 ### State and resume
 
 `.e2e-private/state.json` (git-ignored) holds one record per transaction: its stage, txid, hex

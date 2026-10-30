@@ -22,6 +22,9 @@ export default defineConfig(({ command, mode }) => {
   const configEnv = loadEnv(mode, root, '')
   const apiProxyTarget = configEnv.API_PROXY_TARGET
   const useLocalApiProxy = command === 'serve' && mode === 'development' && apiProxyTarget
+  // A deployed API serves under `/api`; a local indexer serves at `/`, so its proxy drops the
+  // prefix. Opt in with API_PROXY_STRIP_PREFIX=true.
+  const stripApiPrefix = configEnv.API_PROXY_STRIP_PREFIX === 'true'
 
   return {
     plugins: [
@@ -53,6 +56,9 @@ export default defineConfig(({ command, mode }) => {
             '/api': {
               target: apiProxyTarget,
               changeOrigin: true,
+              ...(stripApiPrefix && {
+                rewrite: (requestPath: string) => requestPath.replace(/^\/api/, ''),
+              }),
             },
           },
         }

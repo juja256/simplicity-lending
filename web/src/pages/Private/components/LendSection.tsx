@@ -1,4 +1,3 @@
-import { Skeleton, Spinner } from '@heroui/react'
 import { type ReactNode, useState } from 'react'
 
 import { useBlockHeight } from '@/api/esplora/hooks'
@@ -6,14 +5,9 @@ import HandCoinsIcon from '@/components/icons/HandCoinsIcon'
 import AcceptPrivateOfferModal from '@/components/modals/private/AcceptPrivateOfferModal'
 import ClaimRepaymentModal from '@/components/modals/private/ClaimRepaymentModal'
 import LiquidatePrivateOfferModal from '@/components/modals/private/LiquidatePrivateOfferModal'
-import { OffersLoadError } from '@/components/OffersLoadError'
 import { UiButton } from '@/components/ui/UiButton'
 import { useDirectory } from '@/privateLending/hooks/useDirectory'
 import { type PrivateOfferItem, usePrivateOffers } from '@/privateLending/hooks/usePrivateOffers'
-import type { PrivateTxKind, PrivateTxRecord } from '@/providers/pendingTransactions/types'
-import { usePendingTransactions } from '@/providers/pendingTransactions/usePendingTransactions'
-import { ErrorHandler } from '@/utils/errorHandler'
-
 import {
   isOpenedOffer,
   isPastExpiry,
@@ -21,7 +15,11 @@ import {
   type OpenedOfferItem,
   unspentUtxo,
   usesConfiguredAssets,
-} from '../helpers'
+} from '@/privateLending/offerView'
+import type { PrivateTxKind, PrivateTxRecord } from '@/providers/pendingTransactions/types'
+import { usePendingTransactions } from '@/providers/pendingTransactions/usePendingTransactions'
+
+import PrivateOfferList, { ScanHeight } from './PrivateOfferList'
 import PrivateOfferRow from './PrivateOfferRow'
 
 type LenderAction = 'accept' | 'claim' | 'liquidate'
@@ -146,7 +144,6 @@ export default function LendSection() {
       <PrivateOfferRow
         key={item.txid}
         item={item}
-        counterparty='borrower'
         counterpartyName={borrowerName(item)}
         tipHeight={tipHeight}
         isProcessing={txState?.state === 'processing'}
@@ -190,48 +187,17 @@ export default function LendSection() {
             any action.
           </p>
         </div>
-        {offers.data && (
-          <span className='text-muted inline-flex items-center gap-2 text-xs'>
-            {offers.isFetching && <Spinner size='sm' />}
-            {offers.data.syncedHeight === null
-              ? 'Nothing indexed yet'
-              : `Scanned up to block #${offers.data.syncedHeight}`}
-          </span>
-        )}
+        <ScanHeight offers={offers} />
       </header>
 
-      {offers.isError && offers.data !== undefined && (
-        <div
-          role='alert'
-          className='border-warning/30 bg-warning/10 text-warning flex flex-wrap items-center justify-between gap-2 rounded-2xl border px-4 py-3 text-sm'
-        >
-          <span>The list could not be refreshed: {ErrorHandler.describe(offers.error)}</span>
-          <UiButton size='sm' variant='ghost' onPress={() => void offers.refetch()}>
-            Try Again
-          </UiButton>
-        </div>
-      )}
-
-      {offers.data === undefined ? (
-        offers.isError ? (
-          <OffersLoadError error={offers.error} onRetry={() => void offers.refetch()} />
-        ) : (
-          <div className='flex flex-col gap-2'>
-            <p className='text-muted text-sm'>Scanning for offers addressed to you…</p>
-            {Array.from({ length: 2 }).map((_, i) => (
-              <Skeleton key={i} className='h-28 w-full rounded-2xl' />
-            ))}
-          </div>
-        )
-      ) : items.length === 0 ? (
-        <div className='bg-surface border-muted flex h-14 items-center rounded border border-dashed px-4 opacity-50'>
-          <span className='text-foreground text-sm font-medium'>
-            No offers addressed to you yet.
-          </span>
-        </div>
-      ) : (
-        <ul className='flex flex-col gap-2'>{items.map(renderRow)}</ul>
-      )}
+      <PrivateOfferList
+        offers={offers}
+        isEmpty={items.length === 0}
+        loadingText='Scanning for offers addressed to you…'
+        emptyText='No offers addressed to you yet.'
+      >
+        {items.map(renderRow)}
+      </PrivateOfferList>
 
       {renderModal()}
     </section>
