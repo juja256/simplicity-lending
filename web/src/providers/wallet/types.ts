@@ -45,9 +45,10 @@ export interface WalletContextValue extends WalletState {
   privateCapable: boolean
   /**
    * The session's lending key, derived once per session from its descriptor and freed when the
-   * session ends (a key held past that throws on use). Rejects unless a private-capable wallet is
-   * connected. The provider owns it: do not free it. Held in memory only: never persist, log or
-   * send it; only its x-only key may leave the browser.
+   * session ends (a key held past that throws on use). Every call in one session returns the same
+   * promise, so a different promise means the session changed. Rejects unless a private-capable
+   * wallet is connected. The provider owns it: do not free it. Held in memory only: never persist,
+   * log or send it; only its x-only key may leave the browser.
    */
   getLendingKey(): Promise<LendingKey>
   /** The wallet's coins with their secrets (`Wollet.utxos()`), for the private flow builders. */
