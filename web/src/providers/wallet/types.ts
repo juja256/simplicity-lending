@@ -4,6 +4,7 @@ import type {
   Pset,
   Transaction,
   TxBuilder,
+  WalletTxOut,
   Wollet,
   WolletDescriptor,
 } from '@lilbonekit/lwk-web'
@@ -11,6 +12,7 @@ import type {
 import type { WalletConnector } from '@/lib/wallet-core/connector/types'
 import type { WalletCache } from '@/lib/wallet-core/store/walletCache'
 import type { ConnectionStatus, WalletCoin, WalletType } from '@/lib/wallet-core/types'
+import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
 export interface ConnectOptions {
   seedMnemonic?: string
@@ -39,10 +41,22 @@ export interface WalletContextValue extends WalletState {
   getWollet(): Promise<Wollet>
   getReceiveAddress(): Promise<string | null>
   verifyReceiveAddress(): Promise<string>
+  /** Whether the signer can run private loans: Jade or the seed wallet. */
+  privateCapable: boolean
+  /**
+   * The session's lending key, derived once per session from its descriptor and freed when the
+   * session ends (a key held past that throws on use). Rejects unless a private-capable wallet is
+   * connected. The provider owns it: do not free it. Held in memory only: never persist, log or
+   * send it; only its x-only key may leave the browser.
+   */
+  getLendingKey(): Promise<LendingKey>
+  /** The wallet's coins with their secrets (`Wollet.utxos()`), for the private flow builders. */
+  getWalletTxOuts(): Promise<WalletTxOut[]>
 }
 
 export interface WalletSession {
   connector: WalletConnector
+  signerType: WalletSignerType
   descriptor: WolletDescriptor
   wollet: Wollet
   esploraClient: EsploraClient
@@ -60,6 +74,11 @@ export interface SavedSession {
 }
 
 export type WalletSignerType = 'jade' | 'seed' | 'sideswap' | 'humid'
+
+/** Private loans need a signer that signs the private PSETs as built: Jade or the seed wallet. */
+export function isPrivateCapable(signerType: WalletSignerType | null): boolean {
+  return signerType === 'jade' || signerType === 'seed'
+}
 
 // appLink is null for sign requests — the deep-link format for those isn't confirmed yet.
 export interface PendingWalletRequest {

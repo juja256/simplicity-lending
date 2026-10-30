@@ -3,6 +3,7 @@ export const RoutePath = {
   Dashboard: '/app',
   Borrow: '/app/borrow',
   Supply: '/app/supply',
+  Private: '/app/private',
   DesignSystem: '/app/design-system',
   Demo: '/app/demo',
 } as const

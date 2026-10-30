@@ -4,6 +4,7 @@ import {
   Registry,
   type Transaction,
   type TxBuilder,
+  type WalletTxOut,
   type Wollet,
 } from '@lilbonekit/lwk-web'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -28,13 +29,16 @@ import {
   type WalletBalances,
 } from '@/lib/wallet-core/wallet/sync'
 import { createEsploraClient } from '@/lwk'
+import { getPrivateLendingWasm } from '@/privateLending/wasm'
 import { useLwk } from '@/providers/lwk/useLwk'
 import { ErrorHandler } from '@/utils/errorHandler'
+import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
 import {
   type CachePolicy,
   type ConnectOptions,
   INITIAL_WALLET_STATE,
+  isPrivateCapable,
   type SavedSession,
   type WalletSession,
   type WalletState,
@@ -70,6 +74,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   // Throttle state shared by the poll, the focus/visibility handlers and manual syncs.
   const lastSyncAtRef = useRef(0)
   const syncInFlightRef = useRef(false)
+  // The lending key of `session`, derived on first use. Freed when that session ends.
+  const lendingKeyRef = useRef<{ session: WalletSession; key: Promise<LendingKey> } | null>(null)
 
   const [state, setState] = useState<WalletState>(INITIAL_WALLET_STATE)
   const [savedSession, setSavedSession] = useSessionStorage<SavedSession>(SESSION_STORAGE_KEY)
@@ -94,6 +100,19 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     [],
   )
 
+  // Frees the held lending key. Called right after `sessionRef` stops pointing at its session, so
+  // a derivation still in flight sees the change and never creates a key (see getLendingKey).
+  const releaseLendingKey = useCallback(() => {
+    const held = lendingKeyRef.current
+    lendingKeyRef.current = null
+    held?.key.then(
+      key => key.free(),
+      () => {},
+    )
+  }, [])
+
+  useEffect(() => releaseLendingKey, [releaseLendingKey])
+
   const endSession = useCallback(
     async ({
       error,
@@ -102,6 +121,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       connectionChangeCounterRef.current++
       const session = sessionRef.current
       sessionRef.current = null
+      releaseLendingKey()
       // A scan started by the ended session keeps running, and its own bookkeeping is skipped
       // as stale, so the flag is cleared here or the next session could never sync.
       syncInFlightRef.current = false
@@ -118,7 +138,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       const cache = session?.cache
       await (cachePolicy === 'clear' ? cache?.clearAndClose() : cache?.close())?.catch(console.warn)
     },
-    [setSavedSession],
+    [setSavedSession, releaseLendingKey],
   )
 
   // Bump the counter (via endSession) before the network-bound cancel RPC, so the in-flight
@@ -329,7 +349,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         openedCache = cache
         const esploraClient = createEsploraClient(lwkNetwork)
 
-        sessionRef.current = { connector, descriptor, wollet, esploraClient, cache }
+        sessionRef.current = { connector, signerType, descriptor, wollet, esploraClient, cache }
 
         const saved: SavedSession = {
           connectorId: connector.id,
@@ -377,6 +397,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         // instead of gating it behind the connector's own teardown.
         connector?.disconnect().catch(console.warn)
         sessionRef.current = null
+        releaseLendingKey()
         setState(s => ({
           ...INITIAL_WALLET_STATE,
           usbDeviceDetected: s.usbDeviceDetected,
@@ -387,7 +408,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         connectingRef.current = false
       }
     },
-    [lwkNetwork, network, setSavedSession, loadBalances],
+    [lwkNetwork, network, setSavedSession, loadBalances, releaseLendingKey],
   )
 
   const resumeSession = useCallback(async () => {
@@ -564,6 +585,35 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     return session.wollet
   }, [])
 
+  const getWalletTxOuts = useCallback(
+    async (): Promise<WalletTxOut[]> => (await getWollet()).utxos(),
+    [getWollet],
+  )
+
+  // One derivation per session, shared by every caller. The key is created only while its
+  // session is still the current one, so a session that ended mid-derivation leaves no key behind.
+  const getLendingKey = useCallback((): Promise<LendingKey> => {
+    const session = sessionRef.current
+    if (!session) return Promise.reject(new Error('WalletProvider: not connected'))
+    if (!isPrivateCapable(session.signerType)) {
+      return Promise.reject(new Error('Private loans need Jade or the seed wallet'))
+    }
+    const held = lendingKeyRef.current
+    if (held?.session === session) return held.key
+
+    releaseLendingKey()
+    const key = getPrivateLendingWasm().then(wasm => {
+      if (sessionRef.current !== session) throw new Error('The wallet session ended')
+      return wasm.LendingKey.fromDescriptor(session.descriptor.toString())
+    })
+    lendingKeyRef.current = { session, key }
+    // A failed derivation is not kept, so the next call tries again.
+    key.catch(() => {
+      if (lendingKeyRef.current?.key === key) lendingKeyRef.current = null
+    })
+    return key
+  }, [releaseLendingKey])
+
   return (
     <WalletContext.Provider
       value={{
@@ -580,6 +630,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         getWollet,
         getBlindedWalletUtxos,
         fundWithWalletCoins,
+        privateCapable: isPrivateCapable(state.signerType),
+        getLendingKey,
+        getWalletTxOuts,
       }}
     >
       {children}

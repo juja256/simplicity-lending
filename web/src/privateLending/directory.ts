@@ -14,7 +14,7 @@ import type { PrivateFlowDeps } from './deps'
 
 /** Creates or renames the key's directory entry; returns it. */
 export async function registerInDirectory(
-  deps: PrivateFlowDeps,
+  deps: Pick<PrivateFlowDeps, 'wasm'>,
   key: LendingKey,
   displayName: string,
   apiBaseUrl: string,
@@ -35,7 +35,7 @@ export async function registerInDirectory(
 
 /** Removes the key's directory entry; the indexer answers `404` if there is none. */
 export async function removeFromDirectory(
-  deps: PrivateFlowDeps,
+  deps: Pick<PrivateFlowDeps, 'wasm'>,
   key: LendingKey,
   apiBaseUrl: string,
 ): Promise<void> {

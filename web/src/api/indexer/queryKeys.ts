@@ -32,3 +32,13 @@ export const factoryQueryKeys = {
     ['factories', 'by-script', normalizeHex(scriptPubkeyHex)] as const,
   detail: (factoryId: string) => ['factories', 'detail', factoryId] as const,
 } as const
+
+/** Private lending queries. All of them refetch on `block_indexed`. */
+export const privateQueryKeys = {
+  all: () => ['private'] as const,
+  offers: (network: string, apiBaseUrl: string, scriptPubkeyHex: string) =>
+    ['private', 'offers', network, apiBaseUrl, normalizeHex(scriptPubkeyHex)] as const,
+  directory: (apiBaseUrl: string) => ['private', 'directory', apiBaseUrl] as const,
+  directoryEntry: (apiBaseUrl: string, pubkey: string) =>
+    ['private', 'directory', apiBaseUrl, 'entry', normalizeHex(pubkey)] as const,
+} as const

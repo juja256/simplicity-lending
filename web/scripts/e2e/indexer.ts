@@ -4,20 +4,19 @@
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 
-import type { ScanState, ScanStore } from '@/privateLending/scan'
+import type { ScanStore } from '@/privateLending/scan'
+import { kvScanStore } from '@/privateLending/scanStore'
 
-/** A scan store in memory. It hands out copies, so a caller cannot change what it saved. */
+/**
+ * A scan store in memory, through the app's encoding and keys (`kvScanStore` over a `Map` in place
+ * of `PersistentKv`). Every read decodes a fresh copy, so a caller cannot change what it saved.
+ */
 export function memoryScanStore(): ScanStore {
-  const saved = new Map<string, ScanState>()
-  return {
-    async get(fingerprint) {
-      const state = saved.get(fingerprint)
-      return state === undefined ? undefined : structuredClone(state)
-    },
-    async set(fingerprint, state) {
-      saved.set(fingerprint, structuredClone(state))
-    },
-  }
+  const saved = new Map<string, Uint8Array>()
+  return kvScanStore(
+    { get: key => saved.get(key), put: (key, value) => saved.set(key, value.slice()) },
+    { network: 'liquidtestnet', apiBaseUrl: 'e2e' },
+  )
 }
 
 export interface IndexerProxy {

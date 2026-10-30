@@ -5,7 +5,13 @@ import { normalizeHex } from '@/utils/hex'
 
 import type { IndexerEvent } from './events'
 import { invalidateAllIndexerQueries } from './invalidateIndexerQueries'
-import { borrowerQueryKeys, factoryQueryKeys, lenderQueryKeys, offersQueryKeys } from './queryKeys'
+import {
+  borrowerQueryKeys,
+  factoryQueryKeys,
+  lenderQueryKeys,
+  offersQueryKeys,
+  privateQueryKeys,
+} from './queryKeys'
 
 export interface InvalidateContext {
   queryClient: QueryClient
@@ -43,6 +49,8 @@ export function invalidateEventQueries(
       break
     case 'block_indexed':
       invalidateAllIndexerQueries(queryClient)
+      // Private offers emit no event of their own: their views refetch on each indexed block.
+      invalidate(privateQueryKeys.all())
       break
 
     default:
