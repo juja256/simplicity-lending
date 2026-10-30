@@ -139,7 +139,11 @@ Notes on the liquidation:
    - The app's `signPset` adds registry asset contracts (`withAssetContracts`) before signing. The e2e signs directly, so Task 11 is the first time this path meets a private PSET.
 3. **The final whole-branch review** of `private-lending-frontend`, then merge.
 
-**Before any new e2e creation:** the borrower has only 2 tL-BTC coins left, and a creation needs at least 3 distinct coins. So split the borrower's coins first, or fund it from the faucet. `create-dry` fails until then.
+**Funding** (topped up from the faucet on 2026-10-30, 100 000 tL-sats per request):
+- The borrower has 399 311 tL-sats in 5 coins and 4 900 TEST.
+- The lender has 199 356 tL-sats in 3 coins and 4 100 TEST.
+- A creation needs at least 3 distinct coins.
+- The faucet is a plain GET with no captcha, limited to 3 requests a minute: `https://liquidtestnet.com/faucet?address=<addr>&action=lbtc` (or `action=test` for TEST).
 
 ## How work is run (user's instructions)
 
