@@ -1,4 +1,4 @@
-# Private lending, part C2: session handoff (2026-10-30)
+# Private lending, part C2: session handoff (updated 2026-10-31)
 
 Read this file first.
 
@@ -7,7 +7,7 @@ Read this file first.
 
 ## Where things stand
 
-The branch `private-lending-frontend` holds Tasks 1–8 of the plan. It is not merged and not pushed. `main` holds parts A, B and C1.
+The branch `private-lending-frontend` holds Tasks 1–10 of the plan; Tasks 1–4 and 7–10 had per-task reviews, while 5 and 6 did not, by the user's instruction at the time. It is pushed to `fork` and not merged. `main` holds parts A, B and C1. Only Task 11 (the user's testnet and Jade run) and the final whole-branch review remain.
 
 **Tasks 1–6, with every flow proven on Liquid testnet:**
 - **Wasm helpers** (`crates/private-lending-wasm`):
@@ -89,6 +89,44 @@ The branch `private-lending-frontend` holds Tasks 1–8 of the plan. It is not m
     - the lender NFT is at `<acceptance>:2`.
   - Await `syncWallet()` before reading coins.
 
+**Task 9, the Private page with the directory and lending side** (`e7539a0`; reviewed, approved):
+- The route is `/app/private`. Its nav link appears only for Jade and the seed wallet.
+- `DirectorySection` registers, renames and removes the own entry. Names render inside `<bdi>`, next to the key fingerprint.
+- `LendSection` is the inbox: Accept, Claim repayment and Liquidate. Invalid offers show their code and have no actions.
+- The modals are in `web/src/components/modals/private/`.
+- **Headless dev run** with the lender seed against the local indexer:
+  - The inbox listed the three e2e offers with the right amounts and interest.
+  - Directory register, rename and remove worked.
+  - Disconnect, reconnect and reload recovered.
+  - The `block_indexed` refetch fired.
+  - The modals were opened and stopped before signing. Nothing was broadcast.
+- **Accepted extras (Ruling 18):**
+  - Accept is hidden past expiry;
+  - a copy-full-key button;
+  - an unsupported-asset gate;
+  - row-level Broadcast Again, Processing and Discard.
+
+**Task 10, the borrowing side** (`4d955a8`, fix `d5db409`; reviewed):
+- **`BorrowSection`** shows your own offers. Its actions:
+  - **Cancel** while pending.
+  - **Claim principal,** also on a liquidated offer whose principal is still unspent, as the public flow does.
+  - **Repay,** only after the principal is claimed. Repaying burns the borrower NFT, the only key to the principal.
+- **Repay needs positive evidence (Ruling 21):**
+  - The UI offers it only when the indexer lists the principal as spent by a transaction other than the creation.
+  - The repayment builder then proves on chain that the claim transaction spends `<acceptance>:1`, and that the NFT input is `<claim>:0`.
+  - `e2e:private repay-hostile-dry` is the regression check: it fails on the original bug.
+- **`CreatePrivateOfferForm`:**
+  - The lender is chosen from the directory or pasted. A pasted key is checked to be a valid point.
+  - Your own key is refused.
+  - Review stays disabled until your identity loads, and while an unsent creation exists. Pending creations show above the scan list.
+- **Shared code.** One row component (`PrivateOfferActionRow`) and one keyed-modal hook (`useKeyedModal`) serve both Lend and Borrow.
+- **Dev run** with the borrower seed, through the Ruling 17 proxy, in a normal browser profile:
+  - A creation was built, signed through the app's own `signPset`, finalized, and passed the borrower's self-check.
+  - All broadcasts were blocked. Nothing reached testnet.
+- **Not run yet, even with the run stopped before signing:** Cancel and Repay, because no pending or active e2e offer is left. Nor have the UI's save, broadcast and retry steps been run against testnet. Task 11 must cover both.
+
+**Local dev against the local indexer (Ruling 17).** The indexer has no CORS layer. So `web/.env.local` sets `VITE_API_URL=/api`, `API_PROXY_TARGET=http://127.0.0.1:8000` and `API_PROXY_STRIP_PREFIX=true`, and `pnpm dev` proxies `/api`. The flag is off by default; see `web/README.md`. `web/.env.local` (git-ignored) currently holds the borrower seed as `VITE_DEBUG_MNEMONIC`.
+
 **Local testnet indexer** (started in Task 7; it does not survive a reboot):
 - The database is `lending-indexer-testnet` (sqlx-cli 0.8.6 is installed). The binary is copied to `/tmp/lending-indexer-testnet/simplicity-lending-indexer`, with logs `indexer.log` and `api.log` beside it.
 - The API runs on `http://127.0.0.1:8000`.
@@ -124,20 +162,20 @@ Notes on the liquidation:
 
 ## What comes next, in order
 
-1. **Tasks 9 and 10 of the plan:** the Private page, `/app/private`, with Directory, Lend and Borrow sections. Its modals call the builders through `usePrivateTransaction` and load offers with `useLoadVerifiedOffer`.
+1. **Task 11: the testnet run through the UI, and the Jade check.**
+   - **Step 1, the checklist.** A subagent writes it, at `docs/superpowers/manual/2026-10-29-private-lending-testnet.md`.
+   - **Step 2, the run.** The user runs the checklist.
    - Make sure the local indexer is running first (see above).
-   - **Task 9's dev run is the first runtime test of the Task 8 hooks.** It must exercise:
-     - the lending-key lifecycle: connect, disconnect, reconnect;
-     - the IndexedDB save before broadcast, and `retryBroadcast`;
-     - the private confirmation tracking;
-     - the refetch on `block_indexed`;
-     - the cache removal at session end.
-   - From the Task 7 review: `verified` does not mean on chain. An indexer can serve a well-formed offer that was never broadcast. Acting on it fails only at broadcast, and no funds are at risk. Consider an esplora presence check before enabling actions.
-2. **Task 11, run by the user:** the testnet run through the UI with the seed wallet, plus the Jade check.
-   - Check that Jade signs pinned outputs with `blinder_index = Some(i)`.
-   - Check how Jade shows the NFT contract domain `simplicity-lending.private`.
-   - The app's `signPset` adds registry asset contracts (`withAssetContracts`) before signing. The e2e signs directly, so Task 11 is the first time this path meets a private PSET.
-3. **The final whole-branch review** of `private-lending-frontend`, then merge.
+   - **It must cover what no dev run has exercised yet:**
+     - Cancel and Repay in the UI;
+     - the UI's save before broadcast, the broadcast itself, and Broadcast Again and Discard against testnet;
+     - the confirmation tracking.
+   - **Jade:**
+     - Check that Jade signs pinned outputs with `blinder_index = Some(i)`.
+     - Check how Jade shows the NFT contract domain `simplicity-lending.private`.
+     - The app's `signPset` adds registry asset contracts (`withAssetContracts`) before signing. It has worked for the seed wallet since Task 10's dev run, but not yet with Jade.
+   - From the Task 7 review: `verified` does not mean on chain. An indexer can serve a well-formed offer that was never broadcast. Acting on it fails only at broadcast, and no funds are at risk.
+2. **The final whole-branch review** of `private-lending-frontend`, then merge.
 
 **Funding** (topped up from the faucet on 2026-10-30, 100 000 tL-sats per request):
 - The borrower has 399 311 tL-sats in 5 coins and 4 900 TEST.
@@ -154,8 +192,10 @@ Notes on the liquidation:
   - a per-task review only when the controller flags a task as important. The user reaffirmed this, and Tasks 7 and 8 were flagged and reviewed: Task 7 for the untrusted-indexer boundary, Task 8 for the lending key and the shared providers.
 
   This is saved in Claude's project memory.
+- **For Tasks 9 and 10,** the user asked for a review after each task, and a push to `fork` after each reviewed task.
 - **Model availability.** `claude-sonnet-5-5` fails through this machine's LiteLLM proxy ("no healthy deployments"), so every subagent, reviewers included, runs on Opus.
-- The SDD ledger for this plan is `.superpowers/sdd/2026-10-29-private-lending-frontend/progress.md` (git-ignored). Tasks 1–8 are marked complete there. Its `global-constraints.md` holds the rulings in the form given to implementers, and the task reports (`task-N-report.md`) sit beside it. Keep all of them until the phase ends.
+- **Budget.** The session that ran Tasks 7–10 went through the Blockstream router (`claude-bs`) and hit the team budget during Task 10's fix round. That round was then finished in a claude.ai session, starting from the partial working tree.
+- The SDD ledger for this plan is `.superpowers/sdd/2026-10-29-private-lending-frontend/progress.md` (git-ignored). Tasks 1–10 are marked complete there. Its `global-constraints.md` holds the rulings in the form given to implementers, and the task reports (`task-N-report.md`) sit beside it. Keep all of them until the phase ends.
 
 ## Rulings made during part C2
 
@@ -180,6 +220,21 @@ Rulings 4 and 5 replace the plan's fixed e2e funding numbers. Rulings 8–10 cha
     - the private transaction store is opened only for private-capable wallets;
     - the private caches are cleared at session end.
 16. **Task 8, fix round 2, took one more minor.** At most one `syncOffers` runs per scan state, and terms are opened only while the session's key promise is unchanged.
+17. **Local dev proxy.** The local indexer has no CORS layer. Instead of adding one, which would be a server change, `pnpm dev` gets an opt-in `/api` proxy prefix strip, `API_PROXY_STRIP_PREFIX`, off by default.
+18. **Task 9's extras are accepted:**
+    - Accept is hidden past expiry;
+    - a copy-full-key button;
+    - an unsupported-asset gate;
+    - row-level Broadcast Again, Processing and Discard;
+    - helper files.
+19. **Task 10 first took three Task 9 review minors,** so its new modals wouldn't copy Task 9's patterns:
+    - shared helpers moved out of `pages/`;
+    - shared receiver and expiry helpers;
+    - Accept re-fetches the candidate and requires an unspent pending offer.
+20. **Task 10's fix round took two minors:**
+    - Review waits for the own identity, so you can't pick yourself as the lender;
+    - pending creations are shown, and Review is disabled while an unsent creation exists.
+21. **Repay needs on-chain claim evidence.** Indexer data alone is not enough, so an indexer that omits the principal can never unlock a repayment that would strand it.
 
 Other changes not foreseen by the plan:
 - `inspectPset` gained `lockTime` and per-input `sequence`.
@@ -219,4 +274,14 @@ From Tasks 7 and 8:
 - The `getLendingKey` doc says "the same promise per session", which doesn't hold after a failed derivation.
 - **Pre-existing, not changed by this branch:** the session descriptor (which holds the SLIP-77 master blinding key, the source of the lending key) and, for seed sessions, the mnemonic are kept in `sessionStorage`.
 
-Part C2 has had no whole-branch review yet.
+From Tasks 9 and 10:
+- **Stale local records.** A local transaction record overrides the candidate's current state. A rejected liquidation's `built` record hides a now-valid Claim until it is discarded. A dropped broadcast shows Processing for up to 24 hours.
+- **Fee reserve.** Accept checks the principal, but not the tL-BTC fee reserve.
+- **Fingerprints.** A directory name can render without a fingerprint, for an invalid key or while the wasm module loads.
+- **Pending creations.** A finalized creation the indexer hasn't listed yet disappears from the pending list until the scan finds it. "You have no private offers yet." shows under a pending "Your new offer" row.
+- **Coin weight.** `CREATION_EXTRA_WEIGHT_UNITS` = 6000 comes from one sample. If it is short, LWK fails before signing.
+- **Explorer links.** The link for an unsent txid gives a 404.
+- **e2e fetches.** The e2e `fetchTx` doesn't check the served txid; the app's does.
+- **Console noise.** One unexplained wasm "memory access out of bounds" occurred on a cold start of the public `/app/supply`, and didn't recur. HeroUI logs "PressResponder" warnings from the public `UiModal`, plus one per private modal.
+
+Part C2 has had per-task reviews for Tasks 1–4 and 7–10, but no whole-branch review yet.
