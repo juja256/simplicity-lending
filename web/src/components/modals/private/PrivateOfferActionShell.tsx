@@ -14,6 +14,7 @@ import type { TransactionSummaryRow } from '@/components/TransactionModal'
 import type { UiButtonProps } from '@/components/ui/UiButton'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import type { AsyncUpdatedPset, UpdatedPset } from '@/lwk/transaction'
+import { unspentUtxo } from '@/privateLending/candidate'
 import type { PrivateFlowDeps } from '@/privateLending/deps'
 import { PRIVATE_API_BASE_URL, usePrivateFlowDeps } from '@/privateLending/hooks/usePrivateFlowDeps'
 import { useLoadVerifiedOffer } from '@/privateLending/hooks/usePrivateOffers'
@@ -24,7 +25,6 @@ import {
   expiryLabel,
   type OpenedOfferItem,
   PRIVATE_UTXO_LABEL,
-  unspentUtxo,
 } from '@/privateLending/offerView'
 import type { VerifiedOffer } from '@/privateLending/verify'
 import type { PrivateTxKind, PrivateTxRecord } from '@/providers/pendingTransactions/types'

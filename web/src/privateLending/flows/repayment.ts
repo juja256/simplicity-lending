@@ -12,6 +12,10 @@
 // it is spent as an external UTXO that the wallet still signs. LWK puts the change of any asset
 // but the policy asset before the post-issuance outputs, so the builder pays the principal change
 // itself, after them.
+// The covenant does not check that the principal was claimed, and the borrower NFT is the only key
+// to an unclaimed principal (asset_auth(borrower NFT, 1, no burn)): burning it first would strand
+// the principal forever. So the builder spends the NFT only from the principal claim's output 0,
+// checked on chain, whatever the indexer says.
 import type { Address, WalletTxOut } from '@lilbonekit/lwk-web'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
@@ -21,6 +25,7 @@ import {
   ACCEPTANCE_OUTPUT,
   CREATION_OUTPUT,
   NFT_AMOUNT,
+  PRINCIPAL_CLAIM_OUTPUT,
   REPAYMENT_INPUT,
   REPAYMENT_OUTPUT,
 } from '@/simplicity/private-lending/layout'
@@ -45,6 +50,29 @@ import {
   wasmStep,
 } from './shared'
 
+/**
+ * The repayment refused before building: the borrower NFT outpoint is not output 0 of a
+ * transaction that spends this offer's principal output, so the principal may be unclaimed, and
+ * the repayment would burn the only key to it. The message is `"principal-not-claimed: …"`.
+ */
+export class PrincipalNotClaimedError extends Error {
+  readonly code = 'principal-not-claimed'
+
+  constructor(
+    readonly borrowerNftOutpoint: string,
+    /** The offer's principal output, `"<acceptance txid>:1"`. */
+    readonly principalOutpoint: string,
+  ) {
+    super(
+      `principal-not-claimed: the borrower NFT at ${borrowerNftOutpoint} is not output ` +
+        `${PRINCIPAL_CLAIM_OUTPUT.borrowerNft} of a transaction that spends the principal ` +
+        `${principalOutpoint}. Claim the principal first: the repayment burns the borrower NFT, ` +
+        'the only key to it',
+    )
+    this.name = 'PrincipalNotClaimedError'
+  }
+}
+
 export interface RepaymentParams {
   /**
    * The active offer, `"<acceptance txid>:0"`. The builder checks that the transaction spends this
@@ -53,8 +81,10 @@ export interface RepaymentParams {
    */
   activeOfferOutpoint: string
   /**
-   * The borrower NFT: an explicit output at a wallet address, `"<principal claim txid>:0"` once
-   * the principal is claimed (`"<creation txid>:0"` before).
+   * The borrower NFT: an explicit output at a wallet address, `"<principal claim txid>:0"`. The
+   * builder checks on chain that this transaction spends the offer's principal output,
+   * `"<acceptance txid>:1"`, and throws `PrincipalNotClaimedError` otherwise: before the claim the
+   * NFT sits at `"<creation txid>:0"`, the only key to the principal.
    */
   borrowerNftOutpoint: string
   /** The borrower's coins of the principal asset, which pay the repayment. */
@@ -77,9 +107,10 @@ export interface RepaymentSummary {
 }
 
 /**
- * Builds the borrower's full repayment of an accepted offer, blinded and ready to sign.
- * `finalize` finalizes the wallet inputs (the borrower NFT among them), then the offer
- * (FullRepayment), running the covenant on the transaction.
+ * Builds the borrower's full repayment of an accepted offer whose principal was claimed, blinded
+ * and ready to sign. Throws `PrincipalNotClaimedError` before building unless the borrower NFT
+ * comes from the principal claim. `finalize` finalizes the wallet inputs (the borrower NFT among
+ * them), then the offer (FullRepayment), running the covenant on the transaction.
  */
 export async function buildPrivateRepayment(
   deps: PrivateFlowDeps,
@@ -157,6 +188,16 @@ export async function buildPrivateRepayment(
   const offerOutput = requireOutput(offerTx, offerRef.vout, 'The active offer')
   if (offerOutput.scriptPubkey().toString() !== offer.scripts.activeOffer.toString()) {
     throw new Error("The active offer outpoint is not locked to the offer's active script")
+  }
+  // The NFT's transaction must be the principal claim: it spends the principal output this
+  // acceptance pinned, which only the borrower NFT unlocks, and pays the NFT back at its output 0.
+  const principalOutpoint = `${offerRef.txid}:${ACCEPTANCE_OUTPUT.principal}`
+  const claimsPrincipal = nftTx.inputs.some(input => {
+    const spent = input.outpoint()
+    return `${spent.txid().toString()}:${spent.vout()}` === principalOutpoint
+  })
+  if (nftRef.vout !== PRINCIPAL_CLAIM_OUTPUT.borrowerNft || !claimsPrincipal) {
+    throw new PrincipalNotClaimedError(nftInput, principalOutpoint)
   }
   const nftOutput = requireOutput(nftTx, nftRef.vout, 'The borrower NFT')
   if (nftOutput.asset()?.toString() !== borrowerNft || nftOutput.value() !== NFT_AMOUNT) {

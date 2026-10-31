@@ -14,6 +14,7 @@ import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { usePolicyAssetUtxos } from '@/hooks/usePolicyAssetUtxos'
 import { useDirectory } from '@/privateLending/hooks/useDirectory'
 import { useFingerprintOf, X_ONLY_KEY_HEX } from '@/privateLending/hooks/useFingerprintOf'
+import { useLendingKeyIdentity } from '@/privateLending/hooks/usePrivateFlowDeps'
 import { pickCreationCoins } from '@/privateLending/wallet'
 import type { PolicyAssetDenomination } from '@/providers/assetDenomination/constants'
 import { toBigintAmount } from '@/utils/bigint'
@@ -83,6 +84,11 @@ function expiryField(raw: string): Field<number> {
 }
 
 interface CreatePrivateOfferFormProps {
+  /**
+   * A creation of this browser was signed but not broadcast: it must be broadcast again or
+   * discarded first, since a new build would be another offer, possibly from the same coins.
+   */
+  hasUnsentCreation: boolean
   /** Opens the review of the offer, where the borrower signs it. */
   onReview: (draft: PrivateOfferDraft) => void
 }
@@ -92,9 +98,13 @@ interface CreatePrivateOfferFormProps {
  * shown by its fingerprint), the amounts, and the expiry in blocks from the tip. The coins are
  * picked again, after a wallet sync, when the offer is built.
  */
-export default function CreatePrivateOfferForm({ onReview }: CreatePrivateOfferFormProps) {
+export default function CreatePrivateOfferForm({
+  hasUnsentCreation,
+  onReview,
+}: CreatePrivateOfferFormProps) {
   const { collateralAsset, principalAsset } = NETWORK_CONFIG
-  const { entries, lookup, own } = useDirectory()
+  const { entries, lookup } = useDirectory()
+  const identity = useLendingKeyIdentity()
   const fingerprintOf = useFingerprintOf()
   const { data: tipHeight } = useBlockHeight()
   const { utxos: coins, isLoading: coinsLoading } = usePolicyAssetUtxos(true)
@@ -108,17 +118,25 @@ export default function CreatePrivateOfferForm({ onReview }: CreatePrivateOfferF
   const [repaymentText, setRepaymentText] = useState('')
   const [expiryText, setExpiryText] = useState('')
 
+  // The wallet's own key, which is never the lender: no lender is taken until it is known.
+  const ownKey = identity.data?.pubkey
+  const ownKeyWait = identity.isError
+    ? 'Your lending key is unavailable (see above), so no lender can be chosen.'
+    : 'Loading your lending key: a lender can be chosen once it is known, never your own.'
+
   // Directory entries are untrusted: only valid keys are offered, never the wallet's own.
   const listed = useMemo<Lender[]>(
     () =>
-      entries.flatMap(entry => {
-        const pubkey = entry.pubkey.toLowerCase()
-        const fingerprint = fingerprintOf(pubkey)
-        return fingerprint && pubkey !== own?.pubkey
-          ? [{ pubkey, fingerprint, name: entry.display_name }]
-          : []
-      }),
-    [entries, fingerprintOf, own?.pubkey],
+      ownKey === undefined
+        ? []
+        : entries.flatMap(entry => {
+            const pubkey = entry.pubkey.toLowerCase()
+            const fingerprint = fingerprintOf(pubkey)
+            return fingerprint && pubkey !== ownKey
+              ? [{ pubkey, fingerprint, name: entry.display_name }]
+              : []
+          }),
+    [entries, fingerprintOf, ownKey],
   )
 
   // A pasted key wins over the directory pick; picking from the directory clears it.
@@ -131,9 +149,9 @@ export default function CreatePrivateOfferForm({ onReview }: CreatePrivateOfferF
       lenderError = 'A lending key is 64 hexadecimal characters.'
     } else if (fingerprint === null) {
       lenderError = 'This is not a valid lending key.'
-    } else if (pastedKey === own?.pubkey) {
-      lenderError = 'This is your own lending key.'
-    } else if (fingerprint !== undefined) {
+    } else if (pastedKey === ownKey) {
+      lenderError = "This is your own lending key. Paste the lender's key."
+    } else if (fingerprint !== undefined && ownKey !== undefined) {
       lender = { pubkey: pastedKey, fingerprint, name: lookup(pastedKey)?.display_name }
     }
   } else if (listedKey !== null) {
@@ -159,6 +177,8 @@ export default function CreatePrivateOfferForm({ onReview }: CreatePrivateOfferF
   }, [coins, coinsLoading, collateral.value, feeRate])
 
   const draft: PrivateOfferDraft | null =
+    ownKey !== undefined &&
+    !hasUnsentCreation &&
     lender !== null &&
     collateral.value !== null &&
     principal.value !== null &&
@@ -188,7 +208,15 @@ export default function CreatePrivateOfferForm({ onReview }: CreatePrivateOfferF
       <div className='grid gap-4 sm:grid-cols-2'>
         <Select
           aria-label='Lender from the directory'
-          placeholder={listed.length === 0 ? 'No one is listed yet' : 'Choose a listed lender'}
+          placeholder={
+            ownKey === undefined
+              ? identity.isError
+                ? 'Your lending key is unavailable'
+                : 'Loading your lending key…'
+              : listed.length === 0
+                ? 'No one is listed yet'
+                : 'Choose a listed lender'
+          }
           isDisabled={listed.length === 0}
           value={pastedKey === '' ? listedKey : null}
           onChange={key => {
@@ -237,7 +265,9 @@ export default function CreatePrivateOfferForm({ onReview }: CreatePrivateOfferF
             </span>
           </>
         ) : (
-          <span className='text-muted text-sm'>Pick a lender or paste its lending key.</span>
+          <span className='text-muted text-sm'>
+            {ownKey === undefined ? ownKeyWait : 'Pick a lender or paste its lending key.'}
+          </span>
         )}
       </div>
 
@@ -323,6 +353,12 @@ export default function CreatePrivateOfferForm({ onReview }: CreatePrivateOfferF
       </div>
 
       {coinProblem && <Notice>{coinProblem}</Notice>}
+      {hasUnsentCreation && (
+        <Notice>
+          An offer you signed was not broadcast. Open it below with Broadcast Again, and broadcast
+          it or discard it, before you create another: a new offer could spend the same coins.
+        </Notice>
+      )}
 
       <UiButton type='submit' variant='primary' className='self-start' isDisabled={draft === null}>
         Review Offer

@@ -25,10 +25,18 @@ import {
   fetchPrivateCandidates,
   indexerErrorMessage,
   type PrivateCandidate,
+  type PrivateCandidateDetails,
+  type PrivateUtxo,
   putDirectoryEntry,
   requestDirectoryChallenge,
 } from '@/api/indexer/private'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
+import {
+  borrowerNftOutpoint as candidateBorrowerNftOutpoint,
+  repaymentBorrowerNftOutpoint,
+  unspentUtxo,
+  utxoOutpoint,
+} from '@/privateLending/candidate'
 import type { PrivateFlowDeps } from '@/privateLending/deps'
 import { registerInDirectory, removeFromDirectory } from '@/privateLending/directory'
 import { buildPrivateAcceptance } from '@/privateLending/flows/acceptance'
@@ -41,7 +49,7 @@ import {
   ExpiryNotReachedError,
   type LiquidationParams,
 } from '@/privateLending/flows/liquidation'
-import { buildPrivateRepayment } from '@/privateLending/flows/repayment'
+import { buildPrivateRepayment, PrincipalNotClaimedError } from '@/privateLending/flows/repayment'
 import { outpointOf } from '@/privateLending/flows/shared'
 import { type InspectedOutput, inspectPset } from '@/privateLending/inspectPset'
 import {
@@ -1107,6 +1115,163 @@ async function repayDryStage(ctx: Context): Promise<void> {
   const offer = await loadCreatedOffer(ctx, 'borrower')
   const { txid } = await buildSignedRepayment(ctx, offer, requireAcceptance())
   out(`\nrepay-dry: ok (${txid} finalized, not saved or broadcast)`)
+}
+
+/** What `stopAtBuild` deps throw once a builder reaches its PSET build. */
+class BuildReached extends Error {
+  constructor() {
+    super('the builder passed its checks and reached the PSET build')
+    this.name = 'BuildReached'
+  }
+}
+
+/**
+ * Flow deps whose LWK throws `BuildReached` at `TxBuilder`: a builder run on them stops once every
+ * check before the build has passed, so nothing is built, signed, saved or broadcast.
+ */
+function stopAtBuild(deps: PrivateFlowDeps): PrivateFlowDeps {
+  const lwkStopped = new Proxy(deps.lwk, {
+    get(target, property, receiver) {
+      if (property === 'TxBuilder') throw new BuildReached()
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  return { ...deps, lwk: lwkStopped }
+}
+
+/**
+ * A hostile indexer cannot steer the borrower into repaying while the principal may be unclaimed:
+ * the repayment burns the borrower NFT, the only key to an unclaimed principal. The `create` offer
+ * (claimed, then repaid, on chain) is served from candidates wrapped in memory from the honest one,
+ * as an active loan with its active offer unspent. The repay inputs are derived from each as the
+ * Repay row and modal do (`unspentUtxo` for the active offer, `repaymentBorrowerNftOutpoint` for
+ * the borrower NFT), and the builder runs on `stopAtBuild` deps:
+ * - the honest principal, spent by the claim: the inputs are derived and the builder passes every
+ *   check up to the build (the control);
+ * - no principal at all, or one spent by the creation itself: no inputs are derived, and the
+ *   outpoint an unguarded caller fell back to, the creation's output 0 (where an unclaimed borrower
+ *   NFT sits), is refused by the builder on chain (`PrincipalNotClaimedError`);
+ * - a principal spent by the repayment, whose output 0 burns the borrower NFT and so holds exactly
+ *   one explicit unit of it: the inputs are derived, and the builder refuses them on chain, as the
+ *   repayment spends no principal.
+ * Nothing is built, signed, saved or broadcast.
+ */
+async function repayHostileDryStage(ctx: Context): Promise<void> {
+  const { borrower } = ctx.wallets
+  const creationTxid = requireConfirmed('create')
+  const acceptTxid = requireAcceptance()
+  const claimTxid = requireConfirmed('claim-principal')
+  const repayTxid = requireConfirmed('repay')
+  const offer = await loadCreatedOffer(ctx, 'borrower')
+  const honest = await fetchPrivateCandidate(creationTxid, ctx.apiUrl)
+  const principal = honest.utxos.find(utxo => utxo.utxo_type === 'principal')
+  if (principal?.spent_txid !== claimTxid) {
+    throw new Error(
+      `the indexer at ${ctx.apiUrl} does not list ${creationTxid}'s principal as spent by the ` +
+        `claim ${claimTxid}: ${JSON.stringify(principal)}`,
+    )
+  }
+  out(`indexer ${ctx.apiUrl}: ${creationTxid}'s principal spent by the claim ${claimTxid}`)
+
+  /** The candidate as an active loan, its active offer unspent, with `principals` in its place. */
+  const activeWith = (principals: PrivateUtxo[]): PrivateCandidateDetails => ({
+    ...honest,
+    status: 'active',
+    utxos: [
+      ...honest.utxos.filter(utxo => utxo.utxo_type === 'pending_offer'),
+      ...honest.utxos
+        .filter(utxo => utxo.utxo_type === 'active_offer')
+        .map(utxo => ({ ...utxo, spent_txid: null, spent_at_height: null })),
+      ...principals,
+    ],
+  })
+
+  // The builder checks these coins before anything it fetches; a repayment needs them.
+  const principalCoins = pickCoins(
+    borrower,
+    TESTNET_ASSETS.principal,
+    offer.opened.repaymentAmount(),
+    'borrower repayment',
+  )
+  const feeCoins = pickCoins(borrower, TESTNET_ASSETS.policy, FEE_BUDGET, 'borrower fee')
+  const collateralReceiver = new lwk.Address(borrower.address())
+  const deps = stopAtBuild(flowDeps(borrower, ctx.chain))
+  const tryBuild = (activeOfferOutpoint: string, borrowerNftOutpoint: string) =>
+    buildPrivateRepayment(deps, offer, {
+      activeOfferOutpoint,
+      borrowerNftOutpoint,
+      principalCoins,
+      feeCoins,
+      collateralReceiver,
+    }).then(
+      () => new Error('the builder returned a PSET despite stopAtBuild'),
+      (error: unknown) => error,
+    )
+  const repayInputs = (candidate: PrivateCandidateDetails) => {
+    const active = unspentUtxo(candidate, 'active_offer')
+    if (active === undefined) throw new Error('the wrapped candidate lists no unspent active offer')
+    return {
+      activeOfferOutpoint: utxoOutpoint(active),
+      borrowerNftOutpoint: repaymentBorrowerNftOutpoint(creationTxid, candidate),
+    }
+  }
+  const expectRefusal = async (what: string, active: string, nft: string) => {
+    const outcome = await tryBuild(active, nft)
+    if (!(outcome instanceof PrincipalNotClaimedError)) {
+      throw new Error(
+        `${what}: the builder did not refuse ${nft} as unclaimed before building: ` +
+          String(outcome),
+      )
+    }
+    out(`  ${what}: the builder refuses ${nft} before building (${outcome.code})`)
+  }
+
+  // The control: the honest principal.
+  const control = repayInputs(activeWith([principal]))
+  const activeOffer = `${acceptTxid}:${ACCEPTANCE_OUTPUT.activeOffer}`
+  const claimNft = `${claimTxid}:${PRINCIPAL_CLAIM_OUTPUT.borrowerNft}`
+  if (control.activeOfferOutpoint !== activeOffer || control.borrowerNftOutpoint !== claimNft) {
+    throw new Error(`honest: the repay inputs are ${JSON.stringify(control)}`)
+  }
+  const reached = await tryBuild(control.activeOfferOutpoint, control.borrowerNftOutpoint)
+  if (!(reached instanceof BuildReached)) {
+    throw new Error(`honest: the builder stopped before the build: ${String(reached)}`)
+  }
+  out(`  honest: borrower NFT ${claimNft}; the builder passes its checks up to the build`)
+
+  // No evidence of the claim: no repay inputs, and the creation's NFT is refused on chain.
+  const creationNft = `${creationTxid}:${CREATION_OUTPUT.borrowerNft}`
+  for (const [what, candidate] of [
+    ['no principal', activeWith([])],
+    ['principal spent by the creation', activeWith([{ ...principal, spent_txid: creationTxid }])],
+  ] as const) {
+    const inputs = repayInputs(candidate)
+    if (inputs.borrowerNftOutpoint !== undefined) {
+      throw new Error(`${what}: the repay inputs take ${inputs.borrowerNftOutpoint}`)
+    }
+    const fallback = candidateBorrowerNftOutpoint(creationTxid, candidate)
+    if (fallback !== creationNft) {
+      throw new Error(`${what}: the fallback borrower NFT is ${fallback}, not ${creationNft}`)
+    }
+    out(`  ${what}: no repay inputs (the Repay row and modal refuse)`)
+    await expectRefusal(what, inputs.activeOfferOutpoint, fallback)
+  }
+
+  // A false claim, at an outpoint that does hold the borrower NFT: the inputs are derived, and the
+  // builder refuses them on chain.
+  const what = 'principal spent by the repayment'
+  const forged = repayInputs(activeWith([{ ...principal, spent_txid: repayTxid }]))
+  if (forged.borrowerNftOutpoint !== `${repayTxid}:${REPAYMENT_OUTPUT.borrowerNftBurn}`) {
+    throw new Error(`${what}: the repay inputs take ${forged.borrowerNftOutpoint}`)
+  }
+  const repayTx = await ctx.chain.fetchTx(repayTxid)
+  if (!burnsNftOnChain(repayTx, REPAYMENT_OUTPUT.borrowerNftBurn, offer.opened.borrowerNft())) {
+    throw new Error(`${what}: ${forged.borrowerNftOutpoint} does not hold the borrower NFT`)
+  }
+  out(`  ${what}: repay inputs take ${forged.borrowerNftOutpoint}, which holds the borrower NFT`)
+  await expectRefusal(what, forged.activeOfferOutpoint, forged.borrowerNftOutpoint)
+
+  out('\nrepay-hostile-dry: ok (nothing built, signed, saved or broadcast)')
 }
 
 /**
@@ -2183,6 +2348,7 @@ const STAGES: Record<string, (ctx: Context) => Promise<void>> = {
   'claim-principal-dry': claimPrincipalDryStage,
   'claim-principal': claimPrincipalStage,
   'repay-dry': repayDryStage,
+  'repay-hostile-dry': repayHostileDryStage,
   repay: repayStage,
   'claim-repayment-dry': claimRepaymentDryStage,
   'claim-repayment': claimRepaymentStage,

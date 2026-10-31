@@ -1,50 +1,31 @@
-import { type ReactNode, useState } from 'react'
-
 import { useBlockHeight } from '@/api/esplora/hooks'
 import HandCoinsIcon from '@/components/icons/HandCoinsIcon'
 import AcceptPrivateOfferModal from '@/components/modals/private/AcceptPrivateOfferModal'
 import ClaimRepaymentModal from '@/components/modals/private/ClaimRepaymentModal'
 import LiquidatePrivateOfferModal from '@/components/modals/private/LiquidatePrivateOfferModal'
-import { UiButton } from '@/components/ui/UiButton'
+import { unspentUtxo } from '@/privateLending/candidate'
 import { useDirectory } from '@/privateLending/hooks/useDirectory'
 import { type PrivateOfferItem, usePrivateOffers } from '@/privateLending/hooks/usePrivateOffers'
-import {
-  isOpenedOffer,
-  isPastExpiry,
-  offerTxState,
-  type OpenedOfferItem,
-  unspentUtxo,
-  usesConfiguredAssets,
-} from '@/privateLending/offerView'
-import type { PrivateTxKind, PrivateTxRecord } from '@/providers/pendingTransactions/types'
-import { usePendingTransactions } from '@/providers/pendingTransactions/usePendingTransactions'
+import { isPastExpiry, type OpenedOfferItem } from '@/privateLending/offerView'
+import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
 
+import PrivateOfferActionRow, { type OfferActions, type OfferView } from './PrivateOfferActionRow'
 import PrivateOfferList, { ScanHeight } from './PrivateOfferList'
-import PrivateOfferRow from './PrivateOfferRow'
+import { useKeyedModal } from './useKeyedModal'
 
 type LenderAction = 'accept' | 'claim' | 'liquidate'
 
-const LENDER_TX_KINDS = [
-  'private_accept_offer',
-  'private_claim_repayment',
-  'private_liquidate_offer',
-] as const satisfies readonly PrivateTxKind[]
-
-const ACTION_OF_KIND: Record<(typeof LENDER_TX_KINDS)[number], LenderAction> = {
-  private_accept_offer: 'accept',
-  private_claim_repayment: 'claim',
-  private_liquidate_offer: 'liquidate',
-}
-
-const ACTION_LABEL: Record<LenderAction, string> = {
-  accept: 'Accept',
-  claim: 'Claim Repayment',
-  liquidate: 'Liquidate',
-}
-
-interface LenderView {
-  action?: LenderAction
-  note?: ReactNode
+const LENDER_ACTIONS: OfferActions<
+  LenderAction,
+  'private_accept_offer' | 'private_claim_repayment' | 'private_liquidate_offer'
+> = {
+  labels: { accept: 'Accept', claim: 'Claim Repayment', liquidate: 'Liquidate' },
+  danger: 'liquidate',
+  actionOfKind: {
+    private_accept_offer: 'accept',
+    private_claim_repayment: 'claim',
+    private_liquidate_offer: 'liquidate',
+  },
 }
 
 /**
@@ -52,15 +33,7 @@ interface LenderView {
  * builder checks every outpoint): accept a pending offer before its expiry, claim an unspent
  * repayment, liquidate an active loan once the tip is past its expiry.
  */
-function lenderView(item: PrivateOfferItem, tipHeight: number): LenderView {
-  if (item.result === 'invalid') return { note: 'It failed verification: no action is possible.' }
-  if (item.terms === null) {
-    return { note: 'Its terms could not be opened; retried on the next sync.' }
-  }
-  if (item.candidate === null) return { note: 'The indexer no longer lists this offer.' }
-  if (!usesConfiguredAssets(item.terms)) {
-    return { note: 'It uses assets this app does not support.' }
-  }
+function lenderView(item: OpenedOfferItem, tipHeight: number): OfferView<LenderAction> {
   const { candidate, terms } = item
   const expired = isPastExpiry(terms, tipHeight)
   switch (candidate.status) {
@@ -80,8 +53,7 @@ function lenderView(item: PrivateOfferItem, tipHeight: number): LenderView {
   }
 }
 
-interface ModalState {
-  key: number
+interface ModalRequest {
   action: LenderAction
   item: OpenedOfferItem
   unsentTx?: PrivateTxRecord
@@ -92,83 +64,29 @@ export default function LendSection() {
   const offers = usePrivateOffers()
   const { lookup } = useDirectory()
   const { data: tipHeight } = useBlockHeight()
-  const { privateTxs } = usePendingTransactions()
-
-  const [modal, setModal] = useState<ModalState | null>(null)
-  const [isModalOpen, setIsModalOpen] = useState(false)
-  const openModal = (action: LenderAction, item: OpenedOfferItem, unsentTx?: PrivateTxRecord) => {
-    // A fresh key per opening: each opening starts with fresh state, and the last one stays
-    // mounted while it closes.
-    setModal(previous => ({ key: (previous?.key ?? 0) + 1, action, item, unsentTx }))
-    setIsModalOpen(true)
-  }
+  const { modal, isOpen, open, close } = useKeyedModal<ModalRequest>()
 
   const items = offers.data?.lending ?? []
   const borrowerName = (item: PrivateOfferItem) =>
     item.terms ? lookup(item.terms.borrowerPublicKey)?.display_name : undefined
 
-  const renderRow = (item: PrivateOfferItem) => {
-    const txState = offerTxState(privateTxs, item.txid, LENDER_TX_KINDS)
-    const view = lenderView(item, tipHeight)
-    let actions: ReactNode = null
-    let note = view.note
-    if (txState?.state === 'unsent') {
-      note = 'Your transaction was signed but not broadcast.'
-      const { record } = txState
-      if (isOpenedOffer(item)) {
-        actions = (
-          <UiButton
-            size='sm'
-            variant='secondary'
-            onPress={() => openModal(ACTION_OF_KIND[record.kind], item, record)}
-          >
-            Broadcast Again
-          </UiButton>
-        )
-      }
-    } else if (txState?.state === 'processing') {
-      note = 'Your transaction waits for its confirmation.'
-    } else if (view.action !== undefined && isOpenedOffer(item)) {
-      const action = view.action
-      actions = (
-        <UiButton
-          size='sm'
-          variant={action === 'liquidate' ? 'danger-soft' : 'primary'}
-          onPress={() => openModal(action, item)}
-        >
-          {ACTION_LABEL[action]}
-        </UiButton>
-      )
-    }
-    return (
-      <PrivateOfferRow
-        key={item.txid}
-        item={item}
-        counterpartyName={borrowerName(item)}
-        tipHeight={tipHeight}
-        isProcessing={txState?.state === 'processing'}
-        note={note}
-        actions={actions}
-      />
-    )
-  }
-
   const renderModal = () => {
     if (modal === null) return null
+    const { key, request } = modal
     const props = {
-      isOpen: isModalOpen,
-      item: modal.item,
-      counterpartyName: borrowerName(modal.item),
-      unsentTx: modal.unsentTx,
-      onClose: () => setIsModalOpen(false),
+      isOpen,
+      item: request.item,
+      counterpartyName: borrowerName(request.item),
+      unsentTx: request.unsentTx,
+      onClose: close,
     }
-    switch (modal.action) {
+    switch (request.action) {
       case 'accept':
-        return <AcceptPrivateOfferModal key={modal.key} {...props} />
+        return <AcceptPrivateOfferModal key={key} {...props} />
       case 'claim':
-        return <ClaimRepaymentModal key={modal.key} {...props} />
+        return <ClaimRepaymentModal key={key} {...props} />
       case 'liquidate':
-        return <LiquidatePrivateOfferModal key={modal.key} {...props} />
+        return <LiquidatePrivateOfferModal key={key} {...props} />
     }
   }
 
@@ -196,7 +114,17 @@ export default function LendSection() {
         loadingText='Scanning for offers addressed to you…'
         emptyText='No offers addressed to you yet.'
       >
-        {items.map(renderRow)}
+        {items.map(item => (
+          <PrivateOfferActionRow
+            key={item.txid}
+            item={item}
+            counterpartyName={borrowerName(item)}
+            tipHeight={tipHeight}
+            actions={LENDER_ACTIONS}
+            viewOf={opened => lenderView(opened, tipHeight)}
+            onOpen={(action, opened, unsentTx) => open({ action, item: opened, unsentTx })}
+          />
+        ))}
       </PrivateOfferList>
 
       {renderModal()}

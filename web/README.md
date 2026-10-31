@@ -124,6 +124,15 @@ only when named, and need the records the real transaction would spend: `cancel-
 cancellation of the `cancel-create` offer, and `liquidate-dry` the liquidation of the
 `liquidate-accept` one, which below the expiry checks the refusal instead.
 
+`repay-hostile-dry` checks that a hostile indexer cannot lead the borrower to repay while the
+principal may be unclaimed, which would burn the only key to it. It reads the `create` offer's
+candidate from the local testnet indexer (below) and wraps it in memory as an active loan. With
+the principal left out, or listed as spent by the creation, the app's rules derive no repay inputs,
+and the builder refuses the creation's borrower NFT with `principal-not-claimed` before building.
+With the principal listed as spent by the repayment, the builder refuses that outpoint the same
+way, although it holds the borrower NFT. The honest candidate passes every check up to the build.
+Nothing is built, signed or broadcast.
+
 ### Local testnet indexer
 
 The `scan` stage, and the app on testnet (`VITE_API_URL` in `.env.liquidtestnet`, which the e2e
