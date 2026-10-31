@@ -1,13 +1,12 @@
 // Display and gating rules of the private offers, shared by the private page and its modals. The
 // indexer's candidate (status, UTXOs) is untrusted: it only decides what to show and which action
 // to offer. Every action loads its offer fresh through the gate, and its builder checks every
-// outpoint it is given.
-import type { PrivateCandidateDetails, PrivateUtxo, PrivateUtxoType } from '@/api/indexer/private'
+// outpoint it is given. The rules that read outpoints from the candidate are in `./candidate`.
+import type { PrivateCandidateDetails, PrivateUtxoType } from '@/api/indexer/private'
 import type { OfferStatus } from '@/api/indexer/schemas'
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import type { PrivateOfferItem, PrivateOfferTerms } from '@/privateLending/hooks/usePrivateOffers'
 import type { PrivateTxKind, PrivateTxRecord } from '@/providers/pendingTransactions/types'
-import { CREATION_OUTPUT, PRINCIPAL_CLAIM_OUTPUT } from '@/simplicity/private-lending/layout'
 import { formatTermLeft } from '@/utils/format'
 
 /** A key fingerprint in groups of four characters: `1aa0 5299 d34b b9f5`. */
@@ -33,6 +32,19 @@ export function isOpenedOffer(item: PrivateOfferItem): item is OpenedOfferItem {
     item.candidate !== null &&
     usesConfiguredAssets(item.terms)
   )
+}
+
+/**
+ * Why an offer gets no action whatever its status: it failed verification, its terms could not be
+ * opened again, the indexer no longer lists it, or it uses assets this app does not support. Null
+ * exactly when `isOpenedOffer` holds.
+ */
+export function blockedNote(item: PrivateOfferItem): string | null {
+  if (item.result === 'invalid') return 'It failed verification: no action is possible.'
+  if (item.terms === null) return 'Its terms could not be opened; retried on the next sync.'
+  if (item.candidate === null) return 'The indexer no longer lists this offer.'
+  if (!usesConfiguredAssets(item.terms)) return 'It uses assets this app does not support.'
+  return null
 }
 
 /** Whether the offer uses the network's collateral and principal assets, the only ones shown. */
@@ -73,40 +85,6 @@ export const PRIVATE_UTXO_LABEL: Record<PrivateUtxoType, string> = {
   active_offer: 'active offer',
   principal: 'principal',
   repayment: 'repayment',
-}
-
-/** The first UTXO of a type the indexer tracks for the offer that is still unspent. */
-export function unspentUtxo(
-  candidate: PrivateCandidateDetails,
-  type: PrivateUtxoType,
-): PrivateUtxo | undefined {
-  return candidate.utxos.find(utxo => utxo.utxo_type === type && utxo.spent_txid === null)
-}
-
-/** The acceptance transaction, as the indexer saw it: the one that created the active offer. */
-export function acceptanceTxid(candidate: PrivateCandidateDetails): string | undefined {
-  return candidate.utxos.find(utxo => utxo.utxo_type === 'active_offer')?.txid
-}
-
-export function utxoOutpoint(utxo: PrivateUtxo): string {
-  return `${utxo.txid}:${utxo.vout}`
-}
-
-/**
- * Where the borrower NFT is, as the indexer saw it: output 0 of the creation, until a principal
- * claim spends the principal and pays the NFT back at its own output 0. Untrusted: the builders
- * require the NFT at the outpoint.
- */
-export function borrowerNftOutpoint(
-  creationTxid: string,
-  candidate: PrivateCandidateDetails,
-): string {
-  const claim = candidate.utxos.find(
-    utxo => utxo.utxo_type === 'principal' && utxo.spent_txid !== null,
-  )?.spent_txid
-  return claim
-    ? `${claim}:${PRINCIPAL_CLAIM_OUTPUT.borrowerNft}`
-    : `${creationTxid}:${CREATION_OUTPUT.borrowerNft}`
 }
 
 /**

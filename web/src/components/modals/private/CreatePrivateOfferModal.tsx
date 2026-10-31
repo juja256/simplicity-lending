@@ -73,6 +73,9 @@ export default function CreatePrivateOfferModal({
         getLendingKey(),
         fetchLatestBlockHeight(),
       ])
+      if (draft.lender.pubkey === borrower.xOnlyPublicKey()) {
+        throw new Error('The lender is your own lending key')
+      }
       if (draft.loanExpirationTime <= tip) {
         throw new Error(
           `The expiry, block #${draft.loanExpirationTime}, is no longer ahead of the chain ` +
