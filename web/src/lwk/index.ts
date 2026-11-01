@@ -2,6 +2,8 @@ import { EsploraClient, Network } from '@lilbonekit/lwk-web'
 
 import { env, type NetworkName } from '@/constants/env'
 
+import { resolveWaterfallsRecipient } from './waterfallsRecipient'
+
 export type Lwk = typeof import('@lilbonekit/lwk-web')
 
 let lwk: Lwk | null = null
@@ -31,7 +33,7 @@ export function createLwkNetwork(network: NetworkName): Network {
  * fails the whole scan. The full history it downloads instead is deduped against the
  * persistent wallet cache, so only the first scan pays for it.
  */
-export function createEsploraClient(lwkNetwork: Network): EsploraClient {
+export async function createEsploraClient(lwkNetwork: Network): Promise<EsploraClient> {
   const client = new EsploraClient(
     lwkNetwork,
     env.VITE_WATERFALLS_URL,
@@ -40,7 +42,12 @@ export function createEsploraClient(lwkNetwork: Network): EsploraClient {
     false, // utxoOnly
   )
   if (lwkNetwork.isMainnet() || lwkNetwork.isTestnet()) {
-    client.setWaterfallsServerRecipient(env.VITE_WATERFALLS_RECIPIENT)
+    // The server's own key, unless one is pinned: the descriptor is encrypted to it.
+    const recipient = await resolveWaterfallsRecipient(
+      env.VITE_WATERFALLS_URL,
+      env.VITE_WATERFALLS_RECIPIENT,
+    )
+    await client.setWaterfallsServerRecipient(recipient)
   }
   return client
 }

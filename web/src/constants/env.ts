@@ -15,9 +15,14 @@ const envSchema = zod.object({
   VITE_ESPLORA_BASE_URL: zod.string().url().default('https://blockstream.info/liquid'),
   VITE_NETWORK: zod.enum(['liquid', 'liquidtestnet', 'regtest']).default('liquid'),
   VITE_WATERFALLS_URL: zod.string().url(),
+  /**
+   * Optional pin of the waterfalls server's age recipient. Unset (or empty), the app fetches it
+   * from `${VITE_WATERFALLS_URL}/v1/server_recipient`, so a server key rotation needs no change.
+   */
   VITE_WATERFALLS_RECIPIENT: zod
     .string()
-    .default('age1xxzrgrfjm3yrwh3u6a7exgrldked0pdauvr3mx870wl6xzrwm5ps8s2h0p'),
+    .optional()
+    .transform(value => value?.trim() || undefined),
   VITE_DEBUG_MNEMONIC: zod.string().optional().default(''),
   /** Experimental SideSwap wallet connect (via their Liquid Connect server). Unset disables the connect option entirely. */
   VITE_SIDESWAP_WS_URL: zod.string().optional(),

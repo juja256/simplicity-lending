@@ -162,7 +162,6 @@ Every step that broadcasts names these checks; the step lists what is specific t
   VITE_NETWORK=liquidtestnet
   VITE_ESPLORA_BASE_URL=https://blockstream.info/liquidtestnet
   VITE_WATERFALLS_URL=https://waterfalls-elements-testnet.esplora.staging.blockstream.io:17771
-  VITE_WATERFALLS_RECIPIENT=age1ajng86w5g0qleku0k7eqjre5l7e6qaynjrnlyuc08w3ddu0etdcs379rr3
   VITE_GA_MEASUREMENT_ID=G-CPMC9XLYJ
   VITE_API_URL=/api
   API_PROXY_TARGET=http://127.0.0.1:8000
