@@ -1,4 +1,4 @@
-# Private lending, part C2: session handoff (updated 2026-10-31)
+# Private lending, part C2: session handoff (updated 2026-11-01)
 
 Read this file first.
 
@@ -7,7 +7,12 @@ Read this file first.
 
 ## Where things stand
 
-The branch `private-lending-frontend` holds Tasks 1–10 of the plan; Tasks 1–4 and 7–10 had per-task reviews, while 5 and 6 did not, by the user's instruction at the time. It is pushed to `fork` and not merged. `main` holds parts A, B and C1. Only Task 11 (the user's testnet and Jade run) and the final whole-branch review remain.
+The branch `private-lending-frontend` holds all of the code for part C2. It is pushed to `fork` and not merged. `main` holds parts A, B and C1.
+- **Tasks 1–10 are done.** Tasks 1–4 and 7–10 had per-task reviews. Tasks 5 and 6 did not, by the user's instruction at the time.
+- **The final whole-branch review is done,** and its fixes are in (`158f133`, re-reviewed clean). See "Final review" below.
+- **Task 11, step 1, is done:** the checklist is at `docs/superpowers/manual/2026-10-29-private-lending-testnet.md` (`92133ac`).
+
+**One step remains before merging:** the user runs that checklist in a browser, with two seed wallets and a Jade. See "What comes next".
 
 **Tasks 1–6, with every flow proven on Liquid testnet:**
 - **Wasm helpers** (`crates/private-lending-wasm`):
@@ -162,24 +167,33 @@ Notes on the liquidation:
 
 ## What comes next, in order
 
-1. **Task 11: the testnet run through the UI, and the Jade check.**
-   - **Step 1, the checklist.** A subagent writes it, at `docs/superpowers/manual/2026-10-29-private-lending-testnet.md`.
-   - **Step 2, the run.** The user runs the checklist.
-   - Make sure the local indexer is running first (see above).
-   - **It must cover what no dev run has exercised yet:**
-     - Cancel and Repay in the UI;
-     - the UI's save before broadcast, the broadcast itself, and Broadcast Again and Discard against testnet;
-     - the confirmation tracking.
-   - **Jade:**
-     - Check that Jade signs pinned outputs with `blinder_index = Some(i)`.
-     - Check how Jade shows the NFT contract domain `simplicity-lending.private`.
-     - The app's `signPset` adds registry asset contracts (`withAssetContracts`) before signing. It has worked for the seed wallet since Task 10's dev run, but not yet with Jade.
-   - From the Task 7 review: `verified` does not mean on chain. An indexer can serve a well-formed offer that was never broadcast. Acting on it fails only at broadcast, and no funds are at risk.
-2. **The final whole-branch review** of `private-lending-frontend`, then merge.
+1. **Task 11, step 2: the user runs the checklist,** `docs/superpowers/manual/2026-10-29-private-lending-testnet.md`.
+   - **Before starting:**
+     - Top up the borrower from the faucet. It has exactly the 5 coins the run needs, and the checklist recommends one more request.
+     - Fund the Jade wallet: 3 `lbtc` faucet requests and 1 `test` request, to its own address.
+     - The local indexer is running and caught up (2 685 975 on 2026-11-01). The checklist has the restart commands for after a reboot.
+   - **How the two seed wallets run at once:** one dev server with `VITE_DEMO_MODE=true` and NO `VITE_DEBUG_MNEMONIC`, and two Chrome profiles, each typing its seed phrase from `web/.env.e2e.local`.
+     - **Pitfall (existing app behavior):** if `VITE_DEBUG_MNEMONIC` is set, the app's Jade button silently connects that seed instead of the device.
+     - `web/.env.local` currently holds the borrower seed. The checklist's setup step rewrites it.
+   - **What it covers that no run has exercised yet:**
+     - Cancel and Repay through the UI;
+     - the save before broadcast, the broadcast, Broadcast Again and Discard. A failed broadcast is forced with Chrome DevTools request blocking; with a seed wallet only creations can be forced this way;
+     - the confirmation tracking, including the reset on rebroadcast (`158f133`);
+     - the scan with the new cap on the indexer's height;
+     - Jade: it signs pinned outputs with `blinder_index = Some(i)`, the device shows the real collateral amount, the NFT domain `simplicity-lending.private` displays, and `signPset` with `withAssetContracts` works.
+   - **Results.** The user fills in the checklist's results table. Jade failures become follow-up findings, never silent passes.
+2. **Task 11, step 3, the next session's controller:**
+   - record the run's outcome in this handoff;
+   - commit `docs: private lending testnet run and Jade check`;
+   - push to `fork`.
+3. **The merge decision** is the user's. Fix any failure from the run first.
+4. **Follow-ups after merge,** small and none blocking. See "Final review".
 
-**Funding** (topped up from the faucet on 2026-10-30, 100 000 tL-sats per request):
-- The borrower has 399 311 tL-sats in 5 coins and 4 900 TEST.
-- The lender has 199 356 tL-sats in 3 coins and 4 100 TEST.
+From the Task 7 review: `verified` does not mean on chain. An indexer can serve a well-formed offer that was never broadcast. Acting on it fails only at broadcast, and no funds are at risk.
+
+**Funding** (topped up from the faucet on 2026-10-30, 100 000 tL-sats per request; the dev runs since broadcast nothing):
+- The borrower had 399 311 tL-sats in 5 coins and 4 900 TEST. Task 11 needs at least 140 000 tL-sats in 5 coins, plus 0.1 TEST.
+- The lender had 199 356 tL-sats in 3 coins and 4 100 TEST. Task 11 needs at least 12 000 tL-sats, plus 3 TEST.
 - A creation needs at least 3 distinct coins.
 - The faucet is a plain GET with no captcha, limited to 3 requests a minute: `https://liquidtestnet.com/faucet?address=<addr>&action=lbtc` (or `action=test` for TEST).
 
@@ -195,7 +209,7 @@ Notes on the liquidation:
 - **For Tasks 9 and 10,** the user asked for a review after each task, and a push to `fork` after each reviewed task.
 - **Model availability.** `claude-sonnet-5-5` fails through this machine's LiteLLM proxy ("no healthy deployments"), so every subagent, reviewers included, runs on Opus.
 - **Budget.** The session that ran Tasks 7–10 went through the Blockstream router (`claude-bs`) and hit the team budget during Task 10's fix round. That round was then finished in a claude.ai session, starting from the partial working tree.
-- The SDD ledger for this plan is `.superpowers/sdd/2026-10-29-private-lending-frontend/progress.md` (git-ignored). Tasks 1–10 are marked complete there. Its `global-constraints.md` holds the rulings in the form given to implementers, and the task reports (`task-N-report.md`) sit beside it. Keep all of them until the phase ends.
+- The SDD ledger for this plan is `.superpowers/sdd/2026-10-29-private-lending-frontend/progress.md` (git-ignored). Tasks 1–10, the final review and Task 11 step 1 are marked complete there. Its `global-constraints.md` holds the rulings in the form given to implementers, and the task reports (`task-N-report.md`) sit beside it. Keep all of them until the phase ends.
 
 ## Rulings made during part C2
 
@@ -235,6 +249,16 @@ Rulings 4 and 5 replace the plan's fixed e2e funding numbers. Rulings 8–10 cha
     - Review waits for the own identity, so you can't pick yourself as the lender;
     - pending creations are shown, and Review is disabled while an unsent creation exists.
 21. **Repay needs on-chain claim evidence.** Indexer data alone is not enough, so an indexer that omits the principal can never unlock a repayment that would strand it.
+22. **The final review's fix round** covered:
+    - its Important item: value-carrying outputs are checked against their receiver's blinding key;
+    - freeing opened secrets;
+    - capping the indexer's height at the esplora tip;
+    - resetting a record when a rebroadcast is accepted.
+
+    Its other Important item is Task 11 itself.
+23. **Parked: an esplora outage now fails the offers list.** It is safe, since nothing is saved and the query retries. A follow-up can page with the uncapped height while keeping the stored height.
+24. **Parked: the change output LWK adds itself is not checked against a receiver,** as in the public flows. Follow-up: a wasm `slip77BlindingPubkey(descriptor, scriptHex)` that checks the trailing wallet outputs.
+25. **Parked: some secret-holding objects are freed only by the garbage collector:** `PinnedOutputInfo`, which holds blinders, plus `OfferTermsInput` and `ContractArguments`. Also, the reset on rebroadcast could be narrower; it self-heals within a block.
 
 Other changes not foreseen by the plan:
 - `inspectPset` gained `lockTime` and per-input `sequence`.
@@ -242,7 +266,29 @@ Other changes not foreseen by the plan:
 - The liquidation pays the collateral to an explicit `collateralReceiver` output.
 - In Task 3, `OpenedOffer.firstInput()` was fixed: it had a stray `[elements]` prefix.
 
-## Open items for the final review
+## Final review (2026-11-01)
+
+**Verdict: merge with fixes.** Both conditions are now settled: the code fixes are in, and the remaining one is Task 11's run.
+- **No Critical issue.** None of the six spending builders can be steered by indexer data into a valid transaction that strands or misdirects collateral, principal or repayment.
+- **Tasks 5 and 6 match the contract.** Their builders, never reviewed before, match `core.rs` and the `.simf` sources exactly: burns, positions, witness branches, the liquidation lock time and sequence, and the blinding keys.
+- **Checks run by the reviewer:**
+  - `lint`, `build` and `parity`;
+  - `cargo test -p private-lending-wasm` (37 tests);
+  - the dry e2e stages, including `repay-hostile-dry`.
+- **The fix round** (`158f133`, re-reviewed clean): value-carrying outputs are checked against their receivers, a deliberately wrong receiver makes the dry stage fail, and the round covered the rest of Ruling 22.
+
+**The reviewer's deferred-minor triage.** Everything below can wait, except Task 11's run. Worth doing first as small follow-ups:
+- capping the stored height for a buggy honest indexer (done);
+- resetting the record on rebroadcast (done);
+- failing-case layout checks in `parity`;
+- the parked Rulings 23–25.
+
+**The reviewer's notes on plan defects:**
+- The repayment interface missed that the borrower NFT is the only key to an unclaimed principal. Ruling 21 fixed this.
+- The `*NftCoin` parameters could not be implemented as written. Ruling 8 replaced them.
+- The Review Focus guarded pinned outputs but not the fresh ones. Ruling 22 fixed this.
+
+## Open items (deferred, none blocking)
 
 Smaller deferred findings, recorded in the ledger:
 - `Secp256k1::new()` is called on each `freshIssuerPubkey` call.
@@ -284,4 +330,9 @@ From Tasks 9 and 10:
 - **e2e fetches.** The e2e `fetchTx` doesn't check the served txid; the app's does.
 - **Console noise.** One unexplained wasm "memory access out of bounds" occurred on a cold start of the public `/app/supply`, and didn't recur. HeroUI logs "PressResponder" warnings from the public `UiModal`, plus one per private modal.
 
-Part C2 has had per-task reviews for Tasks 1–4 and 7–10, but no whole-branch review yet.
+Also deferred, from the final review:
+- **The "already broadcast" regex.** It may miss some node messages, such as "outputs already in utxo set". The user then sees an error until confirmation tracking heals it.
+- **Review in the create form** is blocked only by an unsent creation, not by an unsent Repay or Accept. A new creation could spend that transaction's fee coin, which then needs a Discard and a rebuild. No funds are at risk.
+- **Address reuse.** The repayment's principal change can share an address with the collateral receiver.
+
+Part C2 has had per-task reviews for Tasks 1–4 and 7–10, and one whole-branch review, whose fixes are in.
