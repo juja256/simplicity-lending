@@ -158,112 +158,124 @@ export async function buildPrivateCreation(
       terms,
     ),
   )
-  const collateralBlindingKey = newOffer.collateralBlindingKey()
-  const pinned = newOffer.pinned(wasm.PinnedRole.PendingCollateral)
-  const pendingCollateral = {
-    assetCommitment: pinned.assetCommitment,
-    valueCommitment: pinned.valueCommitment,
-  }
+  // The offer holds the creation's ephemeral key. `finalize` needs nothing of it, so it is freed
+  // once the PSET is blinded, or the build fails.
+  let layout: SpendLayout
+  let blindedBase64: string
+  try {
+    const collateralBlindingKey = newOffer.collateralBlindingKey()
+    const pinned = newOffer.pinned(wasm.PinnedRole.PendingCollateral)
+    const pendingCollateral = {
+      assetCommitment: pinned.assetCommitment,
+      valueCommitment: pinned.valueCommitment,
+    }
 
-  // 3. The contract's scripts.
-  const scripts = privateOfferScripts(
-    deps.sources,
-    toPrivateOfferArguments(newOffer.contractArguments()),
-    deps.network,
-  )
-  const lenderNftLock = lwk.TxOut.fromExplicit(
-    scripts.lenderNftLock,
-    lwk.AssetId.fromString(lenderNft),
-    NFT_AMOUNT,
-  ).unconfidentialAddress(deps.network)
-  if (!lenderNftLock) throw new Error('The lender NFT lock has no address')
-  const pendingOffer = new lwk.Address(
-    wasmStep('The pending offer address', () =>
-      wasm.confidentialAddress(
-        scripts.pendingOffer.toString(),
-        collateralBlindingKey,
-        deps.networkName,
+    // 3. The contract's scripts.
+    const scripts = privateOfferScripts(
+      deps.sources,
+      toPrivateOfferArguments(newOffer.contractArguments()),
+      deps.network,
+    )
+    const lenderNftLock = lwk.TxOut.fromExplicit(
+      scripts.lenderNftLock,
+      lwk.AssetId.fromString(lenderNft),
+      NFT_AMOUNT,
+    ).unconfidentialAddress(deps.network)
+    if (!lenderNftLock) throw new Error('The lender NFT lock has no address')
+    const pendingOffer = new lwk.Address(
+      wasmStep('The pending offer address', () =>
+        wasm.confidentialAddress(
+          scripts.pendingOffer.toString(),
+          collateralBlindingKey,
+          deps.networkName,
+        ),
       ),
-    ),
-  )
-  const marker = lwk.Script.newOpReturn(hexToBytes(newOffer.marker()))
+    )
+    const marker = lwk.Script.newOpReturn(hexToBytes(newOffer.marker()))
 
-  // inputs 0 and 1 issue the NFTs; outputs in `CREATION_OUTPUT` order
-  const layout: SpendLayout = {
-    inputs: outpoints,
-    issuances: [borrowerNft, lenderNft],
-    outputs: [
-      {
-        script: borrowerNftReceiver.scriptPubkey().toString(),
-        asset: borrowerNft,
-        amount: NFT_AMOUNT,
-        blinding: { kind: 'explicit' },
-      },
-      {
-        script: scripts.lenderNftLock.toString(),
-        asset: lenderNft,
-        amount: NFT_AMOUNT,
-        blinding: { kind: 'explicit' },
-      },
-      {
-        script: marker.toString(),
-        asset: deps.assets.policy,
-        amount: 0n,
-        blinding: { kind: 'explicit' },
-      },
-      {
-        script: scripts.pendingOffer.toString(),
-        asset: deps.assets.collateral,
-        amount: params.collateralAmount,
-        blinding: { kind: 'pinned', blindingKey: collateralBlindingKey, pinned: pendingCollateral },
-      },
-    ],
-    restrictedAssets: [borrowerNft, lenderNft],
-    restrictedScripts: [scripts.lenderNftLock.toString(), scripts.pendingOffer.toString()],
-    policyAsset: deps.assets.policy,
+    // inputs 0 and 1 issue the NFTs; outputs in `CREATION_OUTPUT` order
+    layout = {
+      inputs: outpoints,
+      issuances: [borrowerNft, lenderNft],
+      outputs: [
+        {
+          script: borrowerNftReceiver.scriptPubkey().toString(),
+          asset: borrowerNft,
+          amount: NFT_AMOUNT,
+          blinding: { kind: 'explicit' },
+        },
+        {
+          script: scripts.lenderNftLock.toString(),
+          asset: lenderNft,
+          amount: NFT_AMOUNT,
+          blinding: { kind: 'explicit' },
+        },
+        {
+          script: marker.toString(),
+          asset: deps.assets.policy,
+          amount: 0n,
+          blinding: { kind: 'explicit' },
+        },
+        {
+          script: scripts.pendingOffer.toString(),
+          asset: deps.assets.collateral,
+          amount: params.collateralAmount,
+          blinding: {
+            kind: 'pinned',
+            blindingKey: collateralBlindingKey,
+            pinned: pendingCollateral,
+          },
+        },
+      ],
+      restrictedAssets: [borrowerNft, lenderNft],
+      restrictedScripts: [scripts.lenderNftLock.toString(), scripts.pendingOffer.toString()],
+      policyAsset: deps.assets.policy,
+    }
+
+    // 4. The unblinded PSET.
+    let builder = new lwk.TxBuilder(deps.network)
+    if (deps.feeRate !== null) builder = builder.feeRate(deps.feeRate)
+    builder = builder
+      .setWalletUtxos(outpoints.map(outpoint => new lwk.OutPoint(outpoint)))
+      .setInputOrder(outpoints.map(outpoint => new lwk.OutPoint(outpoint)))
+      .issueAssetToRecipients(
+        [lwk.IssuanceRecipient.fromAddress(NFT_AMOUNT, borrowerNftReceiver)],
+        NO_REISSUANCE_TOKEN,
+        null,
+        borrowerNftContract,
+        new lwk.OutPoint(firstInput),
+      )
+      .issueAssetToRecipients(
+        [lwk.IssuanceRecipient.fromAddress(NFT_AMOUNT, lenderNftLock)],
+        NO_REISSUANCE_TOKEN,
+        null,
+        lenderNftContract,
+        new lwk.OutPoint(lenderNftInput),
+      )
+      .addPostIssuanceScriptOutput(marker, 0n, lwk.AssetId.fromString(deps.assets.policy))
+      .addPostIssuanceRecipient(
+        pendingOffer,
+        params.collateralAmount,
+        lwk.AssetId.fromString(deps.assets.collateral),
+      )
+      // last, so that no later builder call can reset it
+      .skipBlinding()
+    const unblinded = builder.finish(deps.wollet)
+
+    // 5. The layout LWK built.
+    assertSpendLayout(deps, unblinded, layout, false, 'Creation')
+
+    // 6. Blinding: the pending collateral with its pinned blinders, the rest freshly.
+    blindedBase64 = wasmStep('Blinding the creation', () =>
+      wasm.blindPset(
+        unblinded.toString(),
+        coins.map((coin, index) => walletInputSecret(deps, coin, index)),
+        [newOffer.collateralBlinding(CREATION_OUTPUT.pendingOffer)],
+      ),
+    )
+  } finally {
+    newOffer.free()
   }
-
-  // 4. The unblinded PSET.
-  let builder = new lwk.TxBuilder(deps.network)
-  if (deps.feeRate !== null) builder = builder.feeRate(deps.feeRate)
-  builder = builder
-    .setWalletUtxos(outpoints.map(outpoint => new lwk.OutPoint(outpoint)))
-    .setInputOrder(outpoints.map(outpoint => new lwk.OutPoint(outpoint)))
-    .issueAssetToRecipients(
-      [lwk.IssuanceRecipient.fromAddress(NFT_AMOUNT, borrowerNftReceiver)],
-      NO_REISSUANCE_TOKEN,
-      null,
-      borrowerNftContract,
-      new lwk.OutPoint(firstInput),
-    )
-    .issueAssetToRecipients(
-      [lwk.IssuanceRecipient.fromAddress(NFT_AMOUNT, lenderNftLock)],
-      NO_REISSUANCE_TOKEN,
-      null,
-      lenderNftContract,
-      new lwk.OutPoint(lenderNftInput),
-    )
-    .addPostIssuanceScriptOutput(marker, 0n, lwk.AssetId.fromString(deps.assets.policy))
-    .addPostIssuanceRecipient(
-      pendingOffer,
-      params.collateralAmount,
-      lwk.AssetId.fromString(deps.assets.collateral),
-    )
-    // last, so that no later builder call can reset it
-    .skipBlinding()
-  const unblinded = builder.finish(deps.wollet)
-
-  // 5. The layout LWK built.
-  assertSpendLayout(deps, unblinded, layout, false, 'Creation')
-
-  // 6. Blinding: the pending collateral with its pinned blinders, the rest freshly.
-  const blindedBase64 = wasmStep('Blinding the creation', () =>
-    wasm.blindPset(
-      unblinded.toString(),
-      coins.map((coin, index) => walletInputSecret(deps, coin, index)),
-      [newOffer.collateralBlinding(CREATION_OUTPUT.pendingOffer)],
-    ),
-  )
   const blinded = new lwk.Pset(blindedBase64)
 
   // 7. The layout again, now blinded.

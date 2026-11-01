@@ -72,18 +72,24 @@ export async function openAndVerifyOffer(
     throw toOfferError(error)
   }
 
-  const creationTx = deps.lwk.Transaction.fromString(creationTxHex)
-  const scripts = privateOfferScripts(
-    deps.sources,
-    toPrivateOfferArguments(opened.contractArguments()),
-    deps.network,
-  )
-  if (!verifyOfferAddresses(scripts, creationTx)) {
-    throw new PrivateOfferError(
-      'address-mismatch',
-      'the pending offer or the lender NFT is not locked to the scripts of the offer terms',
-      true,
+  try {
+    const creationTx = deps.lwk.Transaction.fromString(creationTxHex)
+    const scripts = privateOfferScripts(
+      deps.sources,
+      toPrivateOfferArguments(opened.contractArguments()),
+      deps.network,
     )
+    if (!verifyOfferAddresses(scripts, creationTx)) {
+      throw new PrivateOfferError(
+        'address-mismatch',
+        'the pending offer or the lender NFT is not locked to the scripts of the offer terms',
+        true,
+      )
+    }
+    return { role, creationTx, opened, scripts } as VerifiedOffer
+  } catch (error) {
+    // The opened offer holds the offer's secrets, and no caller gets it to free.
+    opened.free()
+    throw error
   }
-  return { role, creationTx, opened, scripts } as VerifiedOffer
 }

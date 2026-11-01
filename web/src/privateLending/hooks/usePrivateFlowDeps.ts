@@ -6,7 +6,7 @@ import { useCallback } from 'react'
 import { sources } from 'virtual:simplicity-sources'
 
 import { fetchFeeRateSatPerKvb } from '@/api/esplora/fee'
-import { fetchTxRaw } from '@/api/esplora/methods'
+import { fetchLatestBlockHeight, fetchTxRaw } from '@/api/esplora/methods'
 import { esploraQueryKeys } from '@/api/esplora/queryKeys'
 import { env } from '@/constants/env'
 import { NETWORK_CONFIG } from '@/constants/network-config'
@@ -33,9 +33,9 @@ const FEE_RATE_STALE_MS = 30_000
 
 /**
  * A function that assembles fresh `PrivateFlowDeps` for one build or scan: the connected wallet's
- * `Wollet` and coins, esplora's transactions (checked against the requested txid) and its fee
- * rate in sat/kvb (as the public modals pass it to `TxBuilder.feeRate`). Rejects while no wallet
- * is connected. Sync the wallet first when its coins must be current.
+ * `Wollet` and coins, esplora's transactions (checked against the requested txid), its tip height
+ * and its fee rate in sat/kvb (as the public modals pass it to `TxBuilder.feeRate`). Rejects while
+ * no wallet is connected. Sync the wallet first when its coins must be current.
  */
 export function usePrivateFlowDeps(): () => Promise<PrivateFlowDeps> {
   const { lwkNetwork, network } = useLwk()
@@ -68,6 +68,7 @@ export function usePrivateFlowDeps(): () => Promise<PrivateFlowDeps> {
         }
         return tx
       },
+      fetchTipHeight: () => fetchLatestBlockHeight(),
       feeRate,
       assets: {
         collateral: NETWORK_CONFIG.collateralAsset.id,

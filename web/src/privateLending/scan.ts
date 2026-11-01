@@ -53,6 +53,12 @@ const INDETERMINATE_CODES: ReadonlySet<string> = new Set([CREATION_TX_MISMATCH, 
 const CANDIDATE_PAGE_LIMIT = 500
 
 /**
+ * How far the indexer's sync height may run ahead of esplora's tip: the two can see a new block a
+ * little apart. A higher height is cut down to tip + this.
+ */
+const SYNC_HEIGHT_TIP_SLACK = 2
+
+/**
  * Scans the candidates the indexer added since the stored state, opens the ones addressed to
  * `key`, saves the new state and returns it. An offer already in the state is not opened again,
  * unless its result is indeterminate (`INDETERMINATE_CODES`): it is checked again, by txid, in
@@ -84,7 +90,9 @@ export async function syncOffers(
   }
 
   // The first page's sync height bounds every later page, so candidates indexed meanwhile wait
-  // for the next sync instead of shifting the pages.
+  // for the next sync instead of shifting the pages. It is cut down to esplora's tip (plus a
+  // slack): stored as the synced height, one wrong huge value would otherwise make every later
+  // sync start above every new offer. Cutting it too low only scans some heights again.
   let lastIndexed: number | null = null
   const seen = new Set<string>()
   for (let offset = 0; ; ) {
@@ -97,7 +105,9 @@ export async function syncOffers(
       },
       apiBaseUrl,
     )
-    if (offset === 0) lastIndexed = page.last_indexed_height
+    if (offset === 0 && page.last_indexed_height !== null) {
+      lastIndexed = Math.min(page.last_indexed_height, await tipBound(deps))
+    }
     // Nothing indexed yet: the items cannot be placed below a height, so the next sync redoes them.
     if (lastIndexed === null) break
     const fresh = page.items.filter(candidate => !seen.has(candidate.creation_txid))
@@ -119,6 +129,13 @@ export async function syncOffers(
   const state: ScanState = { syncedHeight, offers }
   await store.set(fingerprint, state)
   return state
+}
+
+/** The highest sync height taken from the indexer: esplora's tip plus the slack. */
+async function tipBound(deps: PrivateFlowDeps): Promise<number> {
+  const tip = await deps.fetchTipHeight()
+  if (!Number.isSafeInteger(tip) || tip < 0) throw new Error(`Esplora's tip height is ${tip}`)
+  return tip + SYNC_HEIGHT_TIP_SLACK
 }
 
 /**
@@ -227,9 +244,9 @@ async function checkOffer(
   if (hex === undefined) return { role: roles[0], result: 'invalid', code: CREATION_TX_MISMATCH }
 
   for (const role of roles) {
+    let offer: VerifiedOffer
     try {
-      await openAndVerifyOffer(deps, role, key, hex)
-      return { role, result: 'verified' }
+      offer = await openAndVerifyOffer(deps, role, key, hex)
     } catch (error) {
       if (!(error instanceof PrivateOfferError)) {
         // The gate throws other errors only once the offer opened, while it builds the offer's
@@ -239,7 +256,11 @@ async function checkOffer(
         return { role, result: 'invalid', code: 'unknown' }
       }
       if (error.addressedToKey) return { role, result: 'invalid', code: error.code }
+      continue
     }
+    // Only the result is kept: the opened offer holds the offer's secrets.
+    offer.opened.free()
+    return { role, result: 'verified' }
   }
   return undefined
 }

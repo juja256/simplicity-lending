@@ -158,7 +158,7 @@ export async function buildPrivateAcceptance(
             script: changeAddress.scriptPubkey().toString(),
             asset: principalAsset,
             amount: principalChange,
-            blinding: { kind: 'fresh' },
+            blinding: { kind: 'fresh', receiver: changeAddress },
           },
         ]
       : []

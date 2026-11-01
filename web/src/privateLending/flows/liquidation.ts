@@ -191,7 +191,7 @@ export async function buildPrivateLiquidation(
         script: collateralReceiver.scriptPubkey().toString(),
         asset: activeCollateral.asset,
         amount: activeCollateral.amount,
-        blinding: { kind: 'fresh' },
+        blinding: { kind: 'fresh', receiver: collateralReceiver },
       },
     ],
     restrictedAssets: [opened.borrowerNft(), lenderNft],

@@ -228,7 +228,7 @@ export async function buildPrivateRepayment(
             script: changeAddress.scriptPubkey().toString(),
             asset: principalAsset,
             amount: principalChange,
-            blinding: { kind: 'fresh' },
+            blinding: { kind: 'fresh', receiver: changeAddress },
           },
         ]
       : []
@@ -252,7 +252,7 @@ export async function buildPrivateRepayment(
         script: collateralReceiver.scriptPubkey().toString(),
         asset: activeCollateral.asset,
         amount: activeCollateral.amount,
-        blinding: { kind: 'fresh' },
+        blinding: { kind: 'fresh', receiver: collateralReceiver },
       },
       ...changeOutputs,
     ],

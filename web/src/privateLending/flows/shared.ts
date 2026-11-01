@@ -1,5 +1,6 @@
 // Helpers shared by the private flow builders, and the one PSET layout checker they all use.
 import type {
+  Address,
   Pset,
   Script,
   Transaction,
@@ -102,8 +103,12 @@ export type ExpectedBlinding =
       blindingKey: string
       pinned: { assetCommitment: string; valueCommitment: string }
     }
-  /** Blinded freshly to its recipient's key, as a wallet output is. */
-  | { kind: 'fresh' }
+  /**
+   * Blinded freshly, as a wallet output is, to the key of `receiver`, a confidential address: the
+   * output's script and blinding key must give exactly that address back. Blinded to another key,
+   * the output could not be unblinded, so not spent, by the receiver's wallet.
+   */
+  | { kind: 'fresh'; receiver: Address }
 
 export interface ExpectedOutput {
   script: string
@@ -141,9 +146,10 @@ export interface SpendLayout {
 
 /**
  * Checks a PSET against its layout through `inspectPset`, with every negative check against an
- * explicit null. Before blinding nothing may be blinded; after it the pinned outputs must carry
- * their pinned commitments and both blind proofs, and every output with a blinding key must be
- * blinded.
+ * explicit null. Every blinded output in the layout carries its own blinding key, the pinned key
+ * or its receiver's, before blinding and after. Before blinding nothing may be blinded; after it
+ * the pinned outputs must carry their pinned commitments and both blind proofs, and every output
+ * with a blinding key must be blinded.
  */
 export function assertSpendLayout(
   deps: PrivateFlowDeps,
@@ -224,6 +230,25 @@ export function assertSpendLayout(
     }
     if (output.blindingKey === null) fail(`output ${index} has no blinding key`)
     if (output.blinderIndex === null) fail(`output ${index} has no blinder index`)
+    if (blinding.kind === 'fresh') {
+      const receiver = blinding.receiver.toString()
+      if (!blinding.receiver.isBlinded()) {
+        fail(`output ${index}'s receiver ${receiver} is not a confidential address`)
+      }
+      let blindedTo: string
+      try {
+        blindedTo = deps.wasm.confidentialAddress(
+          output.script,
+          output.blindingKey,
+          deps.networkName,
+        )
+      } catch (error) {
+        fail(`output ${index}'s script and blinding key give no address: ${String(error)}`)
+      }
+      if (blindedTo !== receiver) {
+        fail(`output ${index} is blinded to ${blindedTo}, not to its receiver ${receiver}`)
+      }
+    }
     if (!blinded) return
     if (blinding.kind === 'pinned') {
       if (

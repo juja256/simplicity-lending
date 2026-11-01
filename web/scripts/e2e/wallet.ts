@@ -81,6 +81,7 @@ export function flowDeps(wallet: SeedWallet, chain: Chain): PrivateFlowDeps {
     wollet: wallet.wollet,
     walletUtxos: () => wallet.utxos(),
     fetchTx: txid => chain.fetchTx(txid),
+    fetchTipHeight: () => chain.tipHeight(),
     feeRate: null,
     assets: { ...TESTNET_ASSETS },
   }
