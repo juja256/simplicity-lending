@@ -82,7 +82,14 @@ export function usePrivateTransaction(): PrivateTransaction {
         void updatePrivateTx(txid, { errorMessage: broadcastError.message })
         throw broadcastError
       }
-      await updatePrivateTx(txid, { broadcastStatus: 'broadcast', errorMessage: undefined })
+      // An accepted broadcast tracks the transaction afresh, from now: a retry after the sweep
+      // gave up on the record (`failed`) must not leave it failed for good.
+      await updatePrivateTx(txid, {
+        broadcastStatus: 'broadcast',
+        confirmationStatus: 'processing',
+        createdAt: Date.now(),
+        errorMessage: undefined,
+      })
       applyBroadcastTransaction(tx)
     },
     [updatePrivateTx, applyBroadcastTransaction],

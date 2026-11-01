@@ -157,7 +157,7 @@ export async function buildRepaymentClaim(
         script: repaymentReceiver.scriptPubkey().toString(),
         asset: repayment.asset,
         amount: repayment.amount,
-        blinding: { kind: 'fresh' },
+        blinding: { kind: 'fresh', receiver: repaymentReceiver },
       },
     ],
     restrictedAssets: [opened.borrowerNft(), lenderNft],

@@ -144,7 +144,7 @@ export async function buildPrincipalClaim(
         script: principalReceiver.scriptPubkey().toString(),
         asset: principal.asset,
         amount: principal.amount,
-        blinding: { kind: 'fresh' },
+        blinding: { kind: 'fresh', receiver: principalReceiver },
       },
     ],
     restrictedAssets: [borrowerNft, opened.lenderNft()],

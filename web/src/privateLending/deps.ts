@@ -16,6 +16,8 @@ export interface PrivateFlowDeps {
   /** The wallet's spendable coins. */
   walletUtxos: () => WalletTxOut[]
   fetchTx: (txid: string) => Promise<Transaction>
+  /** The height of the chain tip, from esplora: the bound on the indexer's sync height. */
+  fetchTipHeight: () => Promise<number>
   /** Sat per kvb, or null for LWK's default. */
   feeRate: number | null
   assets: { collateral: string; principal: string; policy: string }

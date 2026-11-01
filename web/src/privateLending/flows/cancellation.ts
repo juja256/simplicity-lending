@@ -142,7 +142,7 @@ export async function buildPrivateCancellation(
         script: collateralReceiver.scriptPubkey().toString(),
         asset: pendingCollateral.asset,
         amount: pendingCollateral.amount,
-        blinding: { kind: 'fresh' },
+        blinding: { kind: 'fresh', receiver: collateralReceiver },
       },
     ],
     restrictedAssets: [borrowerNft, lenderNft],
