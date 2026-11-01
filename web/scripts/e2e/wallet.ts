@@ -5,6 +5,7 @@ import path from 'node:path'
 
 import * as lwk from '@lilbonekit/lwk-web'
 
+import { resolveWaterfallsRecipient } from '@/lwk/waterfallsRecipient'
 import type { PrivateFlowDeps } from '@/privateLending/deps'
 import type { PrivateLendingSources } from '@/simplicity/private-lending/scripts'
 import * as wasm from '@/wasm/private-lending/private_lending_wasm'
@@ -56,13 +57,19 @@ export function seedWallet(env: E2eEnv, mnemonic: string): SeedWallet {
   const descriptor = signer.wpkhSlip77Descriptor()
   const wollet = new lwk.Wollet(network, descriptor)
   const client = new lwk.EsploraClient(network, env.waterfallsUrl, true, 8, false)
-  client.setWaterfallsServerRecipient(env.waterfallsRecipient)
+  // The descriptor is encrypted to the server's key: resolve it once, before the first scan.
+  let recipientSet: Promise<void> | undefined
   return {
     signer,
     wollet,
     network,
     lendingKey: wasm.LendingKey.fromDescriptor(descriptor.toString()),
     async sync() {
+      recipientSet ??= resolveWaterfallsRecipient(env.waterfallsUrl, env.waterfallsRecipient).then(
+        recipient => client.setWaterfallsServerRecipient(recipient),
+      )
+      recipientSet.catch(() => (recipientSet = undefined))
+      await recipientSet
       const update = await client.fullScanToIndex(wollet, 0)
       if (update) wollet.applyUpdate(update)
     },

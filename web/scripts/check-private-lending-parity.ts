@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 import * as lwk from '@lilbonekit/lwk-web'
 
+import { createWaterfallsRecipientResolver } from '@/lwk/waterfallsRecipient'
 import { createLendingKeyHolder } from '@/privateLending/lendingKeyHolder'
 import * as wasm from '@/wasm/private-lending/private_lending_wasm'
 
@@ -192,8 +193,58 @@ async function main(): Promise<void> {
   )
 
   await checkLendingKeyHolder()
+  await checkWaterfallsRecipient()
 
   report('private lending parity: ok')
+}
+
+/**
+ * The waterfalls recipient (`src/lwk/waterfallsRecipient.ts`) comes from the server's
+ * `/v1/server_recipient` unless a pinned key is configured. A malformed answer is refused, one
+ * fetch serves the session, and a failed fetch is not kept.
+ */
+async function checkWaterfallsRecipient(): Promise<void> {
+  const key = 'age1gn0fp4wnwkwsct30ljcj98neljumzrxjxlud50rs7k3dlhkp4ewsdf59g5'
+  const pinned = 'age1xxzrgrfjm3yrwh3u6a7exgrldked0pdauvr3mx870wl6xzrwm5ps8s2h0p'
+  const urls: string[] = []
+  let answer: () => Response = () => new Response(`${key}\n`)
+  const resolve = createWaterfallsRecipientResolver(async input => {
+    urls.push(String(input))
+    return answer()
+  })
+  const rejects = (promise: Promise<unknown>) =>
+    promise.then(
+      () => false,
+      () => true,
+    )
+
+  equal('waterfalls recipient: fetched from the server', await resolve('https://w.test/'), key)
+  equal(
+    'waterfalls recipient: the server_recipient endpoint',
+    urls[0],
+    'https://w.test/v1/server_recipient',
+  )
+  await resolve('https://w.test')
+  check('waterfalls recipient: one fetch per server', urls.length === 1)
+  equal('waterfalls recipient: a pinned key wins', await resolve('https://p.test', pinned), pinned)
+  check('waterfalls recipient: a pinned key fetches nothing', urls.length === 1)
+  check(
+    'waterfalls recipient: a malformed pinned key is refused',
+    await rejects(resolve('https://p.test', 'age1nope')),
+  )
+
+  answer = () => new Response('<html>not a key</html>')
+  check(
+    'waterfalls recipient: a malformed answer is refused',
+    await rejects(resolve('https://bad.test')),
+  )
+  answer = () => new Response('endpoint not found', { status: 404 })
+  check(
+    'waterfalls recipient: an HTTP error is refused',
+    await rejects(resolve('https://gone.test')),
+  )
+  answer = () => new Response(key)
+  equal('waterfalls recipient: a failed fetch is retried', await resolve('https://gone.test'), key)
 }
 
 /**

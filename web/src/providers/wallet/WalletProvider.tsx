@@ -353,7 +353,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
         const { wollet, cache } = await createCachedWollet(lwkNetwork, network, descriptor)
         openedCache = cache
-        const esploraClient = createEsploraClient(lwkNetwork)
+        const esploraClient = await createEsploraClient(lwkNetwork)
 
         sessionRef.current = { connector, signerType, descriptor, wollet, esploraClient, cache }
 

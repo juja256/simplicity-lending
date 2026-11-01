@@ -71,7 +71,8 @@ broadcasts real Liquid testnet transactions. It never touches mainnet.
    `PRIVATE_E2E_BORROWER_MNEMONIC` and `PRIVATE_E2E_LENDER_MNEMONIC`. Environment variables of the
    same names take precedence. The script never prints them.
 3. Esplora and waterfalls come from `.env.liquidtestnet` (`VITE_ESPLORA_BASE_URL`,
-   `VITE_WATERFALLS_URL`, `VITE_WATERFALLS_RECIPIENT`).
+   `VITE_WATERFALLS_URL`). The waterfalls key is fetched from the server unless
+   `VITE_WATERFALLS_RECIPIENT` pins one.
 4. Fund both wallets with tL-BTC and TEST from a Liquid testnet faucet, in the amounts under
    Funding. `pnpm e2e:private wallets` prints both addresses.
 

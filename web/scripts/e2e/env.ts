@@ -37,7 +37,8 @@ function parseEnvFile(file: string): Record<string, string> {
 
 export interface E2eEnv {
   waterfallsUrl: string
-  waterfallsRecipient: string
+  /** A pinned waterfalls key; unset, the server's own is fetched. */
+  waterfallsRecipient: string | undefined
   esploraApi: string
   /** The indexer API (`VITE_API_URL`), which the `scan` stage reads; the app's default if unset. */
   apiUrl: string
@@ -59,7 +60,9 @@ export function loadEnv(): E2eEnv {
   return {
     apiUrl: apiUrl.replace(/\/+$/, ''),
     waterfallsUrl: need('VITE_WATERFALLS_URL'),
-    waterfallsRecipient: need('VITE_WATERFALLS_RECIPIENT'),
+    waterfallsRecipient:
+      (process.env.VITE_WATERFALLS_RECIPIENT ?? merged.VITE_WATERFALLS_RECIPIENT)?.trim() ||
+      undefined,
     esploraApi: `${need('VITE_ESPLORA_BASE_URL').replace(/\/+$/, '')}/api`,
     borrowerMnemonic: need('PRIVATE_E2E_BORROWER_MNEMONIC'),
     lenderMnemonic: need('PRIVATE_E2E_LENDER_MNEMONIC'),

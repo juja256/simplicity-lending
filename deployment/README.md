@@ -44,7 +44,7 @@ Set these values in `deployment/configs/compose.env`:
 - `VITE_ESPLORA_BASE_URL`: public Esplora/explorer base URL, for example `https://blockstream.info/liquidtestnet`
 - `VITE_NETWORK`: `liquid`, `liquidtestnet`, or `regtest`
 - `VITE_WATERFALLS_URL`: Waterfalls server base URL for LWK sync
-- `VITE_WATERFALLS_RECIPIENT`: Waterfalls server recipient
+- `VITE_WATERFALLS_RECIPIENT`: optional pin of the Waterfalls server's age recipient; leave unset to fetch it from `<VITE_WATERFALLS_URL>/v1/server_recipient` at startup
 - `VITE_DEBUG_MNEMONIC`: optional development/testnet software signer mnemonic; leave unset in normal deployments
 - `VITE_SIDESWAP_WS_URL`: optional experimental SideSwap wallet connect server URL; leave unset to disable that connect option
 - `INDEXER_ESPLORA_BASE_URL`: the Esplora API used by the backend indexer
