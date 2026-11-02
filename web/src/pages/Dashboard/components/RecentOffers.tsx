@@ -52,7 +52,7 @@ export function RecentOffers() {
             onAnimationIteration={() => setManualSpin(false)}
           />
         </button>
-        <h3 className='text-h4'>Most recent Borrow Offers</h3>
+        <h3 className='text-h4'>Recent public offers</h3>
       </header>
 
       {isLoading ? (

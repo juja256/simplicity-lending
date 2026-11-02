@@ -5,17 +5,13 @@ import type { WalletCoin } from '@/lib/wallet-core/types'
 import { formatFeeReserve } from '@/utils/format'
 import { selectByLargestFirst } from '@/utils/utxo'
 
+export { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from './weights'
+
 // BIP-125 opt-in RBF sequence for wallet-controlled inputs, so a stuck broadcast can be
 // fee-bumped instead of rejected with txn-mempool-conflict. Hard-coded (not
 // TxSequence.enableRbfNoLocktime()) to avoid calling into the wasm module at import time.
 // https://learnmeabitcoin.com/technical/transaction/input/sequence/#replace-by-fee
 export const WALLET_INPUT_RBF_SEQUENCE = 0xfffffffd
-
-// ExternalUtxo max-weight-to-satisfy for an explicit-address UTXO spent with a plain
-// p2wpkh/p2tr signature (no Simplicity covenant) — e.g. NFT references like FactoryAuth,
-// Borrower NFT, or a pre-acceptance Lender NFT. Measured from several real broadcast txs
-// (sig + pubkey = 104-105 bytes), plus margin.
-export const EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY = 150
 
 export function utxoToOutpointString(utxo: WalletCoin): string {
   const outpoint = utxo.outpoint()

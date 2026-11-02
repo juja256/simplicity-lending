@@ -68,7 +68,6 @@ const TERM_OPTIONS = [
         },
       ]
     : []),
-  ...(env.DEV ? [{ id: 10 / MINUTES_PER_DAY, textValue: '10 minutes' }] : []),
   { id: 7, textValue: '7 days' },
   { id: 14, textValue: '14 days' },
   { id: 30, textValue: '30 days' },

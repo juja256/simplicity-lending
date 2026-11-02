@@ -1,5 +1,5 @@
 import { buttonVariants, Chip } from '@heroui/react'
-import { Link, Outlet } from 'react-router-dom'
+import { Link, NavLink, Outlet } from 'react-router-dom'
 
 import { BellNotificationButton } from '@/components/BellNotificationButton'
 import ArrowSquareOutIcon from '@/components/icons/ArrowSquareOutIcon'
@@ -15,13 +15,10 @@ const NAV = [
   { to: RoutePath.Dashboard, label: 'Dashboard' },
   { to: RoutePath.Borrow, label: 'Borrow' },
   { to: RoutePath.Supply, label: 'Supply' },
-  ...(env.DEV
-    ? [
-        { to: RoutePath.DesignSystem, label: 'System' },
-        { to: RoutePath.Demo, label: 'Demo' },
-      ]
-    : []),
+  { to: RoutePath.Private, label: 'Private loans' },
 ]
+
+const NETWORK_LABEL = { liquid: 'Liquid', liquidtestnet: 'Liquid testnet', regtest: 'Regtest' }
 
 export default function AppLayout() {
   const { close, isOpen, lastOffer } = useOfferModal()
@@ -35,7 +32,7 @@ export default function AppLayout() {
                 Lending
               </h1>
               <Chip color='accent' variant='primary' size='sm'>
-                Beta
+                {env.VITE_DEMO_MODE ? 'Testnet demo' : 'Beta'}
               </Chip>
             </div>
             <span className='text-foreground text-xs font-medium tracking-[0.16em] uppercase'>
@@ -58,34 +55,48 @@ export default function AppLayout() {
           </div>
         </header>
 
+        <nav
+          aria-label='Main navigation'
+          className='border-separator flex flex-wrap gap-1 border-b pb-3'
+        >
+          {NAV.map(({ to, label }) => (
+            <NavLink
+              key={to}
+              to={to}
+              end={to === RoutePath.Dashboard}
+              className={({ isActive }) =>
+                `rounded-lg px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
+                  isActive
+                    ? 'bg-accent text-accent-foreground'
+                    : 'text-muted hover:bg-surface-secondary hover:text-foreground'
+                }`
+              }
+            >
+              {label}
+            </NavLink>
+          ))}
+        </nav>
+
         <OfferActionModal offer={lastOffer} isOpen={isOpen} onClose={close} onSuccess={close} />
         <Outlet />
         <JadeUnlockModal />
 
-        <footer className='text-muted flex flex-col gap-3 text-xs'>
-          <nav className='flex flex-wrap items-center gap-4 font-medium'>
-            {NAV.map(({ to, label }) => (
-              <Link key={to} className='text-accent hover:underline' to={to}>
-                {label}
-              </Link>
-            ))}
-            {env.VITE_NETWORK === 'liquidtestnet' && (
-              <a
-                className='text-accent inline-flex items-center gap-1 hover:underline'
-                href={ExternalLink.Faucet}
-                target='_blank'
-                rel='noopener noreferrer'
-              >
-                Faucet
-                <ArrowSquareOutIcon className='size-3' />
-              </a>
-            )}
-          </nav>
-          <div>
-            <p>Network: {env.VITE_NETWORK}</p>
-            <p>API URL: {env.VITE_API_URL}</p>
-            <p>Esplora Base URL: {env.VITE_ESPLORA_BASE_URL}</p>
-          </div>
+        <footer className='text-muted flex flex-wrap items-center justify-between gap-3 text-xs'>
+          <p>
+            {NETWORK_LABEL[env.VITE_NETWORK]}
+            {env.VITE_NETWORK === 'liquidtestnet' ? ' · Test assets only' : ''}
+          </p>
+          {env.VITE_NETWORK === 'liquidtestnet' && (
+            <a
+              className='text-accent inline-flex items-center gap-1 hover:underline'
+              href={ExternalLink.Faucet}
+              target='_blank'
+              rel='noopener noreferrer'
+            >
+              Get test assets
+              <ArrowSquareOutIcon className='size-3' />
+            </a>
+          )}
         </footer>
       </div>
     </main>

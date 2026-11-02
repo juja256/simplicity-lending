@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import { createBrowserRouter, Outlet, RouterProvider, useLocation } from 'react-router-dom'
 
 import AppLayout from '@/components/AppLayout'
-import { env } from '@/constants/env'
 import { RoutePath } from '@/constants/routes'
 import { AppProviders } from '@/providers/AppProviders'
 import { initAnalytics, trackPageView } from '@/utils/analytics'
@@ -10,9 +9,8 @@ import { initAnalytics, trackPageView } from '@/utils/analytics'
 import ErrorBoundary from './components/ErrorBoundary'
 import BorrowPage from './pages/Borrow'
 import DashboardPage from './pages/Dashboard'
-import DemoPage from './pages/Demo'
-import DesignSystemPage from './pages/DesignSystem'
 import LandingPage from './pages/Landing'
+import PrivatePage from './pages/Private'
 import SupplyPage from './pages/Supply'
 
 function ProvidersLayout() {
@@ -68,18 +66,10 @@ const router = createBrowserRouter([
             path: RoutePath.Supply,
             element: <SupplyPage />,
           },
-          ...(env.DEV
-            ? [
-                {
-                  path: RoutePath.DesignSystem,
-                  element: <DesignSystemPage />,
-                },
-                {
-                  path: RoutePath.Demo,
-                  element: <DemoPage />,
-                },
-              ]
-            : []),
+          {
+            path: RoutePath.Private,
+            element: <PrivatePage />,
+          },
         ],
       },
     ],

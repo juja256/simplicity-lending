@@ -13,3 +13,8 @@ logs.md
 tmp_vendor
 
 configuration.yaml
+
+# Local package cache and wallet test notes (never release recovery phrases)
+.pnpm-store/
+seed.*.txt
+*.swp

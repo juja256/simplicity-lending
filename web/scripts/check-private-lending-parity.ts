@@ -1,11 +1,14 @@
 // Proves that the browser (LWK + the private-lending wasm) derives the same offer addresses
 // as the Rust code. Run it with `pnpm parity`; it must pass before browser addresses are relied on.
+// It also checks, offline, the rules of the app's lending-key holder (`checkLendingKeyHolder`).
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import * as lwk from '@lilbonekit/lwk-web'
 
+import { createWaterfallsRecipientResolver } from '@/lwk/waterfallsRecipient'
+import { createLendingKeyHolder } from '@/privateLending/lendingKeyHolder'
 import * as wasm from '@/wasm/private-lending/private_lending_wasm'
 
 import {
@@ -189,7 +192,144 @@ async function main(): Promise<void> {
     !verifyOfferAddresses(tamperedScripts, creationTx),
   )
 
+  await checkLendingKeyHolder()
+  await checkWaterfallsRecipient()
+
   report('private lending parity: ok')
+}
+
+/**
+ * The waterfalls recipient (`src/lwk/waterfallsRecipient.ts`) comes from the server's
+ * `/v1/server_recipient` unless a pinned key is configured. A malformed answer is refused, one
+ * fetch serves the session, and a failed fetch is not kept.
+ */
+async function checkWaterfallsRecipient(): Promise<void> {
+  const key = 'age1gn0fp4wnwkwsct30ljcj98neljumzrxjxlud50rs7k3dlhkp4ewsdf59g5'
+  const pinned = 'age1xxzrgrfjm3yrwh3u6a7exgrldked0pdauvr3mx870wl6xzrwm5ps8s2h0p'
+  const urls: string[] = []
+  let answer: () => Response = () => new Response(`${key}\n`)
+  const resolve = createWaterfallsRecipientResolver(async input => {
+    urls.push(String(input))
+    return answer()
+  })
+  const rejects = (promise: Promise<unknown>) =>
+    promise.then(
+      () => false,
+      () => true,
+    )
+
+  equal('waterfalls recipient: fetched from the server', await resolve('https://w.test/'), key)
+  equal(
+    'waterfalls recipient: the server_recipient endpoint',
+    urls[0],
+    'https://w.test/v1/server_recipient',
+  )
+  await resolve('https://w.test')
+  check('waterfalls recipient: one fetch per server', urls.length === 1)
+  equal('waterfalls recipient: a pinned key wins', await resolve('https://p.test', pinned), pinned)
+  check('waterfalls recipient: a pinned key fetches nothing', urls.length === 1)
+  check(
+    'waterfalls recipient: a malformed pinned key is refused',
+    await rejects(resolve('https://p.test', 'age1nope')),
+  )
+
+  answer = () => new Response('<html>not a key</html>')
+  check(
+    'waterfalls recipient: a malformed answer is refused',
+    await rejects(resolve('https://bad.test')),
+  )
+  answer = () => new Response('endpoint not found', { status: 404 })
+  check(
+    'waterfalls recipient: an HTTP error is refused',
+    await rejects(resolve('https://gone.test')),
+  )
+  answer = () => new Response(key)
+  equal('waterfalls recipient: a failed fetch is retried', await resolve('https://gone.test'), key)
+}
+
+/**
+ * The lending-key holder (`src/privateLending/lendingKeyHolder.ts`) frees keys and drops the
+ * session's private cache (`onSessionEnd`) only when a session ends. Deriving the first key of a
+ * session, deriving again after a failure, or deriving for a new session must not drop the cache:
+ * the caller is usually a query that would remove itself mid-fetch.
+ */
+async function checkLendingKeyHolder(): Promise<void> {
+  interface Session {
+    descriptor: string
+  }
+  const descriptorOf = (masterBlindingKey: string) => `ct(slip77(${masterBlindingKey}),elwpkh(x))`
+  let current: Session | null = null
+  let sessionEnds = 0
+  const holder = createLendingKeyHolder<Session>({
+    loadWasm: async () => wasm,
+    descriptorOf: session => session.descriptor,
+    isCurrent: session => current === session,
+    onSessionEnd: () => sessionEnds++,
+  })
+  const settle = () => new Promise(resolve => setTimeout(resolve, 0))
+  const isFreed = (key: wasm.LendingKey) => {
+    try {
+      key.fingerprint()
+      return false
+    } catch {
+      return true
+    }
+  }
+
+  const first: Session = { descriptor: descriptorOf(fixture.lender_master_blinding_key) }
+  current = first
+  const derivation = holder.get(first)
+  check('lending key holder: one derivation per session', holder.get(first) === derivation)
+  const firstKey = await derivation
+  equal(
+    'lending key holder: the key of the descriptor',
+    firstKey.fingerprint(),
+    wasm.LendingKey.fromMasterBlindingKey(fixture.lender_master_blinding_key).fingerprint(),
+  )
+  check('lending key holder: deriving does not end the session', sessionEnds === 0)
+
+  const broken: Session = { descriptor: 'no slip77 key' }
+  current = broken
+  const failed = holder.get(broken)
+  const failure = await failed.then(
+    () => null,
+    (error: unknown) => error,
+  )
+  await settle()
+  check(
+    'lending key holder: a new session frees the old key without ending a session',
+    isFreed(firstKey) && sessionEnds === 0,
+  )
+  check(
+    'lending key holder: a failed derivation is not kept, and retrying ends no session',
+    failure !== null && holder.get(broken) !== failed && sessionEnds === 0,
+  )
+  await holder.get(broken).catch(() => {})
+
+  const second: Session = { descriptor: descriptorOf(fixture.borrower_master_blinding_key) }
+  current = second
+  const secondKey = await holder.get(second)
+  current = null
+  holder.endSession()
+  await settle()
+  check(
+    'lending key holder: a session end frees the key and drops the cache once',
+    isFreed(secondKey) && sessionEnds === 1,
+  )
+
+  const third: Session = { descriptor: descriptorOf(fixture.borrower_master_blinding_key) }
+  current = third
+  const pending = holder.get(third)
+  current = null
+  holder.endSession()
+  const outcome = await pending.then(
+    () => 'key',
+    () => 'no key',
+  )
+  check(
+    'lending key holder: a session that ends mid-derivation gets no key',
+    outcome === 'no key' && sessionEnds === 2,
+  )
 }
 
 function outputBytesHex(tx: lwk.Transaction): string {

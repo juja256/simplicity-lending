@@ -102,6 +102,23 @@ Building and blinding:
 - `OpenedOffer.inputSecret(role, inputIndex)`, `InputSecret` (`new`, `explicit`): the secrets of
   covenant and wallet inputs.
 - `blindPset(psetBase64, inputSecrets, blindings)`: blind a PSET.
+- `inspectPset(psetBase64)`: JSON of the PSET fields LWK's JS API does not expose, which the flows
+  check before signing: the lock time the extracted transaction gets (`lockTime`), each input's
+  prevout, sequence and issuance (asset and token ids, amounts or commitments, inflation keys,
+  `blinded_issuance`), and each output's script, explicit asset and amount, commitments, nonce
+  (`ecdhPubkey`), blinding key, blinder index and blind proofs. Absent fields are `null` (an input
+  with no sequence is extracted with `0xffffffff`); amounts are decimal strings. `bad-input` for
+  inputs whose required lock times conflict.
+
+LWK helpers:
+
+- `confidentialAddress(scriptPubkeyHex, blindingKeyHex, network)`: the confidential address of a
+  script with a chosen 33-byte blinding key; `network` is `liquid`, `liquidtestnet` or `regtest`.
+  LWK cannot build one. `bad-input` for a script with no address form.
+- `contractHashFromJson(json)`: the ELIP-100 contract hash of LWK's `Contract.toString()`, in the
+  format `issuedAssetId` takes.
+- `freshIssuerPubkey()`: a random compressed public key (hex) for a contract's `issuer_pubkey`, so
+  each issuance has fresh entropy. The secret is discarded.
 
 Directory:
 

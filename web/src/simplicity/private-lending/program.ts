@@ -1,9 +1,4 @@
-import {
-  type Network,
-  SimplicityType,
-  SimplicityTypedValue,
-  SimplicityWitnessValues,
-} from '@lilbonekit/lwk-web'
+import type { Network } from '@lilbonekit/lwk-web'
 import { sources } from 'virtual:simplicity-sources'
 
 import {
@@ -11,20 +6,16 @@ import {
   type PrivateOfferScripts,
   privateOfferScripts,
 } from './scripts'
+import {
+  buildPrivateLendingWitness,
+  PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY,
+  type PrivateLendingBranch,
+} from './witness'
 
-export type PrivateLendingBranch =
-  | 'OfferAcceptance'
-  | 'OfferCancellation'
-  | 'FullRepayment'
-  | 'Liquidation'
-
-const PATH_TYPE = 'Either<Either<(), ()>, Either<Either<(), ()>, ()>>'
-
-const PATH_EXPRESSIONS: Record<PrivateLendingBranch, string> = {
-  OfferAcceptance: 'Left(Left(()))',
-  OfferCancellation: 'Left(Right(()))',
-  FullRepayment: 'Right(Left(Right(())))',
-  Liquidation: 'Right(Right(()))',
+export {
+  buildPrivateLendingWitness,
+  PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY,
+  type PrivateLendingBranch,
 }
 
 export function loadPrivateOfferScripts(
@@ -39,12 +30,5 @@ export function loadPrivateOfferScripts(
     },
     args,
     network,
-  )
-}
-
-export function buildPrivateLendingWitness(branch: PrivateLendingBranch): SimplicityWitnessValues {
-  return new SimplicityWitnessValues().addValue(
-    'PATH',
-    SimplicityTypedValue.parse(PATH_EXPRESSIONS[branch], SimplicityType.fromString(PATH_TYPE)),
   )
 }
