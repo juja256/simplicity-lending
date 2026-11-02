@@ -28,7 +28,7 @@ FROM builder AS sqlx-builder
 
 # CARGO_HTTP_MULTIPLEXING=false avoids intermittent "HTTP2 framing layer" crate-download
 # failures seen on some networks.
-RUN CARGO_HTTP_MULTIPLEXING=false cargo install --locked sqlx-cli --no-default-features --features rustls,postgres
+RUN CARGO_HTTP_MULTIPLEXING=false cargo install --locked sqlx-cli --version '~0.8' --no-default-features --features rustls,postgres
 
 FROM debian:bookworm-slim
 
@@ -41,11 +41,8 @@ WORKDIR /app/crates/indexer
 COPY --from=builder /app/target/release/simplicity-lending-indexer /usr/local/bin/simplicity-lending-indexer
 COPY --from=sqlx-builder /usr/local/cargo/bin/sqlx /usr/local/bin/sqlx
 COPY crates/indexer/migrations /app/crates/indexer/migrations
-COPY deployment/configs /deployment/configs
+COPY deployment/configs/backend /deployment/configs/backend
 COPY deployment/scripts/render-backend-config.sh /deployment/render-backend-config.sh
-
-ENV ASSET_REGISTRY_DOMAIN=lending.dev.blockstream.com
-ENV ASSET_REGISTRY_URL=https://v1.assets-testnet.blockstream.info/
 
 ENTRYPOINT ["/deployment/render-backend-config.sh"]
 CMD ["simplicity-lending-indexer"]

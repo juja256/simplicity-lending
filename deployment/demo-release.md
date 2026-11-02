@@ -42,13 +42,29 @@ the indexer/database services.
 
 ## Outstanding release decisions
 
+Deployment configuration review on 2026-11-02 corrected backend environment overrides (network,
+initial scan height and fee asset), public-origin build wiring, and SSE proxy buffering. Nginx
+now compresses WASM and caches hashed assets. Dockerfiles copy only template directories, and
+the local Compose environment file is excluded from Git and the Docker context. The migration
+CLI is constrained to SQLx 0.8, matching the application. GitLab demo defaults retain test-seed
+login and no longer pass a debug mnemonic argument.
+
+Compose validation against the public example, non-default backend template rendering, shell
+syntax, and an isolated `nginx -t` check passed. The subsequent
+[local Compose check](local-compose-check.md) built both images on Linux ARM64, applied all
+migrations, verified healthy database/API/web services, checked private endpoints, SPA navigation,
+both WASM assets, caching/compression, and SSE keep-alives. The browser rendered the dashboard
+and private-loan navigation with Jade and demo seed choices. Live indexing remains unverified:
+Blockstream returned HTTP 429, so the isolated test indexer was stopped to avoid further requests.
+
 Validation on 2026-11-02: full ESLint, TypeScript/demo production build, the three offline
 wallet-sync regression checks, and both build guards (embedded debug mnemonic and mainnet
 demo mode) passed. The build retains the existing large-chunk/mixed-import warnings.
 The connected lender dashboard rendered the new navigation and private-summary error/retry
 states, but the successful loaded summary was not verified: the user reported rate limiting
 and asked to commit/merge, deferring further browser checks until later. Production-preview
-browser smoke testing is also incomplete. This is not a full UI or deployment sign-off.
+browser smoke testing was subsequently completed for the disconnected UI in the Docker check;
+wallet-connected counts and transaction flows were not repeated there. This is not full sign-off.
 
 - The [contract review](../docs/security/2026-11-02-private-lending-contract-review.md) found M-01:
   expired pending offers remain acceptable on-chain and can then be liquidated immediately.
@@ -58,7 +74,7 @@ browser smoke testing is also incomplete. This is not a full UI or deployment si
   uncaptured Jade NFT/domain/warning observations and other partial assertions. Optional Jade
   claim/retry/repayment checks were skipped at the user's request. Do not mark full sign-off complete.
 - The wallet-scan aliasing mitigation and its [library report](../docs/bug-reports/2026-11-02-lwk-web-concurrent-scan-hang.md)
-  remain part of this working tree. One successful browser retry supports the mitigation; it is
+  are included in the merged demo preparation. One successful browser retry supports the mitigation; it is
   not proof that every WASM concurrency hazard is eliminated.
 - Existing React duplicate-key/PressResponder warnings were observed during earlier manual testing;
   removing developer overlays does not fix or suppress runtime warnings.

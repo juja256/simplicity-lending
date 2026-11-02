@@ -9,11 +9,11 @@ database:
 esplora:
   base_url: "${INDEXER_ESPLORA_BASE_URL}"
   timeout: 10
-  network: "liquidtestnet"
+  network: "${VITE_NETWORK}"
 indexer:
-  protocol_fee_keeper_asset_id: "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5"
+  protocol_fee_keeper_asset_id: "${PROTOCOL_FEE_KEEPER_ASSET_ID}"
   interval: ${INDEXER_POLL_INTERVAL_MS}
-  last_indexed_height: 2549693
+  last_indexed_height: ${INDEXER_LAST_INDEXED_HEIGHT}
   asset_registry:
     domain: "${ASSET_REGISTRY_DOMAIN}"
     registry_url: "${ASSET_REGISTRY_URL}"

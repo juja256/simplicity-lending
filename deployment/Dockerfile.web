@@ -54,7 +54,7 @@ FROM nginx:1.27-alpine
 RUN apk add --no-cache gettext
 
 COPY --from=builder /app/web/dist /usr/share/nginx/html
-COPY deployment/configs /deployment/configs
+COPY deployment/configs/nginx /deployment/configs/nginx
 COPY deployment/scripts/render-web-config.sh /deployment/render-web-config.sh
 
 ENTRYPOINT ["/deployment/render-web-config.sh"]

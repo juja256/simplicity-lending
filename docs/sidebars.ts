@@ -22,6 +22,11 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
+      label: 'Private loans',
+      items: ['private-loans/guide', 'private-loans/protocol'],
+    },
+    {
+      type: 'category',
       label: 'Borrower',
       link: {
         type: 'generated-index',
