@@ -435,7 +435,7 @@ Every step that broadcasts names these checks; the step lists what is specific t
   the borrower's row shows **Processing...**, then **Cancelled** and no button; the lender's row
   shows **Cancelled** and no **Accept**; T3 borrower tL-BTC +21 000 − fee; T4.
 
-- [ ] **R10. Offer C: Discard.** Borrower window.
+- [x] **R10. Offer C: Discard.** Borrower window.
   1. Lender **Manual Lender** from the directory, **Collateral** `22000`, **Expiry** `1440`,
      **Principal** `1`, **Repayment** `1.1`, **Review Offer**.
   2. Turn request blocking on again (the R8 pattern), then **Sign & Create Offer**.
@@ -636,48 +636,115 @@ allows. Photograph the Jade screens of every signing.
 
 ## Results
 
+### Run started 2026-11-02 (Europe/Kyiv)
+
+Task 11 is **in progress**. The user reports completing the borrow–accept–repay flow.
+Detailed browser assertions and Jade signing have not yet been verified for this run.
+Record those results as the user completes them.
+
+Local preflight:
+
+- S1–S2: PostgreSQL listens on localhost:5432; `/ready` returns `{"status":"ok"}`,
+  confirming that the API can query the database. The indexer log shows new blocks committed.
+- S3: the indexer and public Liquid testnet tip both reported **2687409**.
+- S5: `.env.local` already selects `liquidtestnet`, `/api`, the local API proxy with
+  prefix stripping, and demo mode. `VITE_DEBUG_MNEMONIC` is absent.
+- S6: the wallet check passed. Borrower: **199934 tLsats**, **5.000 TEST**,
+  fingerprint **7522 bd0a ebc5 4541**. Lender: **99960 tLsats**, **5.000 TEST**,
+  fingerprint **c1d6 8df3 5fda 0d5a**. Both saved wallet-split transactions are confirmed;
+  the check did not broadcast another split. A later read-only sync confirmed **7** borrower
+  and **4** lender tL-BTC coins, meeting the checklist's coin-count requirements.
+- S7: the frontend proxy returns private candidates, and `/api/events` delivered
+  `block_indexed` for **2687410**. Browser footer/rendering checks remain pending.
+- S4: WASM rebuilt successfully with Rustup and Homebrew LLVM selected on PATH;
+  `npm run parity` passed against the rebuilt artifact.
+
+**Baseline differs from the earlier handoff:** this checkout's saved e2e state contains only
+the two wallet-split records, and the API reports **one private candidate**, not the three
+historic e2e offers in S11. The wallets' split txids also differ from the earlier handoff.
+Do not mark S11's historic-offer assertions as passed. Record what these wallets actually
+show before creating A, and distinguish this setup difference from a UI failure. An earlier
+completed UI flow can cover A after its identity and relevant UI assertions are confirmed;
+the B–D checks remain required.
+
+**User update, 2026-11-02:** "I also have completed borrow - accept repay flow."
+The local indexer lists one repaid offer with the following confirmed lifecycle. This is
+indexer evidence, not yet confirmation that this is the user's reported offer or that every
+T1–T4 UI assertion passed. In particular, directory selection, displayed amounts, balances,
+and confirmation transitions still need the user's confirmation.
+
+| Indexed action | txid | Block |
+|---|---|---|
+| Create | `555957d6b94261a69bfdd5903ee79a6d87dd86f93f781a7f535cecaab1301d45` | 2686275 |
+| Accept | `182a1051f463f3b281954ae8f3b06c1dcee26efb7198a5777487c4c4363f0b35` | 2686278 |
+| Claim principal | `7cc5fa59ff16d2665d06e2980dd2aa0fb0e0347e81598c98968cce7b9d85ffe1` | 2686279 |
+| Repay | `31dd771ee5686f2da9e15e1ffeb38d60e92789eaedaf4568959f4b32f85d9966` | 2686765 |
+| Claim repayment | `706054fc07c5eae71eeab03155986f7c3054a1a3af776b33fa1bc882549b18ee` | 2686785 |
+
+The API status remains `repaid` after the repayment output is spent; the UI derives
+`Claimed` from that spent output. The tracked repayment output is spent in the last
+transaction above.
+
+**Baseline resolved, 2026-11-02:** the user opened two separate Chrome profiles, connected
+the configured seed wallets, saw balances, and confirmed both fingerprints match. Neither
+profile lists offers. A fresh in-memory scan from height zero with each wallet also returned
+zero matching offers at height **2687422**. Directly opening the indexed creation above with
+each wallet returned `not-mine` as borrower and `view-tag-mismatch` as lender. Thus this
+indexed offer is not addressed to either current test wallet; empty lists are the correct
+baseline for these keys. No browser storage was cleared and no transaction was broadcast.
+The user's earlier successful borrow–accept–repay report remains separate until its wallet
+and offer identity are established. It must not be attributed to these test wallets.
+
+On this Mac, the installed Rustup and Homebrew LLVM tools must precede Homebrew Rust and
+Apple clang when rebuilding WASM:
+
+```bash
+cd web
+PATH=/opt/homebrew/opt/rustup/bin:/opt/homebrew/opt/llvm/bin:$PATH npm run build:wasm
+```
+
 Fill in one row per step. For a step without a transaction, write `—` as the txid. The controller
 of a later session copies the outcome into the handoff (the Task 11 brief names
 `docs/superpowers/handoff/2026-10-29-private-lending.md`).
 
 | Step | txid | Pass / Fail | Notes |
 |---|---|---|---|
-| S1 Postgres up | — | | |
-| S2 Indexer and API run | — | | |
-| S3 Indexer caught up | — | | |
-| S4 Wasm built | — | | |
-| S5 `.env.local` written | — | | |
-| S6 Funds checked (balances, fingerprints) | — | | |
-| S7 Dev server, proxy, event stream | — | | |
-| S8 Two profiles | — | | |
-| S9 Borrower seed connected | — | | |
-| S10 Lender seed connected | — | | |
-| S11 Baseline e2e offers | — | | |
-| R1 Borrower registered | — | | |
-| R2 Lender registered | — | | |
-| R3 Create A | | | |
-| R4 Accept A | | | |
-| R5 Claim principal A | | | |
-| R6 Repay A | | | |
-| R7 Claim repayment A | | | |
-| R8 Create B: blocked, reload, Broadcast Again | | | |
-| R9 Cancel B | | | |
-| R10 Create C: Discard (C never broadcast) | | | |
-| R11 Create D | | | |
-| R12 Accept D, no Liquidate before expiry | | | |
-| R13 Liquidate D | | | |
-| R14 Claim principal D (R14b: e2e offer) | | | |
-| R15 Final balances | — | | |
-| J1 Jade connected (firmware version) | — | | |
-| J2 Jade funded | | | |
-| J3 Jade registered (optional) | — | | |
-| J4 Create J: built, sent to Jade | — | | |
-| J5 Jade screens: collateral amount, NFT domain | — | | |
-| J6 Create J: signed and broadcast | | | |
-| J7 Accept J | | | |
-| J8 Claim principal J, Broadcast Again | | | |
-| J9 Repay J | | | |
-| J10 Claim repayment J | | | |
+| S1 Postgres up | — | Pass | 2026-11-02: port 5432 listening; API database query succeeds. |
+| S2 Indexer and API run | — | Pass | API ready; indexer commits new blocks. |
+| S3 Indexer caught up | — | Pass | Indexer and testnet tip both 2687409 at preflight. |
+| S4 Wasm built | — | Pass | Rebuilt with Rustup/Homebrew LLVM; parity passed afterward. |
+| S5 `.env.local` written | — | Pass | Existing settings verified; testnet/demo/proxy enabled, debug mnemonic absent. |
+| S6 Funds checked (balances, fingerprints) | — | Pass | Balances/fingerprints verified; 7 borrower and 4 lender confirmed tL-BTC coins. |
+| S7 Dev server, proxy, event stream | — | Pass | HTTP proxy and block event verified; agent observed both pages rendered with liquidtestnet and /api, and scan heights advancing. |
+| S8 Two profiles | — | Pass (user reported) | User opened two separate profiles. |
+| S9 Borrower seed connected | — | Pass (user reported) | Balance visible; fingerprint matches. |
+| S10 Lender seed connected | — | Pass (user reported) | Balance visible; fingerprint matches. |
+| S11 Baseline e2e offers | — | Adapted baseline verified | Empty UI lists agree with fresh scans; historical offers belong to other keys. Original three-offer assertions do not apply to this setup. |
+| R1 Borrower registered | — | Final state verified | Agent observed Manual Borrower with fingerprint 7522 bd0a ebc5 4541 in its own entry and the other wallet's directory. Registration animation was not observed. |
+| R2 Lender registered | — | Final state verified | Agent observed Manual Lender with fingerprint c1d6 8df3 5fda 0d5a in its own entry and the other wallet's directory. Registration animation was not observed. |
+| R3 Create A | `8685405903fcf79b11e44b6b2b5d4ee6903e73000397e771be9cb0c4df880f06` | Partial: chain/indexer verified | User supplied txid; confirmed in block 2687426 and indexed as pending. API and frontend proxy both list it. Brief initial 404 resolved when the indexer processed that block. UI terms, borrower/lender rows, balance change and two-confirmation transition still await user observation. |
+| R4 Accept A | `2089b30656a013c71e1441c3716b1a86b33b34b5a971c6744b3c7bdd541dae40` | Partial: indexer verified | Spent A's pending output in block 2687428; created active offer and principal outputs. UI assertions and balance changes await user confirmation. |
+| R5 Claim principal A | `976ad8d2dbb4b168f0b79627d4a292722d1cf25e292b90fd4361dd617368beed` | Partial: chain/indexer verified | User supplied txid; spends A's principal output, confirmed in block 2687432 (one confirmation when checked). Offer remains active. UI transition to Repay and balance change await user confirmation. |
+| R6 Repay A | `b0d61c41ac6b9f735df02abc3442fdc95ce7c412e0e67cfdc63bef4c028be759` | Partial: chain/indexer verified | User supplied txid; confirmed in block 2687434 (one confirmation when checked), spends A's active offer output and creates repayment output 1, still unspent. API status repaid. Output 0 later verified as OP_RETURN 6275726e burning one unit of asset 25be3e6de31003b682a26c1ecc8e941a70c5a6b8ace4593684ba1933aa4c7e6c; fee 203 sats. UI assertions and balance changes await verification. |
+| R7 Claim repayment A | `b6db38e5111a8a473428cd82fc63078f0a228d37d1a423e13b2b5b567e0bda5d` | Chain/indexer and final UI state passed; balance check pending | Confirmed in block 2687436, with 3 confirmations at tip 2687438. Indexer records A's repayment output spent by this txid. User reports "both claimed"; agent subsequently observed Claimed, correct 20000 / 1 / 1.1 terms, and no remaining action buttons in both wallets. Final balance increase has not been separately reported. |
+| R8 Create B: blocked, reload, Broadcast Again | `3495225e6ab171a0d5765647bfb4ccd519007438871b992c598fb3e6b4dba9ce` (retry-test attempt) | Retry persistence passed; chain and both-wallet UI verified; exact creation balance delta not captured | All invalid-key cases and valid pasted-key resolution passed. First attempt 7b09fd…a32a7f broadcast because the rule edit was not committed and was subsequently cancelled (R9). Corrected rule independently verified; user signed the repeat. DevTools recorded the blocked request from client.ts:119; modal showed saved-not-broadcast warning. Application → IndexedDB showed exactly one private_create_offer record for 349522…dba9ce, broadcastStatus built, and stored txHex. Closing modal showed Not broadcast and disabled Review Offer with all fields filled. Reload restored the same row and disabled-creation notice; reopening showed the same Offer Transaction ID. User performed one blocked retry and reported the same warning. Refreshed IndexedDB still showed the same creation record with broadcastStatus built, errorMessage Failed to broadcast transaction., unchanged createdAt 1793610029516 and updatedAt 1793610315751; total entries remained 2 (one creation plus the prior cancellation). Request blocking was then disabled (verified unchecked). User reported successful retry; Esplora verified the identical txid confirmed in block 2687518 with fee 167 sats. Refreshed IndexedDB contained one entry for B with broadcastStatus broadcast, confirmationStatus confirmed, confirmations 1, and no errorMessage; the older cancellation record had been removed by normal reconciliation. At tip 2687519 the borrower showed Open Offer/Cancel and lender Open Offer/Accept with collateral 21,000 and expiry 2688945. No duplicate creation was observed. The exact creation balance delta and transient success modal were not captured. Before cancellation, borrower dashboard showed 177,905 tLsats and 4.9 TEST. User then signed its cancellation; see R9. |
+| R9 Cancel B | `c835af20b479ded7f988b0b71f0925071364a7a18cc75d504426bd6442b56a7c` (repeat B); first attempt `fc829c5a33cf74a71e1e6b4bdeffa2ae79a29f6fae93c9fad8aaede0c03aa764` | NFT burns, both-wallet final UI, and balance delta passed; transient signing summary not captured | First attempt cancellation confirmed in block 2687504. Repeat B: user signed with blocking off. c835af…b56a7c spends B outputs 3, 1, 0, 4; outputs 0 and 1 burn one lender and borrower NFT respectively via OP_RETURN 6275726e. Fee 749 sats; confirmed in block 2687522 and indexed cancelled. Borrower showed Processing while unconfirmed; at scanned block 2687522 both wallets showed Cancelled with no action. Borrower dashboard went from 177,905 tLsats to 41,000 confirmed +157,156 pending, then 198,156 confirmed, exactly +21,000 −749. TEST stayed 4.9. |
+| R10 Create C: Discard (C never broadcast) | `9f4fb3ba9011b960ed81a1968582d3a60b824fb3edbbed594d849a0aa0c73cc5` | Discard passed after construction mitigation | User reported stuck Constructing Transaction. Agent observed the same stage and an uncaught LWK WASM recursive-use/unsafe-aliasing error. Refreshed IndexedDB contained only B and its cancellation, no C record. Reload recovered the page. syncBalances now shares concurrent scans per wallet; manual sync propagates failures to the transaction flow. TypeScript, full lint, and 3 offline wallet-sync regression checks passed. Exact cause of the observed WASM failure remains a hypothesis. After the guard and reload, user retried and reported the expected warning; agent independently observed saved-but-not-broadcast and the new creation record with broadcastStatus built and Failed to broadcast transaction. errorMessage. C review restored with 22,000 / 1 / 1.1 / expiry 2688970; exact broadcast rule and global blocking verified enabled with DevTools open. Baseline 198,156 tLsats and 4.9 TEST. At tip 2687536, GET /tx/C and local candidate both returned 404. Agent clicked Discard It while blocking remained enabled: modal closed, no pending row/notice, and filled form Review Offer enabled. Blocking then disabled (Value 0); refreshed IndexedDB had 0 entries. Dashboard still showed 198,156 confirmed tLsats and 4.9 TEST with no pending amount. Neither wallet listed C; lender scanned through 2687537. Both APIs still returned 404 at tip 2687537 (several blocks after C was built). |
+| R11 Create D | `ebed043d45cad83d2cab46a46a04231250879983d57a68ef6915b5f7373fcd49` | Chain, terms, and collateral balance delta passed | Manual Lender, collateral 23,000 / principal 1 / repayment 1.1 / duration 10 blocks. Review fixes expiry at 2687548. Blocking off. Before D borrower 198,156 tLsats / 4.9 TEST; lender 99,656 tLsats / 5.1 TEST. Confirmed in block 2687539, fee 172 sats; indexer pending. Borrower Processing observed; lender Open Offer/Accept with correct 23,000 / 1 / 1.1 terms and expiry 2687548. Borrower dashboard confirmed 174,984 tLsats (198,156 −23,000 −172), TEST unchanged 4.9. |
+| R12 Accept D, no Liquidate before expiry | `c207dc3a055235582f057263ded6a809bb58d6bbccee9f1714abd62ab0b127b7` | Chain, balance delta, and pre-expiry gating passed | Confirmed at 2687540, fee 342 sats. Indexer active with principal output unspent. Lender balances 99,314 tLsats and 4.1 TEST (−342 sats and −1 TEST). At 2687541 (2 confirmations), lender Active, no Liquidate button, note Liquidation opens after block #2687548.; borrower Active with Claim Principal. Principal deliberately left unclaimed. |
+| R13 Liquidate D | `e679f75e2dd7e2a48000e110b2e86e02186770be2cb58a5a55a2d4a17c75d296` | Chain, balance delta, both-wallet liquidation UI passed; exact expiry-label timing not captured | At indexer height 2687548, lender remained Active with no Liquidate, note opens after block 2687548, but expiry label still ~1m because the independent tip query polls every 30 seconds. Next observation at indexer height 2687549 showed Expired; exact Expired label while chain tip equaled N was not captured. With public tip 2687549, Liquidate appeared after the next UI tip refresh. Modal showed 23,000 collateral, expiry 2687548 (Expired), and enabled Liquidate & Claim Collateral. Pre-liquidation lender balance 99,314 tLsats / 4.1 TEST. User submitted; confirmed in block 2687551 (>2687548), locktime 2687548, fee 167. Indexer liquidated; principal still unspent. Lender dashboard 122,147 tLsats (+23,000 −167), TEST 4.1 unchanged. Lender Processing observed at first confirmation, then Liquidated with no action at scanned block 2687553; borrower Liquidated with Claim Principal and The loan was liquidated; the principal is yours. note. |
+| R14 Claim principal D (R14b: e2e offer) | `087429bb534156ac1b6c5f6089b73ac76a1be29abb773eab424a3ed597ee6a31` | Confirmed; both-wallet final UI and balance delta passed | Post-liquidation Claim Principal review opened for D; claims remaining 1 TEST. Pre-claim borrower 174,984 tLsats / 4.9 TEST. User submitted; explorer fee 142 sats. Borrower dashboard initially showed 21,000 confirmed +153,842 pending tLsats and 4.9 confirmed +1 pending TEST, matching expected −142 sats / +1 TEST. Borrower Processing observed. Claim confirmed at 2687553 with 2 confirmations at tip 2687554. Borrower final 174,842 tLsats / 5.9 TEST; both wallets Liquidated with no actions. |
+| R15 Final balances | — | Browser wrap-up passed for current-wallet offers | At scanned block 2687554, borrower A Claimed, both B attempts Cancelled, D Liquidated; no Processing or Not broadcast, no remaining actions. Lender same terminal states observed at 2687553. C absent. Final borrower 174,842 tLsats / 5.9 TEST; lender 122,147 tLsats / 4.1 TEST, all confirmed. Borrower request blocking explicitly off before DevTools closed; lender DevTools closed throughout. Historical e2e offers do not apply to current keys (S11). |
+| J1 Jade connected (firmware version) | — | Connected; distinct identity verified | User reports Jade firmware 1.0.41. After D completed, borrower seed disconnected and Jade TESTNET selected. Chrome serial chooser showed an empty compatible-devices table; user asked to connect/power on Jade, select port, unlock and approve blinding-key export if prompted. User then connected/unlocked Jade. Agent verified connected address ending e3m839 and fingerprint e147 ede3 c72c bbc2, distinct from both seed keys; existing directory entry is test. Device PIN/export screens were user-operated, not directly observed. |
+| J2 Jade funded | `25bb314221df2d3ee722b8d2d014c587c8ac685a3a90e7eed150bd3108c1debc` | Funding confirmed; creation coin requirement satisfied | Initial Jade balance 299,657 tLsats / 4.9 TEST, but UI reported only 2 confirmed tL-BTC coins. One faucet request to the copied Jade receive address succeeded for 100,000 sats; no additional TEST needed. Confirmed in block 2687559; dashboard 399,657 confirmed tLsats / 4.9 TEST. Coin warning cleared after leaving/reopening Private page. |
+| J3 Jade registered (optional) | — | Skipped; existing entry retained | Jade identity was already registered as test; left the existing entry unchanged. |
+| J4 Create J: built, sent to Jade | — | Build and device signing completed; transient stepper not captured | Manual Lender selected, 24,000 tLsats / 1 TEST / 1.1 TEST / expiry 2689002. User subsequently reported 24000 on Jade and everything seems fine. Agent observed Transaction Pending success dialog. Device labels/warnings were not recalled; see J5. |
+| J5 Jade screens: collateral amount, NFT domain | — | Collateral amount passed by user report; metadata/warnings unverified | User reported 24000 on Jade. When asked for exact NFT/domain/asset labels and warnings, user replied i do not remember. Do not infer the metadata-display checklist passed. |
+| J6 Create J: signed and broadcast | `9503204c8730cc100538669d1c5669e4c03edbe6692d23f9a9fb94f694e58e95` | Signing, chain, balance delta, both-wallet offer verified | Agent observed Transaction Pending dialog with 24,000 / 1 / 1.1 summary. Confirmed in block 2687565, fee 136 sats, indexer pending. Jade 375,521 tLsats (399,657 −24,000 −136) and unchanged 4.9 TEST. Borrower and lender Open Offer with correct terms; lender sees Jade fingerprint e147 ede3 c72c bbc2. No registry-console observation captured. |
+| J7 Accept J | `762b21d1db49849e451f50ba026fb6afd08295fba8007e9c8ed133fcbb92d54d` | Confirmation, both-wallet UI, and balance delta passed | Confirmed in block 2687568, fee 301 sats. At scanned block 2687569 (2 confirmations), lender Active with no action and liquidation opens after 2689002; Jade Active with Claim Principal. Lender 121,846 tLsats / 3.1 TEST (−301 sats / −1 TEST). User chose to stop after required acceptance checks, leaving principal unclaimed and loan active. |
+| J8 Claim principal J, Broadcast Again | — | Skipped at user request | User explicitly chose to stop after required acceptance checks. |
+| J9 Repay J | — | Skipped at user request | User explicitly chose to stop after required acceptance checks. |
+| J10 Claim repayment J | — | Skipped at user request | User explicitly chose to stop after required acceptance checks. |
 
 ## If something fails
 
@@ -719,4 +786,25 @@ of a later session copies the outcome into the handoff (the Task 11 brief names
 
 (One entry per failure or surprise: step, what you did, expected, actual, files captured.)
 
--
+- R8 test setup error (2026-11-02): entering the request pattern and pressing Tab did
+  not commit the edited rule. The checkbox label still showed the original `*://*`.
+  The user signed, and offer `7b09fd…a32a7f` broadcast rather than exercising retry.
+  Corrected by entering the exact HTTPS URL and pressing Enter; the rule's label then
+  updated. A harmless GET fetch from the app produced an explicit DevTools-blocked
+  warning and incremented the affected count. Top-level navigation to the endpoint had
+  not been a valid blocking probe. This is a test setup failure, not evidence of an app
+  retry defect. Cancel the broadcast offer; repeat the retry test with the verified rule.
+- During the first B creation/confirmation, Chrome logged repeated React errors:
+  `Encountered two children with the same key, 1`. They ceased after navigation/reload.
+  Source is not identified. A read-only review found no duplicate keys in the private
+  create confirmation stepper or summary; capture a component stack if it recurs.
+
+- Scenario C construction stall (2026-11-02): console reported `Uncaught Error: recursive use of an object detected which would lead to unsafe aliasing in rust` from `lwk_wasm.js:11836` while the stepper stayed at Constructing Transaction. Manual `sync()` could overlap a background full scan despite the background-only boolean guard. Added shared in-flight scans in `web/src/lib/wallet-core/wallet/sync.ts`, and made manual sync reject on failure so transaction construction stops. Three deferred-scan regression checks in `web/scripts/check-wallet-sync.ts` pass (overlap, rejection/retry, separate wallets), as do `tsc -b` and full lint. The next browser attempt reached the expected saved-but-not-broadcast warning with a new built record (see R10). One successful retry supports the mitigation but does not prove the root cause. Discard checks remain pending. A shareable library report is saved at `docs/bug-reports/2026-11-02-lwk-web-concurrent-scan-hang.md`.
+
+- Jade funding UI observation (2026-11-02): after faucet confirmation and balance sync, the New private offer form still reported 2 confirmed coins and disabled Review Offer. The dashboard showed the new 399,657-sat balance. Leaving/reopening Private refreshed the UTXO query and cleared the warning. `usePolicyAssetUtxos` is stale immediately but has no explicit invalidation tied to successful wallet scans; no fix applied yet.
+
+- Separate user-requested smart-contract review completed: `docs/security/2026-11-02-private-lending-contract-review.md`. M-01 reports acceptance of stale pending offers followed by immediate liquidation; demonstrated at covenant VM level with synthetic transactions, not full consensus-valid on-chain execution. Production contracts were not changed.
+
+### Run stopping point (2026-11-02)
+
+The user explicitly stopped after the required Jade acceptance checks; J8–J10 were not run. Jade offer `950320…e58e95` remains active, expires at height 2689002, and its 1 TEST principal remains unclaimed. Request blocking is off and DevTools is closed. Full Task 11 sign-off remains open: exact Jade NFT/domain/warning observations were not recalled, registry-console behavior was not captured, and earlier per-step/transient UI or balance assertions marked partial in the results table remain unverified. No merge or deployment was performed.

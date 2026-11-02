@@ -5,3 +5,9 @@ target
 web/node_modules
 web/dist
 web/.env
+**/*.local
+**/.env
+.pnpm-store
+seed.*.txt
+*.swp
+web/.e2e-private

@@ -60,7 +60,7 @@ export function BorrowCard() {
           <span className='text-foreground'>
             <CoinsIcon className='size-5' />
           </span>
-          <h3 className='text-h3'>Your Borrows</h3>
+          <h3 className='text-h3'>Your public borrows</h3>
         </div>
         <p className='text-muted text-h4'>Available Balance {collateralUnit}</p>
       </header>

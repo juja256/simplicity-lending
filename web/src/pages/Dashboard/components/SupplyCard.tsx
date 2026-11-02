@@ -53,7 +53,7 @@ export function SupplyCard() {
           <span className='text-foreground'>
             <ArrowSquareUpIcon className='size-5' />
           </span>
-          <h3 className='text-h3'>Your Supply</h3>
+          <h3 className='text-h3'>Your public supply</h3>
         </div>
         <p className='text-muted text-h4'>
           Available Balance {NETWORK_CONFIG.principalAsset.symbol}

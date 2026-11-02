@@ -2,6 +2,28 @@
 
 V2 frontend scaffold for the Simplicity Lending protocol.
 
+## Testnet demo release
+
+```bash
+pnpm lint
+pnpm build:demo
+pnpm preview:demo
+```
+
+`build:demo` creates the production bundle with `.env.demo`: Liquid testnet, same-origin `/api`,
+and explicit test-seed login. No recovery phrase is embedded. Builds reject `VITE_DEBUG_MNEMONIC`
+and mainnet demo mode. The developer Demo/System pages and debug overlays have been removed;
+run `pnpm lint` and `pnpm exec tsc -b` in the terminal for diagnostics.
+
+Private loans are reachable from the main navigation and the dashboard summary. Its counts are
+for the connected wallet's verified private offers; public-market totals remain separate.
+
+For a local preview against the running indexer, `.env.local` can set
+`API_PROXY_TARGET=http://127.0.0.1:8000` and `API_PROXY_STRIP_PREFIX=true`. The preview server
+uses that proxy too. A deployed build instead needs the `/api` reverse proxy in the deployment
+stack. See [the demo release notes](../deployment/demo-release.md) for deployment checks and
+the remaining contract-review and manual-checklist gaps.
+
 ## Prerequisites
 
 - Node.js 20.19+

@@ -88,6 +88,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       if (connector.getCoins) {
         const coins = await connector.getCoins(APP_ASSET_IDS)
         if (attempt !== connectionChangeCounterRef.current) return null
+        void queryClient.invalidateQueries({ queryKey: ['wallet', 'policy-asset-utxos'] })
         return readCoinBalances(coins)
       }
       await syncBalances(session.wollet, session.esploraClient)
@@ -97,9 +98,11 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         pendingBroadcastsRef.current,
       )
       confirmedTxids.forEach(txid => pendingBroadcastsRef.current.delete(txid))
+      // Creation readiness must follow new/confirmed coins, not only a route remount.
+      void queryClient.invalidateQueries({ queryKey: ['wallet', 'policy-asset-utxos'] })
       return readWalletBalances(session.wollet)
     },
-    [],
+    [queryClient],
   )
 
   // The session's lending key, derived on first use. `lendingKeys().endSession()` frees it and
@@ -271,11 +274,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       const useSideSwap = options?.sideswap === true
       const useHumid = options?.humid === true
       const isExternalWallet = useSideSwap || useHumid
-      // seedMnemonic is a runtime choice from the demo-mode seed connect form; falling back to
-      // VITE_DEBUG_MNEMONIC preserves the existing local-dev auto-connect behavior.
-      const mnemonic = isExternalWallet
-        ? null
-        : options?.seedMnemonic || env.VITE_DEBUG_MNEMONIC || null
+      // A seed is always an explicit test-wallet choice; Jade never silently uses a baked seed.
+      const mnemonic = isExternalWallet ? null : options?.seedMnemonic || null
       const isJade = !isExternalWallet && mnemonic === null
       const signerType = useSideSwap ? 'sideswap' : useHumid ? 'humid' : isJade ? 'jade' : 'seed'
       setState(s => ({ ...s, syncing: true, error: null, isError: false }))
@@ -285,6 +285,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       // after that point releases it instead of blocking the next connect.
       let openedCache: WalletCache | null = null
       try {
+        if (mnemonic && !env.VITE_DEMO_MODE) {
+          throw new Error('Test-seed login is only available in testnet demo mode')
+        }
         if (useSideSwap && !env.VITE_SIDESWAP_WS_URL) {
           throw new Error('VITE_SIDESWAP_WS_URL is not set')
         }
@@ -458,6 +461,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       ErrorHandler.process(err)
       const error = err instanceof Error ? err.message : String(err)
       setState(s => ({ ...s, syncing: false, error, isError: true }))
+      // Transaction construction must stop if its prerequisite wallet refresh fails.
+      throw err
     } finally {
       if (attempt === connectionChangeCounterRef.current) {
         syncInFlightRef.current = false

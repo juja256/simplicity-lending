@@ -1,9 +1,6 @@
 import { ToastProvider } from '@heroui/react'
 import { QueryClientProvider } from '@tanstack/react-query'
-import { ReactQueryDevtools } from '@tanstack/react-query-devtools'
 import type { PropsWithChildren } from 'react'
-
-import { env } from '@/constants/env'
 
 import { AssetDenominationProvider } from './assetDenomination/AssetDenominationProvider'
 import { IndexerSubscription } from './indexerEvents/IndexerSubscription'
@@ -29,7 +26,6 @@ export function AppProviders({ children }: PropsWithChildren) {
           </TxProgressProvider>
         </WalletProvider>
       </LwkProvider>
-      {env.DEV && <ReactQueryDevtools initialIsOpen={false} />}
     </QueryClientProvider>
   )
 }
