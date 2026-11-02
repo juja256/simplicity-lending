@@ -47,12 +47,13 @@ impl OpenedOffer {
     }
 
     fn new(offer: CoreOpenedOffer, tx: &Transaction) -> Result<Self, String> {
-        let first_input = tx
+        let outpoint = tx
             .input
             .first()
             .ok_or_else(|| bad_input("the transaction has no inputs"))?
-            .previous_output
-            .to_string();
+            .previous_output;
+        // not `OutPoint`'s `Display`, which prefixes "[elements]"
+        let first_input = format!("{}:{}", outpoint.txid, outpoint.vout);
         Ok(Self { offer, first_input })
     }
 }
@@ -382,10 +383,10 @@ pub(crate) mod tests {
             borrower.x_only_public_key()
         );
         assert!(as_lender.repayment_amount() >= as_lender.principal_amount());
-        let tx = tx_of(&hex);
+        // input 0 of the fixture's creation transaction, as "<txid>:<vout>"
         assert_eq!(
             as_lender.first_input(),
-            tx.input[0].previous_output.to_string()
+            "e9c3ff06972d7e7ef13b315c654bc5b6a199babf498f25dbf934ead44bc88b51:0"
         );
     }
 

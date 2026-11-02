@@ -1,8 +1,8 @@
 import axios, { AxiosError, type AxiosRequestConfig } from 'axios'
 import type { z as zod } from 'zod'
 
-import { ErrorHandler } from '@/utils/errorHandler'
-
+// No app imports (React, `import.meta.env`) here: the private lending scan runs this client in
+// Node too (the e2e script).
 import { ApiAbortError, ApiError, ApiTimeoutError, ApiValidationError } from './errors'
 
 export const DEFAULT_TIMEOUT_MS = 30_000
@@ -52,7 +52,8 @@ function parseWithSchema<Schema extends zod.ZodTypeAny>(
       `Response validation failed for ${url}: ${parsed.error.message}`,
       parsed.error.issues,
     )
-    ErrorHandler.processWithoutFeedback(validationError)
+    // What ErrorHandler.processWithoutFeedback does, without its React imports.
+    console.error(validationError)
     throw validationError
   }
   return parsed.data
@@ -69,6 +70,37 @@ export async function requestJson<Schema extends zod.ZodTypeAny>(
 ): Promise<zod.output<Schema>> {
   const { data } = await apiClient.request<unknown>({ ...config, url })
   return parseWithSchema(data, schema, url)
+}
+
+/** POSTs `body` as JSON and parses the JSON response with `schema`. */
+export async function postJson<Schema extends zod.ZodTypeAny>(
+  url: string,
+  body: unknown,
+  schema: Schema,
+  config?: AxiosRequestConfig,
+): Promise<zod.output<Schema>> {
+  const { data } = await apiClient.request<unknown>({ ...config, url, method: 'POST', data: body })
+  return parseWithSchema(data, schema, url)
+}
+
+/** PUTs `body` as JSON and parses the JSON response with `schema`. */
+export async function putJson<Schema extends zod.ZodTypeAny>(
+  url: string,
+  body: unknown,
+  schema: Schema,
+  config?: AxiosRequestConfig,
+): Promise<zod.output<Schema>> {
+  const { data } = await apiClient.request<unknown>({ ...config, url, method: 'PUT', data: body })
+  return parseWithSchema(data, schema, url)
+}
+
+/** DELETEs with `body` as JSON, for endpoints that answer with no content (`204`). */
+export async function deleteJson(
+  url: string,
+  body: unknown,
+  config?: AxiosRequestConfig,
+): Promise<void> {
+  await apiClient.request<unknown>({ ...config, url, method: 'DELETE', data: body })
 }
 
 export function requestText(url: string, config?: AxiosRequestConfig): Promise<string>

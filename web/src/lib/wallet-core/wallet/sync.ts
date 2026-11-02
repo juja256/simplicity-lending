@@ -1,7 +1,6 @@
 import { type EsploraClient, type Transaction, TxOpt, type Wollet } from '@lilbonekit/lwk-web'
 
 import type { WalletCoin } from '@/lib/wallet-core/types'
-import { isConfirmedWalletUtxo } from '@/lwk/utxo'
 
 export interface WalletBalances {
   total: Record<string, string>
@@ -13,7 +12,7 @@ export interface WalletBalances {
 function toWalletBalances(totals: Map<string, bigint>, coins: WalletCoin[]): WalletBalances {
   const confirmedAmounts = new Map<string, bigint>()
   for (const coin of coins) {
-    if (!isConfirmedWalletUtxo(coin)) continue
+    if (coin.height() === undefined) continue
     const unblinded = coin.unblinded()
     const assetId = unblinded.asset().toString()
     confirmedAmounts.set(assetId, (confirmedAmounts.get(assetId) ?? 0n) + unblinded.value())
@@ -43,19 +42,30 @@ export function readWalletBalances(wollet: Wollet): WalletBalances {
   return toWalletBalances(totals, wollet.utxos())
 }
 
+const balanceScans = new WeakMap<Wollet, Promise<WalletBalances>>()
+
 /**
  * Syncs wallet state via waterfalls fullScan and applies the update.
- * Returns the updated total and confirmed-only balance maps.
+ * Manual and background refreshes share a scan: concurrent scans of the same WASM
+ * wallet/client can violate Rust's borrowing rules and leave the scan unresolved.
  */
-export async function syncBalances(
+export function syncBalances(
   wollet: Wollet,
   esploraClient: EsploraClient,
 ): Promise<WalletBalances> {
-  const update = await esploraClient.fullScanToIndex(wollet, 0)
-  if (update) {
-    wollet.applyUpdate(update)
-  }
-  return readWalletBalances(wollet)
+  const inFlight = balanceScans.get(wollet)
+  if (inFlight) return inFlight
+
+  // Schedule the scan after storing its promise, including for synchronous failures.
+  const scan = Promise.resolve()
+    .then(async () => {
+      const update = await esploraClient.fullScanToIndex(wollet, 0)
+      if (update) wollet.applyUpdate(update)
+      return readWalletBalances(wollet)
+    })
+    .finally(() => balanceScans.delete(wollet))
+  balanceScans.set(wollet, scan)
+  return scan
 }
 
 /**

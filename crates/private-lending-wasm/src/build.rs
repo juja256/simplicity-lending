@@ -116,8 +116,17 @@ pub fn issued_asset_id(outpoint: &str, contract_hash: &str) -> Result<String, St
     Ok(AssetId::from_entropy(AssetId::generate_asset_entropy(outpoint, contract_hash)).to_string())
 }
 
+/// The ELIP-100 contract hash of a contract's JSON (LWK's `Contract.toString()`), in the format
+/// `issuedAssetId` takes.
+#[wasm_bindgen(js_name = contractHashFromJson)]
+pub fn contract_hash_from_json(json: &str) -> Result<String, String> {
+    ContractHash::from_json_contract(json)
+        .map(|hash| hash.to_string())
+        .map_err(|e| bad_input(format!("not a contract: {e}")))
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::blind::{InputSecret, blind_pset};
     use crate::error::encode_hex;
@@ -178,7 +187,7 @@ mod tests {
         .unwrap()
     }
 
-    fn build_offer(principal: u64) -> Result<NewOffer, String> {
+    pub(crate) fn build_offer(principal: u64) -> Result<NewOffer, String> {
         NewOffer::build(
             &key(1),
             &key(2).x_only_public_key(),
@@ -214,9 +223,12 @@ mod tests {
         (input, txout)
     }
 
-    #[test]
-    fn new_offer_round_trips_through_opening() {
-        let offer = build_offer(10_000).unwrap();
+    /// The unblinded creation PSET of `offer`, in the creation layout (inputs 0 and 1 issue
+    /// the NFTs; outputs: borrower NFT, lender NFT, marker, pending collateral, change, fee), and
+    /// the secrets of its inputs.
+    pub(crate) fn creation_pset(
+        offer: &NewOffer,
+    ) -> (PartiallySignedTransaction, Vec<InputSecret>) {
         let terms = offer.inner.signed_terms.terms;
 
         let mut pset = PartiallySignedTransaction::new_v2();
@@ -256,6 +268,13 @@ mod tests {
         ] {
             pset.add_output(output);
         }
+        (pset, secrets)
+    }
+
+    #[test]
+    fn new_offer_round_trips_through_opening() {
+        let offer = build_offer(10_000).unwrap();
+        let (pset, secrets) = creation_pset(&offer);
 
         let blinded = blind_pset(
             &pset.to_string(),
@@ -289,6 +308,37 @@ mod tests {
 
     fn hex_bytes(hex: &str) -> Vec<u8> {
         crate::error::decode_hex(hex).unwrap()
+    }
+
+    const CONTRACT_JSON: &str = r#"{"entity":{"domain":"example.com"},"issuer_pubkey":"02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"simplicity-lending/v1 borrower-nft","precision":0,"ticker":"SLB1234","version":0}"#;
+
+    #[test]
+    fn contract_hash_known_answer() {
+        // SHA-256 of the compact JSON with sorted keys, displayed byte-reversed.
+        assert_eq!(
+            contract_hash_from_json(CONTRACT_JSON).unwrap(),
+            "aab713dd442bd022656c548028bb78daae25e4caff07a0c14e09e38d6d424ca4"
+        );
+    }
+
+    #[test]
+    fn contract_hash_ignores_key_order_and_whitespace() {
+        let reordered = format!(
+            "{{\n \"version\": 0,\n \"ticker\": \"SLB1234\",\n \"precision\": 0,\n \"name\": \"simplicity-lending/v1 borrower-nft\",\n \"issuer_pubkey\": \"02{}\",\n \"entity\": {{ \"domain\": \"example.com\" }}\n}}",
+            "aa".repeat(32)
+        );
+        assert_eq!(
+            contract_hash_from_json(&reordered).unwrap(),
+            contract_hash_from_json(CONTRACT_JSON).unwrap()
+        );
+    }
+
+    #[test]
+    fn bad_contract_json_is_rejected() {
+        for bad in ["", "{", "[]"] {
+            let error = contract_hash_from_json(bad).unwrap_err();
+            assert!(error.starts_with("bad-input:"), "{bad}: {error}");
+        }
     }
 
     #[test]
