@@ -1,6 +1,31 @@
-# Private lending, part C2: session handoff (updated 2026-11-01)
+# Private lending, part C2: session handoff (updated 2026-11-02)
 
 Read this file first.
+
+## Demo preparation and merge request — 2026-11-02
+
+The user requested committing the current work and merging after reporting rate-limited
+loading; they will recheck the browser later. Test-seed login stays enabled for the testnet
+demo. Developer Demo/System pages and debug overlays were removed, dashboard private-loan
+navigation/summary was added, and public demo build settings and release notes are in
+`deployment/demo-release.md`. Lint, demo build, wallet-sync checks and build guards passed.
+Successful loaded dashboard counts and the production-preview browser smoke test remain
+unverified. This request supersedes the older pre-merge checklist gate below, but does not
+resolve the documented contract finding or mark Task 11 fully signed off.
+
+## Latest manual run — 2026-11-02
+
+This update supersedes the older run-state notes below; historical implementation notes remain useful.
+
+- Task 11 browser testing progressed through seed lifecycle, blocked broadcast/retry/reload, discard, cancellation, liquidation and post-liquidation principal claim. Jade firmware 1.0.41 signed a 24,000-sat offer, and lender acceptance was verified in both wallets. Detailed evidence and gaps are in `docs/superpowers/manual/2026-10-29-private-lending-testnet.md`.
+- User explicitly stopped after required Jade acceptance checks; optional J8–J10 were skipped. Jade offer `9503204c8730cc100538669d1c5669e4c03edbe6692d23f9a9fb94f694e58e95` remains active, expiry 2689002, principal unclaimed. Jade is connected in the former borrower Chrome window; Manual Lender remains in the other incognito window. Browser request blocking is off.
+- Do not mark Task 11 fully signed off: exact Jade NFT/domain/warning observations were not recalled, registry-console behavior was not captured, and other explicitly partial observations remain in the results table. Seed scenarios reached terminal states; the new Jade loan intentionally did not.
+- A construction stall exposed overlapping manual/background wallet scans. Working-tree mitigation shares in-flight scans per wallet and propagates manual-sync errors. Three offline regression checks in `web/scripts/check-wallet-sync.ts`, TypeScript and full ESLint passed; subsequent browser creation succeeded. Library report: `docs/bug-reports/2026-11-02-lwk-web-concurrent-scan-hang.md`.
+- A separate requested adversarial contract review found M-01: stale pending offers can be accepted then liquidated without a guaranteed funded term. Report: `docs/security/2026-11-02-private-lending-contract-review.md`; VM proof with seven negative controls: `crates/contracts/tests/private_lending_security_audit.rs`. This is a demonstrated covenant-level design risk, not a full consensus-valid exploit reproduction. No production contract change was made.
+- Other recorded UI findings include React duplicate-key/PressResponder warnings and a stale creation coin-count query after faucet funding (route re-entry refreshed it). They are not all resolved.
+- Latest confirmed balances: seed borrower 174,842 tLsats / 5.9 TEST; lender after Jade acceptance 121,846 tLsats / 3.1 TEST; Jade after creation 375,521 tLsats / 4.9 TEST. Local demo setup has no `VITE_DEBUG_MNEMONIC`; the Jade connection was real. Do not expose the test seed files.
+- At the end of the manual run, fixes/reports/test evidence were uncommitted; the subsequent merge request above supersedes that state. No deployment was performed. Resolve remaining evidence gaps and make an explicit decision about M-01 before treating this as deployment approval.
+
 
 - **Background:** the earlier handoff (`docs/superpowers/handoff/2026-10-29-private-lending.md`) covers parts A, B and C1 and the user's decisions, and the spec is the binding design.
 - **Plan in progress:** `docs/superpowers/plans/2026-10-29-private-lending-frontend.md` (part C2, 11 tasks).

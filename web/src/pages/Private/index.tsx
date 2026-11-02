@@ -5,6 +5,7 @@ import CopyButton from '@/components/CopyButton'
 import ShieldIcon from '@/components/icons/ShieldIcon'
 import KeyFingerprint from '@/components/KeyFingerprint'
 import { WalletButton } from '@/components/WalletButton'
+import { env } from '@/constants/env'
 import { useDirectory } from '@/privateLending/hooks/useDirectory'
 import { useLendingKeyIdentity } from '@/privateLending/hooks/usePrivateFlowDeps'
 import { useWallet } from '@/providers/wallet/useWallet'
@@ -80,7 +81,8 @@ export default function PrivatePage() {
           return (
             <div className='bg-surface-secondary flex flex-col items-center gap-4 rounded-2xl p-12 text-center'>
               <p className='text-muted'>
-                Private loans need Jade or the seed wallet. Disconnect, then connect one of them.
+                Private loans need Jade{env.VITE_DEMO_MODE ? ' or a test-seed wallet' : ''}.
+                Disconnect, then connect a supported wallet.
               </p>
             </div>
           )

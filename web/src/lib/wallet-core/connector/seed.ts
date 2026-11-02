@@ -14,7 +14,7 @@ import type { WalletConnector, WalletRequest } from './types'
  * Software signer connector backed by a BIP39 mnemonic.
  *
  * Intended for dev/test only — never ship a real mnemonic in env vars.
- * Gate behind VITE_DEBUG_MNEMONIC so it never runs in production builds.
+ * The wallet provider permits explicit test-seed login only in testnet demo mode.
  *
  * Signer is a WASM-backed object. It must NOT be stored in React state.
  * This class owns the Signer reference exclusively.
@@ -27,7 +27,7 @@ export class SeedConnector implements WalletConnector {
     private readonly lwkNetwork: Network,
     private readonly mnemonicStr: string,
   ) {
-    if (!mnemonicStr) throw new SeedMissingError('VITE_DEBUG_MNEMONIC is not set')
+    if (!mnemonicStr) throw new SeedMissingError('Enter a test wallet recovery phrase')
   }
 
   async connect(): Promise<void> {
