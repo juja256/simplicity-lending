@@ -11,3 +11,7 @@ web/.env
 seed.*.txt
 *.swp
 web/.e2e-private
+deployment/configs/compose.env
+**/node_modules
+docs/build
+docs/.docusaurus

@@ -14,6 +14,11 @@ The protocol is a demo running on Liquid testnet. It is being actively tested an
 
 ## How a loan works
 
+The workflow and fee description below refer to public loans. Private loans use a separate
+contract, wallet-derived lending keys, confidential amounts, and their own role tokens. Start
+with the [private-loan guide](./private-loans/guide.md) and
+[protocol notes](./private-loans/protocol.md), including the pending-offer expiry limitation.
+
 1. **A borrower publishes an offer.** They lock collateral in a contract and state how much principal they want, the fee they will pay for it, and how long the loan lasts. Until someone funds the offer, the borrower can cancel it and take the collateral back.
 2. **A lender funds the offer.** The lender provides the principal to the borrower. The loan is now active and its deadline is fixed.
 3. **The borrower repays.** The borrower repays the principal plus the fee in one transaction, and the collateral is released back to them.
@@ -31,6 +36,7 @@ The contract has no price feed. A fall in the collateral's price during the term
 
 ## Documentation map
 
+- [Private loans](./private-loans/guide.md) — confidential offers, borrower/lender workflow, and recovery
 - [Simplicity](./simplicity.md) — the language the contracts are written in
 - [Roles](./protocol/roles.md) — the token that makes someone a borrower or a lender
 - [Actions](./protocol/actions.md) — what each role can do, and when

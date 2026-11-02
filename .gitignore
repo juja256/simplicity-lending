@@ -18,3 +18,4 @@ configuration.yaml
 .pnpm-store/
 seed.*.txt
 *.swp
+deployment/configs/compose.env
