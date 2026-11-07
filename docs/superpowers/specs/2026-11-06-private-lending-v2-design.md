@@ -53,13 +53,23 @@ Builds on [the v1 design](2026-10-28-private-lending-design.md) and
      - a liveness test: random installment sequences, after each of which the full repayment
        and the liquidation (after the term) still succeed.
 
-4. **Fix M-01 of the 2026-11-02 review (acceptance after expiry, then immediate liquidation).**
+4. **Decide on M-01 of the 2026-11-02 review (acceptance after expiry, then immediate liquidation).**
+   Not critical for private loans: only the addressed lender knows the terms and can accept, that
+   lender is a counterparty the borrower chose and can identify (signed offers, directory), the
+   borrower can cancel at any time, and the user guide already documents the behaviour. The harm
+   needs a borrower who leaves an offer pending into its expiry window; the loss is then the
+   collateral's excess over the principal. It matters more in the public contract, where anyone
+   can accept a stale offer. Options, cheapest first: keep the behaviour and harden the app (warn
+   about pending offers near expiry, refuse to create offers with little time left, offer
+   cancellation); add the watchtower deadline below; change the contract for a guaranteed
+   duration.
    - Guaranteed duration: liquidation needs a relative timelock on the active offer's own input,
      measured from acceptance. Not `jet::check_lock_distance` / `check_lock_duration`: they
      compare against the maximum relative lock over all inputs, which a liquidator meets with an
      old coin of its own. Check `jet::current_sequence()` (disable bit and type bit, low 16 bits
      at least the duration) and `jet::version() ≥ 2`. Blocks give up to about 45 days on Liquid,
-     512-second units up to about 388 days. The same bug is in the public `lending.simf`.
+     512-second units up to about 388 days. Costs: no absolute maturity date until acceptance
+   confirms, and the duration caps. The same behaviour is in the public `lending.simf`.
    - Acceptance deadline without a contract change: at creation the borrower signs a cancellation
      with a relative lock on the pending input and hands it to a watchtower (or the indexer),
      which broadcasts it when the lock expires. The fee comes from a small coin made by the
@@ -71,8 +81,8 @@ Builds on [the v1 design](2026-10-28-private-lending-design.md) and
    a cancellation leaf), each pinning that lender's principal, active collateral and active
    program; the first acceptance wins. Each lender derives its secret from the same collateral
    nonce, so no extra keys go on chain. A lender's safety depends only on its own leaf. Pad the
-   tree and the view tags to a fixed size to hide the number of lenders. It multiplies M-01 by
-   the number of lenders, so it needs item 4 first. Pending and active as separate programs
+   tree and the view tags to a fixed size to hide the number of lenders. Every addressed lender
+   holds the M-01 option, so the item 4 decision covers all of them. Pending and active as separate programs
    (instead of the `is_active` slot) make the leaves simple.
 
 6. **Private messages between the parties, carried in range proofs.**
