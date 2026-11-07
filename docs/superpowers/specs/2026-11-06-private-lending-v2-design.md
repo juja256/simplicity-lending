@@ -16,8 +16,6 @@ Builds on [the v1 design](2026-10-28-private-lending-design.md) and
      reveals its CMR, which depends on the expiry. The secret must therefore sit in the same
      pruned subtree as the time check and actually enter its CMR. Equivalent: a parameter
      `H(salt ‖ expiry)` with the expiry and the salt in the liquidation witness.
-   - Item 4 turns the expiry into a duration; it is as easy to brute-force and needs the same
-     secret.
 
 2. **Fix address reuse in the private flows.**
    The web app always receives at the wallet's first address (`wollet.address(0)`,
@@ -53,28 +51,16 @@ Builds on [the v1 design](2026-10-28-private-lending-design.md) and
      - a liveness test: random installment sequences, after each of which the full repayment
        and the liquidation (after the term) still succeed.
 
-4. **Decide on M-01 of the 2026-11-02 review (acceptance after expiry, then immediate liquidation).**
+4. **M-01 of the 2026-11-02 review (acceptance after expiry, then immediate liquidation): no
+   change, decided 2026-11-07.**
    Not critical for private loans: only the addressed lender knows the terms and can accept, that
    lender is a counterparty the borrower chose and can identify (signed offers, directory), the
-   borrower can cancel at any time, and the user guide already documents the behaviour. The harm
-   needs a borrower who leaves an offer pending into its expiry window; the loss is then the
-   collateral's excess over the principal. It matters more in the public contract, where anyone
-   can accept a stale offer. Options, cheapest first: keep the behaviour and harden the app (warn
-   about pending offers near expiry, refuse to create offers with little time left, offer
-   cancellation); add the watchtower deadline below; change the contract for a guaranteed
-   duration.
-   - Guaranteed duration: liquidation needs a relative timelock on the active offer's own input,
-     measured from acceptance. Not `jet::check_lock_distance` / `check_lock_duration`: they
-     compare against the maximum relative lock over all inputs, which a liquidator meets with an
-     old coin of its own. Check `jet::current_sequence()` (disable bit and type bit, low 16 bits
-     at least the duration) and `jet::version() ≥ 2`. Blocks give up to about 45 days on Liquid,
-     512-second units up to about 388 days. Costs: no absolute maturity date until acceptance
-   confirms, and the duration caps. The same behaviour is in the public `lending.simf`.
-   - Acceptance deadline without a contract change: at creation the borrower signs a cancellation
-     with a relative lock on the pending input and hands it to a watchtower (or the indexer),
-     which broadcasts it when the lock expires. The fee comes from a small coin made by the
-     creation transaction; the collateral returns to a fresh address. Only interactive
-     acceptance removes the lender's option entirely.
+   borrower can cancel at any time, and the user guide documents the behaviour. The app already
+   hides acceptance after expiry, and that is enough; a lender building its own transaction
+   outside the app can still do it. If this is ever revisited: a liquidation lock relative to
+   acceptance must check the active input's own `jet::current_sequence()` and `jet::version() ≥
+   2`, not `jet::check_lock_distance` / `check_lock_duration`, which take the maximum relative
+   lock over all inputs and are met by any old coin added to the transaction.
 
 5. **Offers to several lenders, one collateral lock.**
    Idea raised: the pending offer becomes a taproot tree with one acceptance leaf per lender (and
@@ -82,7 +68,7 @@ Builds on [the v1 design](2026-10-28-private-lending-design.md) and
    program; the first acceptance wins. Each lender derives its secret from the same collateral
    nonce, so no extra keys go on chain. A lender's safety depends only on its own leaf. Pad the
    tree and the view tags to a fixed size to hide the number of lenders. Every addressed lender
-   holds the M-01 option, so the item 4 decision covers all of them. Pending and active as separate programs
+   holds the M-01 option; item 4 covers them all. Pending and active as separate programs
    (instead of the `is_active` slot) make the leaves simple.
 
 6. **Private messages between the parties, carried in range proofs.**
@@ -130,8 +116,6 @@ Builds on [the v1 design](2026-10-28-private-lending-design.md) and
 - What a borrower decides when making a partial repayment, and what they get back. (With 3(a):
   only the amount, and nothing until the full repayment; with 3(b): the amount and the
   collateral released within the proportion.)
-- Whether pending offers stay standing commitments (cancellation only) or get the watchtower
-  deadline of item 4.
 - Where the per-lender sections of item 5 live: the collateral range proof with a wrapped viewing
   key in the marker, OP_RETURN (check Elements' relay limits), or the indexer as a mailbox of
   ciphertexts.
