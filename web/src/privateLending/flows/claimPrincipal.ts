@@ -4,9 +4,9 @@
 //   outputs  0 the borrower NFT back to the borrower, explicit, 1 the principal to the borrower,
 //            blinded to its wallet; change and fee follow.
 // The borrower NFT is an explicit output at a wallet address. LWK lists only blinded coins as
-// the wallet's, so it is spent as an external UTXO; LWK still recognizes its script, so the
-// wallet signs and finalizes it.
-import type { Address, WalletTxOut } from '@lilbonekit/lwk-web'
+// the wallet's, so it is spent as a plain input, not a wallet coin; LWK still recognizes its
+// script, so the wallet signs and finalizes it.
+import type { Address, WalletTxOut } from 'lwk_wasm'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
@@ -27,6 +27,7 @@ import type { VerifiedOffer } from '../verify'
 import {
   assertAllInputsFinalized,
   assertSpendLayout,
+  buildUnblindedPset,
   fetchPrevoutTxs,
   outpointOf,
   parseOutpoint,
@@ -34,6 +35,7 @@ import {
   prevoutsOf,
   requireOutput,
   type SpendLayout,
+  walletCoinInput,
   wasmStep,
 } from './shared'
 
@@ -160,43 +162,45 @@ export async function buildPrincipalClaim(
   // The transactions of the fee coins: finalization needs every prevout.
   const feePrevoutTxs = await fetchPrevoutTxs(deps, feeInputs)
 
-  // 3. The unblinded PSET.
-  let builder = new lwk.TxBuilder(deps.network)
-  if (deps.feeRate !== null) builder = builder.feeRate(deps.feeRate)
-  builder = builder
-    .setWalletUtxos(feeInputs.map(outpoint => new lwk.OutPoint(outpoint)))
-    .setInputOrder(inputs.map(outpoint => new lwk.OutPoint(outpoint)))
-    .addExternalUtxos([
-      new lwk.ExternalUtxo(
-        principalRef.vout,
-        principalTx,
-        pinnedTxOutSecrets(deps, principal),
-        ASSET_AUTH_MAX_WEIGHT_TO_SATISFY,
-        true,
-      ),
-      new lwk.ExternalUtxo(
-        nftRef.vout,
-        nftTx,
-        lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(borrowerNft), NFT_AMOUNT),
-        EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
-        true,
-      ),
-    ])
-    .addPostIssuanceScriptOutput(
-      nftReceiver.scriptPubkey(),
-      NFT_AMOUNT,
-      lwk.AssetId.fromString(borrowerNft),
-    )
-    .addPostIssuanceRecipient(
-      principalReceiver,
-      principal.amount,
-      lwk.AssetId.fromString(principal.asset),
-    )
-    // last, so that no later builder call can reset it
-    .skipBlinding()
-  const unblinded = builder.finish(deps.wollet)
+  // 3. The unblinded PSET: the inputs and the leading outputs in layout order.
+  const feePrevouts = prevoutsOf(feePrevoutTxs, feeInputs)
+  const unblinded = buildUnblindedPset(deps, {
+    inputs: [
+      {
+        outpoint: new lwk.OutPoint(principalInput),
+        prevout: requireOutput(principalTx, principalRef.vout, 'The principal'),
+        asset: lwk.AssetId.fromString(principal.asset),
+        amount: principal.amount,
+        secrets: pinnedTxOutSecrets(deps, principal),
+        maxWeightToSatisfy: ASSET_AUTH_MAX_WEIGHT_TO_SATISFY,
+      },
+      {
+        outpoint: new lwk.OutPoint(nftInput),
+        prevout: requireOutput(nftTx, nftRef.vout, 'The borrower NFT'),
+        asset: lwk.AssetId.fromString(borrowerNft),
+        amount: NFT_AMOUNT,
+        secrets: lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(borrowerNft), NFT_AMOUNT),
+        maxWeightToSatisfy: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
+      },
+      ...params.feeCoins.map((coin, index) => walletCoinInput(deps, coin, feePrevouts[index])),
+    ],
+    outputs: [
+      {
+        script: nftReceiver.scriptPubkey(),
+        amount: NFT_AMOUNT,
+        asset: lwk.AssetId.fromString(borrowerNft),
+      },
+      {
+        script: principalReceiver.scriptPubkey(),
+        amount: principal.amount,
+        asset: lwk.AssetId.fromString(principal.asset),
+        blindingPubkey: principalReceiver.blindingPubkey(),
+      },
+    ],
+    changeAddress: deps.wollet.change(null).address(),
+  })
 
-  // 4. The layout LWK built.
+  // 4. The layout of the unblinded PSET.
   assertSpendLayout(deps, unblinded, layout, false, 'Principal claim')
 
   // 5. Blinding: the principal input's secrets are the pinned ones; every output is fresh.

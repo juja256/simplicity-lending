@@ -5,7 +5,7 @@
 //            2… collateral coins;
 //   outputs  0 borrower NFT to the borrower, 1 lender NFT at the lender-NFT lock, 2 OP_RETURN
 //            marker, 3 pending offer; change and fee follow.
-import type { Address, Contract, WalletTxOut } from '@lilbonekit/lwk-web'
+import type { Address, Contract, WalletTxOut } from 'lwk_wasm'
 
 import type { AsyncUpdatedPset } from '@/lwk/updatedPset'
 import {
@@ -21,7 +21,16 @@ import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 import type { PrivateFlowDeps } from '../deps'
 import { walletInputSecret } from '../secrets'
 import { openAndVerifyOffer, PrivateOfferError, type VerifiedOffer } from '../verify'
-import { assertSpendLayout, outpointOf, type SpendLayout, wasmStep } from './shared'
+import {
+  assertSpendLayout,
+  buildUnblindedPset,
+  fetchPrevoutTxs,
+  outpointOf,
+  prevoutsOf,
+  type SpendLayout,
+  walletCoinInput,
+  wasmStep,
+} from './shared'
 
 /**
  * The NFTs' asset contracts, never published. What matters is their fresh issuer key: it gives
@@ -125,18 +134,19 @@ export async function buildPrivateCreation(
     params.borrowerNftReceiver.toString(),
     deps.network,
   ).toUnconfidential()
+  // The transactions of the coins: the PSET carries every input's prevout.
+  const prevoutTxs = await fetchPrevoutTxs(deps, outpoints)
 
-  // 1. Fresh NFT contracts, and the ids they give before the transaction exists.
-  const borrowerNftContract = freshNftContract(deps, 'borrower')
-  const lenderNftContract = freshNftContract(deps, 'lender')
-  const borrowerNft = wasm.issuedAssetId(
-    firstInput,
-    wasm.contractHashFromJson(borrowerNftContract.toString()),
+  // 1. Fresh NFT contracts, and the ids they give before the transaction exists. The PSET issues
+  // with the same contract hashes, so its issuances give exactly these ids.
+  const borrowerNftContractHash = wasm.contractHashFromJson(
+    freshNftContract(deps, 'borrower').toString(),
   )
-  const lenderNft = wasm.issuedAssetId(
-    lenderNftInput,
-    wasm.contractHashFromJson(lenderNftContract.toString()),
+  const lenderNftContractHash = wasm.contractHashFromJson(
+    freshNftContract(deps, 'lender').toString(),
   )
+  const borrowerNft = wasm.issuedAssetId(firstInput, borrowerNftContractHash)
+  const lenderNft = wasm.issuedAssetId(lenderNftInput, lenderNftContractHash)
 
   // 2. The offer: terms signed for the lender, pinned blinders, the marker.
   const terms = new wasm.OfferTermsInput(
@@ -176,12 +186,6 @@ export async function buildPrivateCreation(
       toPrivateOfferArguments(newOffer.contractArguments()),
       deps.network,
     )
-    const lenderNftLock = lwk.TxOut.fromExplicit(
-      scripts.lenderNftLock,
-      lwk.AssetId.fromString(lenderNft),
-      NFT_AMOUNT,
-    ).unconfidentialAddress(deps.network)
-    if (!lenderNftLock) throw new Error('The lender NFT lock has no address')
     const pendingOffer = new lwk.Address(
       wasmStep('The pending offer address', () =>
         wasm.confidentialAddress(
@@ -232,37 +236,45 @@ export async function buildPrivateCreation(
       policyAsset: deps.assets.policy,
     }
 
-    // 4. The unblinded PSET.
-    let builder = new lwk.TxBuilder(deps.network)
-    if (deps.feeRate !== null) builder = builder.feeRate(deps.feeRate)
-    builder = builder
-      .setWalletUtxos(outpoints.map(outpoint => new lwk.OutPoint(outpoint)))
-      .setInputOrder(outpoints.map(outpoint => new lwk.OutPoint(outpoint)))
-      .issueAssetToRecipients(
-        [lwk.IssuanceRecipient.fromAddress(NFT_AMOUNT, borrowerNftReceiver)],
-        NO_REISSUANCE_TOKEN,
-        null,
-        borrowerNftContract,
-        new lwk.OutPoint(firstInput),
-      )
-      .issueAssetToRecipients(
-        [lwk.IssuanceRecipient.fromAddress(NFT_AMOUNT, lenderNftLock)],
-        NO_REISSUANCE_TOKEN,
-        null,
-        lenderNftContract,
-        new lwk.OutPoint(lenderNftInput),
-      )
-      .addPostIssuanceScriptOutput(marker, 0n, lwk.AssetId.fromString(deps.assets.policy))
-      .addPostIssuanceRecipient(
-        pendingOffer,
-        params.collateralAmount,
-        lwk.AssetId.fromString(deps.assets.collateral),
-      )
-      // last, so that no later builder call can reset it
-      .skipBlinding()
-    const unblinded = builder.finish(deps.wollet)
+    // 4. The unblinded PSET: the wallet coins in `layout.inputs` order, inputs 0 and 1 each
+    // issuing one unit of its NFT without a reissuance token; the outputs in layout order.
+    const nftContractHashes = [borrowerNftContractHash, lenderNftContractHash]
+    const prevouts = prevoutsOf(prevoutTxs, outpoints)
+    const unblinded = buildUnblindedPset(deps, {
+      inputs: coins.map((coin, index) => ({
+        ...walletCoinInput(deps, coin, prevouts[index]),
+        issuance:
+          index < nftContractHashes.length
+            ? {
+                assetAmount: NFT_AMOUNT,
+                tokenAmount: NO_REISSUANCE_TOKEN,
+                contractHash: lwk.ContractHash.fromString(nftContractHashes[index]),
+              }
+            : undefined,
+      })),
+      outputs: [
+        {
+          script: borrowerNftReceiver.scriptPubkey(),
+          amount: NFT_AMOUNT,
+          asset: lwk.AssetId.fromString(borrowerNft),
+        },
+        {
+          script: scripts.lenderNftLock,
+          amount: NFT_AMOUNT,
+          asset: lwk.AssetId.fromString(lenderNft),
+        },
+        { script: marker, amount: 0n, asset: lwk.AssetId.fromString(deps.assets.policy) },
+        {
+          script: pendingOffer.scriptPubkey(),
+          amount: params.collateralAmount,
+          asset: lwk.AssetId.fromString(deps.assets.collateral),
+          blindingPubkey: pendingOffer.blindingPubkey(),
+        },
+      ],
+      changeAddress: deps.wollet.change(null).address(),
+    })
 
-    // 5. The layout LWK built.
+    // 5. The layout of the unblinded PSET.
     assertSpendLayout(deps, unblinded, layout, false, 'Creation')
 
     // 6. Blinding: the pending collateral with its pinned blinders, the rest freshly.

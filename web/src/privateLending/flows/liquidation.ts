@@ -8,14 +8,13 @@
 // and `check_lock_height(LOAN_EXPIRATION_TIME)`: the transaction's nLockTime must be a height at
 // least the expiry, and some input must not be final, or Simplicity reads the lock time as 0. As
 // the contracts' core does, the lock time is the expiry and the offer input's sequence is
-// ENABLE_LOCKTIME_NO_RBF; LWK's defaults (lock time 0, every sequence final) would fail. Consensus
-// then admits the transaction from the block after the expiry, so the builder refuses, before
-// building anything, while the tip is below the expiry.
+// ENABLE_LOCKTIME_NO_RBF; `buildPset`'s defaults (lock time 0, every sequence final) would fail.
+// Consensus then admits the transaction from the block after the expiry, so the builder refuses,
+// before building anything, while the tip is below the expiry.
 // The lender NFT is an explicit output at a wallet address (the acceptance's output 2), which LWK
-// does not list among the wallet's coins, so it is spent as an external UTXO that the wallet still
-// signs. The collateral is paid explicitly: LWK would put the change of any asset but the policy
-// asset before the burn.
-import type { Address, WalletTxOut } from '@lilbonekit/lwk-web'
+// does not list among the wallet's coins, so it is spent as a plain input, not a wallet coin, that
+// the wallet still signs.
+import type { Address, WalletTxOut } from 'lwk_wasm'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
@@ -38,6 +37,7 @@ import type { VerifiedOffer } from '../verify'
 import {
   assertAllInputsFinalized,
   assertSpendLayout,
+  buildUnblindedPset,
   burnScript,
   fetchPrevoutTxs,
   outpointOf,
@@ -46,6 +46,7 @@ import {
   prevoutsOf,
   requireOutput,
   type SpendLayout,
+  walletCoinInput,
   wasmStep,
 } from './shared'
 
@@ -212,41 +213,44 @@ export async function buildPrivateLiquidation(
   // The transactions of the fee coins: finalization needs every prevout.
   const feePrevoutTxs = await fetchPrevoutTxs(deps, feeInputs)
 
-  // 4. The unblinded PSET.
-  let builder = new lwk.TxBuilder(deps.network)
-  if (deps.feeRate !== null) builder = builder.feeRate(deps.feeRate)
-  builder = builder
-    .setWalletUtxos(feeInputs.map(outpoint => new lwk.OutPoint(outpoint)))
-    .setInputOrder(inputs.map(outpoint => new lwk.OutPoint(outpoint)))
-    .addExternalUtxos([
-      new lwk.ExternalUtxo(
-        offerRef.vout,
-        offerTx,
-        pinnedTxOutSecrets(deps, activeCollateral),
-        PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.Liquidation,
-        true,
-      ),
-      new lwk.ExternalUtxo(
-        nftRef.vout,
-        nftTx,
-        lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(lenderNft), NFT_AMOUNT),
-        EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
-        true,
-      ),
-    ])
-    .addPostIssuanceScriptOutput(burn, NFT_AMOUNT, lwk.AssetId.fromString(lenderNft))
-    .addPostIssuanceRecipient(
-      collateralReceiver,
-      activeCollateral.amount,
-      lwk.AssetId.fromString(activeCollateral.asset),
-    )
-    .skipBlinding()
-  builder = wasmStep('Setting the lock time', () => builder.setFallbackLocktimeHeight(expiration))
-    // after every other builder call, which would reset it (LWK's `setInputSequence`)
-    .setInputSequence(new lwk.OutPoint(offerInput), LOCK_TIME_ENABLING_SEQUENCE)
-  const unblinded = builder.finish(deps.wollet)
+  // 4. The unblinded PSET: the inputs and the leading outputs in layout order, the lock time at
+  // the expiry and the offer input's sequence enabling it.
+  const feePrevouts = prevoutsOf(feePrevoutTxs, feeInputs)
+  const unblinded = buildUnblindedPset(deps, {
+    inputs: [
+      {
+        outpoint: new lwk.OutPoint(offerInput),
+        prevout: requireOutput(offerTx, offerRef.vout, 'The active offer'),
+        asset: lwk.AssetId.fromString(activeCollateral.asset),
+        amount: activeCollateral.amount,
+        secrets: pinnedTxOutSecrets(deps, activeCollateral),
+        sequence: LOCK_TIME_ENABLING_SEQUENCE,
+        maxWeightToSatisfy: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.Liquidation,
+      },
+      {
+        outpoint: new lwk.OutPoint(nftInput),
+        prevout: requireOutput(nftTx, nftRef.vout, 'The lender NFT'),
+        asset: lwk.AssetId.fromString(lenderNft),
+        amount: NFT_AMOUNT,
+        secrets: lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(lenderNft), NFT_AMOUNT),
+        maxWeightToSatisfy: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
+      },
+      ...params.feeCoins.map((coin, index) => walletCoinInput(deps, coin, feePrevouts[index])),
+    ],
+    outputs: [
+      { script: burn, amount: NFT_AMOUNT, asset: lwk.AssetId.fromString(lenderNft) },
+      {
+        script: collateralReceiver.scriptPubkey(),
+        amount: activeCollateral.amount,
+        asset: lwk.AssetId.fromString(activeCollateral.asset),
+        blindingPubkey: collateralReceiver.blindingPubkey(),
+      },
+    ],
+    changeAddress: deps.wollet.change(null).address(),
+    lockTime: expiration,
+  })
 
-  // 5. The layout LWK built, with the lock time and the offer input's sequence.
+  // 5. The layout of the unblinded PSET, with the lock time and the offer input's sequence.
   assertSpendLayout(deps, unblinded, layout, false, 'Liquidation')
 
   // 6. Blinding: the offer input's secrets are the pinned ones; every output is fresh.
