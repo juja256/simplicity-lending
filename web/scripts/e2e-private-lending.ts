@@ -15,7 +15,7 @@
 import { randomBytes } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 
-import * as lwk from '@lilbonekit/lwk-web'
+import * as lwk from 'lwk_wasm'
 
 import { ApiError } from '@/api/errors'
 import {

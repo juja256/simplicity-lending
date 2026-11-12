@@ -2,7 +2,7 @@
 // broadcast, with the same progress steps), but saves the finalized transaction before it is
 // broadcast. A failed broadcast leaves it saved, and `retryBroadcast` sends that same hex again:
 // a creation draws fresh NFTs on every build, so rebuilding would make a different offer.
-import { Transaction } from '@lilbonekit/lwk-web'
+import { Transaction } from 'lwk_wasm'
 import { useCallback } from 'react'
 
 import { ApiError } from '@/api/errors'

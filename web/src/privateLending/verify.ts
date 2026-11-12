@@ -1,7 +1,7 @@
 // The verification gate: the only producer of a `VerifiedOffer`. Every builder that spends an
 // offer takes one, so an offer that was not opened with the user's key and checked against the
 // addresses of its own terms can never be spent.
-import type { Transaction } from '@lilbonekit/lwk-web'
+import type { Transaction } from 'lwk_wasm'
 
 import {
   type PrivateOfferScripts,

@@ -1,4 +1,4 @@
-import type { Network } from '@lilbonekit/lwk-web'
+import type { Network } from 'lwk_wasm'
 import { sources } from 'virtual:simplicity-sources'
 
 import {
