@@ -1,6 +1,6 @@
 // The private lending witness and input weights. Free of `virtual:simplicity-sources`, so the
 // DOM-free private flow builders and Node can use them; `program.ts` re-exports them.
-import { SimplicityType, SimplicityTypedValue, SimplicityWitnessValues } from '@lilbonekit/lwk-web'
+import { SimplicityType, SimplicityTypedValue, SimplicityWitnessValues } from 'lwk_wasm'
 
 export type PrivateLendingBranch =
   | 'OfferAcceptance'

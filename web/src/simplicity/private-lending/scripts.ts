@@ -10,7 +10,7 @@ import {
   type StateTaprootSpendInfo,
   type Transaction,
   XOnlyPublicKey,
-} from '@lilbonekit/lwk-web'
+} from 'lwk_wasm'
 
 import { buildAssetAuthArguments } from '@/simplicity/asset-auth/arguments'
 import { buildScriptAuthArguments } from '@/simplicity/script-auth/arguments'
@@ -60,6 +60,13 @@ export function toPrivateOfferArguments(args: ContractArguments): PrivateOfferAr
   }
 }
 
+// With debug symbols, as the Rust contracts compile them: simplex calls simplicityhl's
+// `CompiledProgram::new` with them, and they change the CMR, so without them the offer scripts
+// would differ from Rust's. Upstream's public programs load the same way.
+function loadProgram(source: string, args: SimplicityArguments): SimplicityProgram {
+  return SimplicityProgram.loadWithDebugSymbols(source, args, true)
+}
+
 function scriptHash(program: SimplicityProgram): string {
   return buildCovenantSpendInfo(program).scriptPubkey.jet_sha256_hex()
 }
@@ -93,7 +100,7 @@ export function privateAssetAuthProgram(
   nftAssetId: string,
   withAssetBurn: boolean,
 ): SimplicityProgram {
-  return SimplicityProgram.load(
+  return loadProgram(
     sources.assetAuth,
     buildAssetAuthArguments({
       assetId: toBytes32(hexToBytes(nftAssetId), 'assetId'),
@@ -108,7 +115,7 @@ export function lenderNftLockProgram(
   sources: PrivateLendingSources,
   pendingOffer: Script,
 ): SimplicityProgram {
-  return SimplicityProgram.load(
+  return loadProgram(
     sources.scriptAuth,
     buildScriptAuthArguments(
       toBytes32(hexToBytes(pendingOffer.jet_sha256_hex()), 'pendingOfferScriptHash'),
@@ -128,7 +135,7 @@ export function privateOfferScripts(
     privateAssetAuthProgram(sources, args.lenderNftAssetId, true),
   )
 
-  const program = SimplicityProgram.load(
+  const program = loadProgram(
     sources.privateLending,
     new SimplicityArguments()
       .addValue('BORROWER_NFT_ASSET_ID', u256(args.borrowerNftAssetId))

@@ -1,5 +1,5 @@
 // Esplora access for the e2e run.
-import { Transaction } from '@lilbonekit/lwk-web'
+import { Transaction } from 'lwk_wasm'
 
 import { getRecord, saveRecord } from './state'
 

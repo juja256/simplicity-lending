@@ -1,5 +1,5 @@
 // Free of `virtual:simplicity-sources`, so the DOM-free private flow builders and Node can use it.
-import { SimplicityTypedValue, SimplicityWitnessValues } from '@lilbonekit/lwk-web'
+import { SimplicityTypedValue, SimplicityWitnessValues } from 'lwk_wasm'
 
 import type { Uint32 } from '@/utils/uint'
 

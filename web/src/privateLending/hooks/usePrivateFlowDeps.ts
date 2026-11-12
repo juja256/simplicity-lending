@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback } from 'react'
 import { sources } from 'virtual:simplicity-sources'
 
-import { fetchFeeRateSatPerKvb } from '@/api/esplora/fee'
+import { FALLBACK_FEE_RATE_SAT_PER_KVB, fetchFeeRateSatPerKvb } from '@/api/esplora/fee'
 import { fetchLatestBlockHeight, fetchTxRaw } from '@/api/esplora/methods'
 import { esploraQueryKeys } from '@/api/esplora/queryKeys'
 import { env } from '@/constants/env'
@@ -32,10 +32,22 @@ const PRIVATE_SOURCES: PrivateLendingSources = {
 const FEE_RATE_STALE_MS = 30_000
 
 /**
+ * The fee rate a build pays, in sat/kvb: esplora's estimate if it is a finite number above zero,
+ * else `FALLBACK_FEE_RATE_SAT_PER_KVB`. Esplora's answer passes through unchecked, so it can be
+ * negative or infinite (`1e999` parses as `Infinity`), and the query it shares with the public
+ * modals may hold anything.
+ */
+function usableFeeRate(estimate: unknown): number {
+  return typeof estimate === 'number' && Number.isFinite(estimate) && estimate > 0
+    ? estimate
+    : FALLBACK_FEE_RATE_SAT_PER_KVB
+}
+
+/**
  * A function that assembles fresh `PrivateFlowDeps` for one build or scan: the connected wallet's
  * `Wollet` and coins, esplora's transactions (checked against the requested txid), its tip height
- * and its fee rate in sat/kvb (as the public modals pass it to `TxBuilder.feeRate`). Rejects while
- * no wallet is connected. Sync the wallet first when its coins must be current.
+ * and its fee rate in sat/kvb (`usableFeeRate`; a failed fee query also gives the fallback).
+ * Rejects while no wallet is connected. Sync the wallet first when its coins must be current.
  */
 export function usePrivateFlowDeps(): () => Promise<PrivateFlowDeps> {
   const { lwkNetwork, network } = useLwk()
@@ -47,11 +59,13 @@ export function usePrivateFlowDeps(): () => Promise<PrivateFlowDeps> {
       getLwk(),
       getPrivateLendingWasm(),
       getWollet(),
-      queryClient.fetchQuery({
-        queryKey: esploraQueryKeys.feeRate,
-        queryFn: () => fetchFeeRateSatPerKvb(),
-        staleTime: FEE_RATE_STALE_MS,
-      }),
+      queryClient
+        .fetchQuery({
+          queryKey: esploraQueryKeys.feeRate,
+          queryFn: () => fetchFeeRateSatPerKvb(),
+          staleTime: FEE_RATE_STALE_MS,
+        })
+        .then(usableFeeRate, () => FALLBACK_FEE_RATE_SAT_PER_KVB),
     ])
     return {
       lwk,

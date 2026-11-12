@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import * as lwk from '@lilbonekit/lwk-web'
+import * as lwk from 'lwk_wasm'
 
 import { createWaterfallsRecipientResolver } from '@/lwk/waterfallsRecipient'
 import { createLendingKeyHolder } from '@/privateLending/lendingKeyHolder'
@@ -88,9 +88,7 @@ function hex(script: lwk.Script): string {
 
 async function main(): Promise<void> {
   await lwk.default({
-    module_or_path: fs.readFileSync(
-      path.join(webRoot, 'node_modules/@lilbonekit/lwk-web/lwk_wasm_bg.wasm'),
-    ),
+    module_or_path: fs.readFileSync(path.join(webRoot, 'node_modules/lwk_wasm/lwk_wasm_bg.wasm')),
   })
   await wasm.default({
     module_or_path: fs.readFileSync(

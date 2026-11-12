@@ -1,4 +1,4 @@
-import { SimplicityArguments, SimplicityTypedValue } from '@lilbonekit/lwk-web'
+import { SimplicityArguments, SimplicityTypedValue } from 'lwk_wasm'
 
 import { bytes32ToHex } from '@/utils/hex'
 import type { Bytes32 } from '@/utils/uint'

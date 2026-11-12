@@ -1,6 +1,6 @@
 // The shape every transaction builder returns. Free of app imports, so the DOM-free private flow
 // builders and the Node e2e script can use it.
-import type { Pset, Transaction } from '@lilbonekit/lwk-web'
+import type { Pset, Transaction } from 'lwk_wasm'
 
 // PSBT/PSET roles (BIP174): Creator+Constructor+Updater have already run by the time a
 // domain hook hands back `pset` — it has inputs, outputs, and signing data, just no
