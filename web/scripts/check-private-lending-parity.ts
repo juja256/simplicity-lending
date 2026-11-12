@@ -1,13 +1,16 @@
 // Proves that the browser (LWK + the private-lending wasm) derives the same offer addresses
 // as the Rust code. Run it with `pnpm parity`; it must pass before browser addresses are relied on.
-// It also checks, offline, the rules of the app's lending-key holder (`checkLendingKeyHolder`).
+// It also checks, offline, the rules of the app's lending-key holder (`checkLendingKeyHolder`) and
+// the PSET builder's `'none'` blinding mode (`checkPsetBuilderNoneBlinding`).
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import * as lwk from 'lwk_wasm'
 
+import { buildPset, type PsetInputSpec } from '@/lwk/psetBuilder'
 import { createWaterfallsRecipientResolver } from '@/lwk/waterfallsRecipient'
+import { inspectPset } from '@/privateLending/inspectPset'
 import { createLendingKeyHolder } from '@/privateLending/lendingKeyHolder'
 import * as wasm from '@/wasm/private-lending/private_lending_wasm'
 
@@ -192,8 +195,106 @@ async function main(): Promise<void> {
 
   await checkLendingKeyHolder()
   await checkWaterfallsRecipient()
+  checkPsetBuilderNoneBlinding()
 
   report('private lending parity: ok')
+}
+
+/**
+ * In `'none'` mode, `buildPset` (`src/lwk/psetBuilder.ts`) leaves blinding to the caller. The
+ * confidential outputs keep their blinding key, their blinder is the first `walletCoin` input
+ * (else input 0), and nothing is committed until the private wasm's `blindPset` blinds the PSET.
+ */
+function checkPsetBuilderNoneBlinding(): void {
+  const network = lwk.Network.testnet()
+  const policyAsset = network.policyAsset()
+  // The fixtures hold no address: this one is the lender NFT lock script, blinded to the lender.
+  const lender = wasm.LendingKey.fromMasterBlindingKey(fixture.lender_master_blinding_key)
+  const address = lwk.Address.parse(
+    wasm.confidentialAddress(
+      fixture.lender_nft_script_pubkey,
+      wasm.liftLendingKey(lender.xOnlyPublicKey()),
+      'liquidtestnet',
+    ),
+    network,
+  )
+  const coin = (vout: number, walletCoin: boolean): PsetInputSpec => ({
+    outpoint: new lwk.OutPoint(`${'11'.repeat(32)}:${vout}`),
+    prevout: lwk.TxOut.fromExplicit(address.scriptPubkey(), policyAsset, 100_000n),
+    asset: policyAsset,
+    amount: 100_000n,
+    maxWeightToSatisfy: 300,
+    walletCoin,
+  })
+  const build = (inputs: PsetInputSpec[]) =>
+    buildPset({
+      network,
+      inputs,
+      outputs: [
+        {
+          script: address.scriptPubkey(),
+          amount: 10_000n,
+          asset: policyAsset,
+          blindingPubkey: address.blindingPubkey(),
+        },
+      ],
+      changeAddress: address,
+      feeRateSatPerKvb: 100,
+      blinding: 'none',
+    })
+  const name = (what: string) => `pset builder 'none': ${what}`
+
+  const { pset, fee } = build([coin(0, true)])
+  const { outputs } = inspectPset(wasm, pset.toString())
+  check(name('recipient, change and fee outputs'), outputs.length === 3, `${outputs.length}`)
+  for (const [i, o] of outputs.slice(0, 2).entries()) {
+    check(
+      name(`output ${i} keeps its blinding key, blinder input 0`),
+      o.blindingKey !== null && o.blinderIndex === 0,
+      `key ${o.blindingKey}, blinder ${o.blinderIndex}`,
+    )
+    check(
+      name(`output ${i} is not blinded`),
+      o.assetCommitment === null && o.amountCommitment === null,
+    )
+  }
+  check(
+    name('the fee output'),
+    outputs[2].script === '' && outputs[2].amount === fee && fee > 0n,
+    `script '${outputs[2].script}', amount ${outputs[2].amount}, fee ${fee}`,
+  )
+  check(
+    name('the change'),
+    outputs[1].amount === 100_000n - 10_000n - fee,
+    `${outputs[1].amount}, fee ${fee}`,
+  )
+
+  const blinded = inspectPset(
+    wasm,
+    wasm.blindPset(
+      pset.toString(),
+      [wasm.InputSecret.explicit(0, policyAsset.toString(), 100_000n)],
+      [],
+    ),
+  )
+  for (const i of [0, 1]) {
+    const o = blinded.outputs[i]
+    check(
+      name(`blindPset commits output ${i}`),
+      o.assetCommitment !== null && o.amountCommitment !== null,
+    )
+  }
+
+  // Above, the only input is both the first walletCoin and input 0; these builds tell them apart.
+  const blinders = (inputs: PsetInputSpec[]) =>
+    inspectPset(wasm, build(inputs).pset.toString())
+      .outputs.slice(0, 2)
+      .map(o => o.blinderIndex)
+      .join(',')
+  const firstWalletCoin = blinders([coin(0, false), coin(1, true), coin(2, true)])
+  check(name('the first walletCoin input blinds'), firstWalletCoin === '1,1', firstWalletCoin)
+  const noWalletCoin = blinders([coin(0, false)])
+  check(name('without a walletCoin input, input 0 blinds'), noWalletCoin === '0,0', noWalletCoin)
 }
 
 /**
