@@ -1,6 +1,7 @@
 # Private lending v2 — design (draft)
 
-Status: collecting items. Not yet a design; nothing here is decided beyond the item list.
+Status: collecting items. Not yet a design; nothing here is decided beyond the item list, except
+the decisions recorded in items 7 to 10.
 
 Builds on [the v1 design](2026-10-28-private-lending-design.md) and
 `crates/contracts/simf/private_lending.simf`.
@@ -26,7 +27,8 @@ Builds on [the v1 design](2026-10-28-private-lending-design.md) and
      between one user's loans. `wollet.address(null)` (the last unused address) keeps the gap
      limit safe.
 
-3. **Add partial repayment, using Bulletproofs++ (BP++) proofs.**
+3. **Add partial repayment, using Bulletproofs++ (BP++) proofs. Both (a) and (b) are in v2,
+   decided 2026-11-12.**
    v1 reserves the partial-repayment branch and always fails it: releasing collateral in
    proportion to a hidden amount needs a zero-knowledge proof.
    - Split in two. (a) Installments only reduce the debt; the collateral stays locked until the
@@ -62,7 +64,8 @@ Builds on [the v1 design](2026-10-28-private-lending-design.md) and
    2`, not `jet::check_lock_distance` / `check_lock_duration`, which take the maximum relative
    lock over all inputs and are met by any old coin added to the transaction.
 
-5. **Offers to several lenders, one collateral lock.**
+5. **Offers to several lenders, one collateral lock. Not in v2, decided 2026-11-12;** borrowers
+   pick one lender (item 10).
    Idea raised: the pending offer becomes a taproot tree with one acceptance leaf per lender (and
    a cancellation leaf), each pinning that lender's principal, active collateral and active
    program; the first acceptance wins. Each lender derives its secret from the same collateral
@@ -110,6 +113,142 @@ Builds on [the v1 design](2026-10-28-private-lending-design.md) and
      Show it as plain text: no HTML or Markdown rendering, links not clickable, control and
      bidirectional characters removed, and a note that a message is not part of the terms and
      the contract does not enforce it (it may ask the reader to act outside the protocol).
+
+7. **Merge `origin/main` (BlockstreamResearch/simplicity-lending) before the other code items.**
+   Upstream has two commits this project lacks: #190 (manual and background sync share one
+   in-flight wallet scan) and #196 (the web app builds on upstream LWK, pinned as the `lwk` git
+   submodule and compiled by `web/scripts/build-lwk.sh`, instead of the `@lilbonekit/lwk-web`
+   fork). The merge touches the files the other code items change: `WalletProvider.tsx` (item 2)
+   and the private flows (items 1, 3, 5 and 6). It therefore goes first.
+   - A trial merge (`git merge-tree`, 2026-11-12) conflicts in 12 files: `.dockerignore`,
+     `README.md`, `web/README.md`, `deployment/Dockerfile.web`, `web/package.json`,
+     `web/src/lwk/index.ts`, `WalletProvider.tsx` and its `types.ts`, the asset-auth and
+     script-auth `program.ts`, and the two demo files this project deleted and upstream changed
+     (`web/src/pages/Demo/CreateOfferDemo.tsx`, `helpers.ts`). In `Dockerfile.web`, one Rust stage
+     can build both wasm packages, LWK's and `private-lending-wasm`.
+   - Most of the work is outside the conflicts. In the merged tree, 32 files still import the fork:
+     the private flows, the Simplicity bindings they use, and the parity and end-to-end scripts.
+     All seven flows (`web/src/privateLending/flows/`) build an unblinded PSET with the fork's
+     `TxBuilder` calls (`setInputOrder`, `addExternalUtxos`, `addPostIssuanceScriptOutput`,
+     `skipBlinding`), which #196 removed from upstream in favour of `web/src/lwk/psetBuilder.ts`,
+     and then blind it with the wasm `blindPset` and the pinned blinders. `psetBuilder.ts` either
+     blinds locally or leaves blinding to the wallet, so the port needs a third mode that leaves
+     blinding to the caller.
+   - Done when `pnpm parity` and `pnpm e2e:private` pass on the merged tree and item 2's reference
+     `WalletProvider.tsx:381` points at the merged line (`wollet.address(0)` is at line 353 in
+     upstream's version).
+
+Items 8 to 10 were discussed on 2026-11-12. They shift the app from a public lending market to
+targeted proposals. Lenders are a few large liquidity providers (banks, hedge funds, ETFs);
+borrowers are ordinary users. The demo is for institutional lenders, who should come away
+believing three things: they set their own terms and approve every loan, their loan book stays
+private (competitors and the public see no amounts, rates or borrowers), and the lender side is a
+professional tool. Choices marked *(proposed)* were not discussed and need confirming.
+
+8. **Remove public lending from the whole repository, after item 7.**
+   The app offers private lending only. The public code stays readable at a tag and upstream.
+   - Before removing anything, tag item 7's merge commit `public-lending-last` and push the tag
+     to the fork; `git checkout public-lending-last` brings back the public demo. Upstream keeps
+     developing public lending, so after the removal its changes are ported by hand: item 7 is
+     the last merge from upstream.
+   - Removed:
+     - web: the Borrow, Supply and Dashboard pages, the hooks only the public flows use
+       (`web/src/hooks/`), and the bindings of the public programs (`web/src/simplicity/lending`,
+       `asset-auth-vault`, `issuance-factory`); the Dashboard's private loans card moves to the
+       new areas of item 10;
+     - indexer: public offers and factories (trackers, endpoints, OpenAPI schemas), and a
+       migration that drops their tables;
+     - contracts: `lending.simf`, `asset_auth_vault.simf` and `issuance_factory.simf`, their
+       programs and tests, and the untracked `crates/contracts/tests/lending_security_audit.rs`;
+     - the CLI crate, whose commands (account, factory, issuance) are all public;
+     - docs site: the public borrower, lender and protocol pages (`docs/docs/borrower`, `lender`,
+       `protocol`, `schemas`) and the pages of the removed contracts in `docs/docs/contracts`.
+   - Kept: `private_lending`, and `asset_auth` and `script_auth`, which the private flows use; the
+     indexer's shared code, private offers and the directory; `docs/docs/private-loans`; the
+     security reports on public lending, which items 3 and 4 cite.
+   - The removal goes one layer at a time (web, indexer, contracts, CLI, docs). After each layer
+     the workspace builds and `pnpm parity` and `pnpm e2e:private` pass. The migration leaves the
+     private tables untouched.
+   - Item 2 keeps the first address for the public flows; with them gone, every receive can use a
+     fresh address.
+
+9. **Lenders publish their terms in the directory.**
+   A borrower does not negotiate: it picks a lender and proposes a loan within that lender's
+   published terms. The lender still reviews and accepts each proposal by hand; nothing is
+   accepted automatically.
+   - A lender registers in the directory with its display name and its terms, one set per asset
+     pair *(proposed: a list, though the demo needs only USDt against L-BTC)*:
+     - principal asset and collateral asset;
+     - minimum APR;
+     - reference price, in principal per unit of collateral;
+     - minimum collateral ratio at the reference price;
+     - term range, in days;
+     - principal range.
+   - The lending key signs the name and the terms together, as it signs the name now; the signed
+     message gets a new version. The entry records when its terms were last published. The
+     directory lists lenders only *(proposed)*: an entry without terms is not shown to borrowers,
+     and borrowers need no entry.
+   - There is no price oracle yet. The lender sets the reference price and keeps it current by
+     hand; both areas show when it was last published.
+   - The borrower's app does not let a proposal go below the lender's terms: a lower APR, less
+     collateral, or a term or principal outside the ranges. This is a convenience, not a guarantee.
+     A proposal built outside the app can break the terms, and the contract knows nothing of them.
+     The lender's console therefore checks each proposal against the lender's current terms and
+     flags the ones outside them. *(Proposed:)* the lender can still accept a flagged proposal
+     after an explicit warning.
+   - The terms are public: anyone can read a lender's rates. The loans stay private, as in v1.
+   - Arithmetic *(proposed)*. v1's `interest_rate_bps` is the interest over the whole term, and the
+     contract enforces only the repayment amount, so the APR is derived: `APR = (repayment −
+     principal) / principal · 365 / days`, with `days = (expiry height − creation height) / 1440`
+     (one-minute blocks). The borrower's app rounds the repayment up. The collateral ratio is
+     `collateral · reference price / principal`, in the assets' registry precision. One function
+     in `private-lending-core`, exposed through the wasm, serves both areas.
+
+10. **A lender console and a borrower app, on one site.**
+    The landing page has two entrances, "For lenders" and "For borrowers", and a link in each
+    area's header switches to the other. The route decides the area *(proposed: `/lend` and
+    `/borrow`)*; nothing remembers a role. Wireframes from the discussion:
+    `.superpowers/brainstorm/104035-1794482974/content/` (`lender-console.html`,
+    `borrower-app.html`; not committed).
+    - The lender console is a dense desktop layout with a sidebar. Its header shows the lender's
+      directory name, key fingerprint and connected signer. Sections:
+      - Proposals: a summary strip (proposals waiting, active loans, amount lent, collateral held,
+        loans due within seven days and overdue) and a table of pending proposals (received,
+        borrower fingerprint, principal, collateral, ratio at the reference price, APR, term, and
+        a "within terms" or "outside terms" badge naming the broken term). Review opens the
+        proposal with its terms, its message (item 6) and the acceptance, which the lender signs;
+        the app keeps hiding acceptance after expiry (item 4).
+      - Loan book: active, repaid and overdue loans, each with the action that applies (claim the
+        repayment, liquidate after expiry).
+      - Terms: item 9's terms, with "Sign and publish".
+      - Profile and key: display name, key fingerprint, and the key to share.
+    - The borrower app is a step-by-step flow that also works at phone width *(proposed)*:
+      1. Choose a lender: the borrower picks an asset pair, then a lender from the directory,
+         each shown with its name, key fingerprint, terms and when they were published.
+      2. Proposal: the form opens at the lender's minimums (collateral from the reference price
+         and ratio, the APR floor), with the principal and term limited to the lender's ranges,
+         and an optional private message (item 6). The borrower can offer more collateral or a
+         higher APR, never less. A summary says what they repay and by when, what happens if
+         they do not, and that they can cancel until the lender accepts. "Lock collateral and
+         send" creates the proposal.
+      3. My loans: one row per loan with its status and the one action that applies now (cancel
+         while pending, receive the principal after acceptance, repay while active), and the
+         loan's messages.
+    - The borrower app avoids protocol words ("offer", "NFT", "lending key") *(proposed)*, but
+      shows lender key fingerprints so that a borrower can check the counterparty.
+    - Out of scope for the demo: several staff accounts per lender, exports and reports, a price
+      oracle.
+
+## Scope of v2 (decided 2026-11-12)
+
+- In v2: items 1, 2, 3 (a and b), 6, 7, 8, 9 and 10. Item 4 needs no work beyond item 10's
+  console, which keeps hiding acceptance after expiry. Item 5 comes after v2.
+- No migration: the app knows only the v2 contract, and loans made on testnet with v1 are
+  dropped.
+- Items 1 and 3 both change `private_lending.simf`, so they share one contract revision: the
+  program's CMR, the parity script and the end-to-end run change once.
+- Item 1's salt and item 6's creation message both change the terms encoding, so they share one
+  version bump.
 
 ## Open questions
 
