@@ -5,9 +5,9 @@
 //   outputs  0 active offer, 1 principal at asset_auth(borrower NFT, 1, no burn): both pinned and
 //            blinded to the borrower's key; 2 lender NFT to the lender, explicit; 3 the principal
 //            change to the wallet, if any; then the policy-asset change and the fee.
-// LWK puts the change of any asset but the policy asset before the post-issuance outputs, so the
-// builder pays the principal change itself, after them (as the public acceptance does).
-import type { Address, WalletTxOut } from '@lilbonekit/lwk-web'
+// `buildPset` adds only the policy-asset change, after the given outputs, so the builder pays the
+// principal change itself, at output 3 (as the public acceptance does).
+import type { Address, WalletTxOut } from 'lwk_wasm'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
 import {
@@ -26,6 +26,7 @@ import type { VerifiedOffer } from '../verify'
 import {
   assertAllInputsFinalized,
   assertSpendLayout,
+  buildUnblindedPset,
   type ExpectedOutput,
   fetchPrevoutTxs,
   outpointOf,
@@ -33,6 +34,7 @@ import {
   prevoutsOf,
   requireOutput,
   type SpendLayout,
+  walletCoinInput,
   wasmStep,
 } from './shared'
 
@@ -149,7 +151,7 @@ export async function buildPrivateAcceptance(
     params.lenderNftReceiver.toString(),
     deps.network,
   ).toUnconfidential()
-  // the wallet's last unused address, confidential: the change is blinded to the wallet
+  // the wallet's last unused address, confidential: the principal change is blinded to the wallet
   const changeAddress = deps.wollet.address(null).address()
   const changeOutputs: ExpectedOutput[] =
     principalChange > 0n
@@ -203,55 +205,61 @@ export async function buildPrivateAcceptance(
   // The transactions of the wallet coins: finalization needs every prevout.
   const walletPrevoutTxs = await fetchPrevoutTxs(deps, walletInputs)
 
-  // 4. The unblinded PSET.
-  let builder = new lwk.TxBuilder(deps.network)
-  if (deps.feeRate !== null) builder = builder.feeRate(deps.feeRate)
-  builder = builder
-    .setWalletUtxos(walletInputs.map(outpoint => new lwk.OutPoint(outpoint)))
-    .setInputOrder(inputs.map(outpoint => new lwk.OutPoint(outpoint)))
-    .addExternalUtxos([
-      new lwk.ExternalUtxo(
-        CREATION_OUTPUT.pendingOffer,
-        creationTx,
-        pinnedTxOutSecrets(deps, pendingCollateral),
-        PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.OfferAcceptance,
-        true,
-      ),
-      new lwk.ExternalUtxo(
-        CREATION_OUTPUT.lenderNft,
-        creationTx,
-        lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(lenderNft), NFT_AMOUNT),
-        SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY,
-        true,
-      ),
-    ])
-    .addPostIssuanceRecipient(
-      activeOfferAddress,
-      activeCollateral.amount,
-      lwk.AssetId.fromString(activeCollateral.asset),
-    )
-    .addPostIssuanceRecipient(
-      principalAddress,
-      principal.amount,
-      lwk.AssetId.fromString(principal.asset),
-    )
-    .addPostIssuanceScriptOutput(
-      lenderNftReceiver.scriptPubkey(),
-      NFT_AMOUNT,
-      lwk.AssetId.fromString(lenderNft),
-    )
-  if (principalChange > 0n) {
-    builder = builder.addPostIssuanceRecipient(
-      changeAddress,
-      principalChange,
-      lwk.AssetId.fromString(principalAsset),
-    )
-  }
-  // last, so that no later builder call can reset it
-  builder = builder.skipBlinding()
-  const unblinded = builder.finish(deps.wollet)
+  // 4. The unblinded PSET: the inputs and the leading outputs in layout order.
+  const walletPrevouts = prevoutsOf(walletPrevoutTxs, walletInputs)
+  const unblinded = buildUnblindedPset(deps, {
+    inputs: [
+      {
+        outpoint: new lwk.OutPoint(offerInput),
+        prevout: requireOutput(creationTx, CREATION_OUTPUT.pendingOffer, 'The pending offer'),
+        asset: lwk.AssetId.fromString(pendingCollateral.asset),
+        amount: pendingCollateral.amount,
+        secrets: pinnedTxOutSecrets(deps, pendingCollateral),
+        maxWeightToSatisfy: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.OfferAcceptance,
+      },
+      {
+        outpoint: new lwk.OutPoint(lenderNftInput),
+        prevout: requireOutput(creationTx, CREATION_OUTPUT.lenderNft, 'The lender NFT lock'),
+        asset: lwk.AssetId.fromString(lenderNft),
+        amount: NFT_AMOUNT,
+        secrets: lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(lenderNft), NFT_AMOUNT),
+        maxWeightToSatisfy: SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY,
+      },
+      ...walletCoins.map((coin, index) => walletCoinInput(deps, coin, walletPrevouts[index])),
+    ],
+    outputs: [
+      {
+        script: activeOfferAddress.scriptPubkey(),
+        amount: activeCollateral.amount,
+        asset: lwk.AssetId.fromString(activeCollateral.asset),
+        blindingPubkey: activeOfferAddress.blindingPubkey(),
+      },
+      {
+        script: principalAddress.scriptPubkey(),
+        amount: principal.amount,
+        asset: lwk.AssetId.fromString(principal.asset),
+        blindingPubkey: principalAddress.blindingPubkey(),
+      },
+      {
+        script: lenderNftReceiver.scriptPubkey(),
+        amount: NFT_AMOUNT,
+        asset: lwk.AssetId.fromString(lenderNft),
+      },
+      ...(principalChange > 0n
+        ? [
+            {
+              script: changeAddress.scriptPubkey(),
+              amount: principalChange,
+              asset: lwk.AssetId.fromString(principalAsset),
+              blindingPubkey: changeAddress.blindingPubkey(),
+            },
+          ]
+        : []),
+    ],
+    changeAddress: deps.wollet.change(null).address(),
+  })
 
-  // 5. The layout LWK built.
+  // 5. The layout of the unblinded PSET.
   assertSpendLayout(deps, unblinded, layout, false, 'Acceptance')
 
   // 6. Blinding: the active collateral and the principal with their pinned blinders.

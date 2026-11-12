@@ -9,9 +9,8 @@
 // input 2 to output 1); it leaves the collateral to the spender. The script_auth lock releases the
 // lender NFT to a transaction that spends the pending offer at input 0. The borrower NFT is an
 // explicit output at a wallet address, which LWK does not list among the wallet's coins, so it is
-// spent as an external UTXO that the wallet still signs. The collateral is paid explicitly: LWK
-// would put the change of any asset but the policy asset before the burns.
-import type { Address, WalletTxOut } from '@lilbonekit/lwk-web'
+// spent as a plain input, not a wallet coin; the wallet still recognizes its script, and signs it.
+import type { Address, WalletTxOut } from 'lwk_wasm'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
@@ -31,6 +30,7 @@ import type { VerifiedOffer } from '../verify'
 import {
   assertAllInputsFinalized,
   assertSpendLayout,
+  buildUnblindedPset,
   burnScript,
   fetchPrevoutTxs,
   outpointOf,
@@ -39,6 +39,7 @@ import {
   prevoutsOf,
   requireOutput,
   type SpendLayout,
+  walletCoinInput,
   wasmStep,
 } from './shared'
 
@@ -159,47 +160,50 @@ export async function buildPrivateCancellation(
   // The transactions of the fee coins: finalization needs every prevout.
   const feePrevoutTxs = await fetchPrevoutTxs(deps, feeInputs)
 
-  // 4. The unblinded PSET.
-  let builder = new lwk.TxBuilder(deps.network)
-  if (deps.feeRate !== null) builder = builder.feeRate(deps.feeRate)
-  builder = builder
-    .setWalletUtxos(feeInputs.map(outpoint => new lwk.OutPoint(outpoint)))
-    .setInputOrder(inputs.map(outpoint => new lwk.OutPoint(outpoint)))
-    .addExternalUtxos([
-      new lwk.ExternalUtxo(
-        CREATION_OUTPUT.pendingOffer,
-        creationTx,
-        pinnedTxOutSecrets(deps, pendingCollateral),
-        PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.OfferCancellation,
-        true,
-      ),
-      new lwk.ExternalUtxo(
-        CREATION_OUTPUT.lenderNft,
-        creationTx,
-        lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(lenderNft), NFT_AMOUNT),
-        SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY,
-        true,
-      ),
-      new lwk.ExternalUtxo(
-        nftRef.vout,
-        nftTx,
-        lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(borrowerNft), NFT_AMOUNT),
-        EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
-        true,
-      ),
-    ])
-    .addPostIssuanceScriptOutput(burn, NFT_AMOUNT, lwk.AssetId.fromString(lenderNft))
-    .addPostIssuanceScriptOutput(burn, NFT_AMOUNT, lwk.AssetId.fromString(borrowerNft))
-    .addPostIssuanceRecipient(
-      collateralReceiver,
-      pendingCollateral.amount,
-      lwk.AssetId.fromString(pendingCollateral.asset),
-    )
-    // last, so that no later builder call can reset it
-    .skipBlinding()
-  const unblinded = builder.finish(deps.wollet)
+  // 4. The unblinded PSET: the inputs and the leading outputs in layout order.
+  const feePrevouts = prevoutsOf(feePrevoutTxs, feeInputs)
+  const unblinded = buildUnblindedPset(deps, {
+    inputs: [
+      {
+        outpoint: new lwk.OutPoint(offerInput),
+        prevout: requireOutput(creationTx, CREATION_OUTPUT.pendingOffer, 'The pending offer'),
+        asset: lwk.AssetId.fromString(pendingCollateral.asset),
+        amount: pendingCollateral.amount,
+        secrets: pinnedTxOutSecrets(deps, pendingCollateral),
+        maxWeightToSatisfy: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.OfferCancellation,
+      },
+      {
+        outpoint: new lwk.OutPoint(lockInput),
+        prevout: requireOutput(creationTx, CREATION_OUTPUT.lenderNft, 'The lender NFT lock'),
+        asset: lwk.AssetId.fromString(lenderNft),
+        amount: NFT_AMOUNT,
+        secrets: lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(lenderNft), NFT_AMOUNT),
+        maxWeightToSatisfy: SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY,
+      },
+      {
+        outpoint: new lwk.OutPoint(nftInput),
+        prevout: requireOutput(nftTx, nftRef.vout, 'The borrower NFT'),
+        asset: lwk.AssetId.fromString(borrowerNft),
+        amount: NFT_AMOUNT,
+        secrets: lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(borrowerNft), NFT_AMOUNT),
+        maxWeightToSatisfy: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
+      },
+      ...params.feeCoins.map((coin, index) => walletCoinInput(deps, coin, feePrevouts[index])),
+    ],
+    outputs: [
+      { script: burn, amount: NFT_AMOUNT, asset: lwk.AssetId.fromString(lenderNft) },
+      { script: burn, amount: NFT_AMOUNT, asset: lwk.AssetId.fromString(borrowerNft) },
+      {
+        script: collateralReceiver.scriptPubkey(),
+        amount: pendingCollateral.amount,
+        asset: lwk.AssetId.fromString(pendingCollateral.asset),
+        blindingPubkey: collateralReceiver.blindingPubkey(),
+      },
+    ],
+    changeAddress: deps.wollet.change(null).address(),
+  })
 
-  // 5. The layout LWK built.
+  // 5. The layout of the unblinded PSET.
   assertSpendLayout(deps, unblinded, layout, false, 'Cancellation')
 
   // 6. Blinding: the offer input's secrets are the pinned ones; every output is fresh.

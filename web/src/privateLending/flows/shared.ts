@@ -1,14 +1,7 @@
 // Helpers shared by the private flow builders, and the one PSET layout checker they all use.
-import type {
-  Address,
-  Pset,
-  Script,
-  Transaction,
-  TxOut,
-  TxOutSecrets,
-  WalletTxOut,
-} from '@lilbonekit/lwk-web'
+import type { Address, Pset, Script, Transaction, TxOut, TxOutSecrets, WalletTxOut } from 'lwk_wasm'
 
+import { buildPset, type PsetInputSpec, type PsetOutputSpec } from '@/lwk/psetBuilder'
 import { NFT_AMOUNT, NO_REISSUANCE_TOKEN } from '@/simplicity/private-lending/layout'
 import type { PinnedOutputInfo } from '@/wasm/private-lending/private_lending_wasm'
 
@@ -56,7 +49,7 @@ export function burnScript(deps: PrivateFlowDeps): Script {
   return deps.lwk.Script.newOpReturn(new TextEncoder().encode('burn'))
 }
 
-/** The LWK secrets of a pinned output, for spending it as an `ExternalUtxo`. */
+/** The LWK secrets of a pinned output, for the PSET input that spends it. */
 export function pinnedTxOutSecrets(deps: PrivateFlowDeps, info: PinnedOutputInfo): TxOutSecrets {
   const { lwk } = deps
   return new lwk.TxOutSecrets(
@@ -65,6 +58,59 @@ export function pinnedTxOutSecrets(deps: PrivateFlowDeps, info: PinnedOutputInfo
     info.amount,
     lwk.ValueBlindingFactor.fromString(info.valueBlinder),
   )
+}
+
+/**
+ * A wallet coin as a PSET input: its unblinded secrets, the wallet's weight to satisfy it, and
+ * `walletCoin`, so that the first wallet coin is the outputs' blinder. `prevout` is the coin's
+ * output as found on chain (`prevoutsOf`).
+ */
+export function walletCoinInput(
+  deps: PrivateFlowDeps,
+  coin: WalletTxOut,
+  prevout: TxOut,
+): PsetInputSpec {
+  const secrets = coin.unblinded()
+  return {
+    outpoint: coin.outpoint(),
+    prevout,
+    asset: secrets.asset(),
+    amount: secrets.value(),
+    secrets,
+    maxWeightToSatisfy: deps.wollet.maxWeightToSatisfy(),
+    walletCoin: true,
+  }
+}
+
+/**
+ * The unblinded PSET of a private flow, with the wallet's details: the inputs in `inputs` order,
+ * then `outputs`, the policy-asset change to `changeAddress` and the fee. Blinding is left to
+ * `wasm.blindPset` (`'none'`), which sets the pinned outputs' blinders. `lockTime` is the
+ * fallback nLockTime. Throws `Insufficient L-BTC: missing N sats` when the inputs cannot pay
+ * the outputs and the fee.
+ *
+ * The flows read `deps.feeRate` only here: the e2e run stops a builder at its PSET build by it.
+ */
+export function buildUnblindedPset(
+  deps: PrivateFlowDeps,
+  spec: {
+    inputs: PsetInputSpec[]
+    outputs: PsetOutputSpec[]
+    changeAddress: Address
+    lockTime?: number
+  },
+): Pset {
+  const { pset } = buildPset({
+    network: deps.network,
+    inputs: spec.inputs,
+    outputs: spec.outputs,
+    changeAddress: spec.changeAddress,
+    feeRateSatPerKvb: deps.feeRate,
+    fallbackLocktime: spec.lockTime,
+    blinding: 'none',
+  })
+  pset.addDetails(deps.wollet)
+  return pset
 }
 
 /** The transactions of `outpoints`, by txid, fetched once each. */
@@ -117,7 +163,7 @@ export interface ExpectedOutput {
   blinding: ExpectedBlinding
 }
 
-/** What a private flow's PSET must hold, checked after `finish` and again after blinding. */
+/** What a private flow's PSET must hold, checked after the build and again after blinding. */
 export interface SpendLayout {
   /** The prevouts, in input order. */
   inputs: string[]
@@ -159,7 +205,7 @@ export function assertSpendLayout(
   label: string,
 ): void {
   function fail(what: string): never {
-    throw new Error(`${label} PSET ${blinded ? 'after blinding' : 'after finish'}: ${what}`)
+    throw new Error(`${label} PSET ${blinded ? 'after blinding' : 'before blinding'}: ${what}`)
   }
   const { lockTime, inputs, outputs } = inspectPset(deps.wasm, pset.toString())
 
@@ -284,7 +330,7 @@ export function assertSpendLayout(
 
   outputs.forEach((output, index) => {
     if (!blinded) {
-      // `skipBlinding`: nothing is blinded before `blindPset`
+      // `'none'`: nothing is blinded before `blindPset`
       if (output.assetCommitment !== null || output.amountCommitment !== null) {
         fail(`output ${index} is blinded already`)
       }
