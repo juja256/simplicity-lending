@@ -21,9 +21,9 @@ import {
 
 // Builds a PSET without TxBuilder: the caller decides every input and output and their
 // order. This module only appends the L-BTC change and the fee outputs, computes the fee
-// and blinds.
+// and blinds, unless the blinding is left to the wallet or the caller.
 
-interface PsetInputSpec {
+export interface PsetInputSpec {
   outpoint: OutPoint
   /** The previous output as found on chain. */
   prevout: TxOut
@@ -35,18 +35,18 @@ interface PsetInputSpec {
   maxWeightToSatisfy: number
   /** New unblinded issuance on this input. */
   issuance?: PsetIssuanceSpec
-  /** A coin from the user's wallet. With `wallet` blinding, the first one is the blinder. */
+  /** A coin from the user's wallet. With `wallet` or `none` blinding, the first is the blinder. */
   walletCoin?: boolean
 }
 
-interface PsetIssuanceSpec {
+export interface PsetIssuanceSpec {
   assetAmount: bigint
   tokenAmount: bigint
   /** Zero hash when the asset has no contract. */
   contractHash: ContractHash
 }
 
-interface PsetOutputSpec {
+export interface PsetOutputSpec {
   script: Script
   amount: bigint
   asset: AssetId
@@ -57,11 +57,15 @@ interface PsetOutputSpec {
 // `local`: blind here with the inputs' secrets (seed, Jade).
 // `wallet`: leave blinding to the wallet that owns the `walletCoin` inputs (e.g. Humid, which
 // does not share its blinding secrets).
+// `none`: leave blinding to the caller, which blinds the returned PSET itself (the private
+// lending flows, whose wasm pins the blinding factors of some outputs). The confidential outputs
+// keep their blinding key and name the first `walletCoin` input as their blinder, or input 0
+// without one. The fee is still estimated on a blinded trial copy.
 const MAX_FEE_RATE_SAT_PER_KVB = 1_000_000
 
-export type PsetBlinding = 'local' | 'wallet'
+export type PsetBlinding = 'local' | 'wallet' | 'none'
 
-interface BuildPsetParams {
+export interface BuildPsetParams {
   network: Network
   inputs: PsetInputSpec[]
   outputs: PsetOutputSpec[]
@@ -72,7 +76,7 @@ interface BuildPsetParams {
   blinding: PsetBlinding
 }
 
-interface BuiltPset {
+export interface BuiltPset {
   pset: Pset
   fee: bigint
 }
@@ -128,7 +132,7 @@ function assemble(params: BuildPsetParams, change: bigint, fee: bigint, trial: b
     },
     { script: Script.empty(), amount: fee, asset: policyAsset },
   ]
-  const blinderIndex = !trial && params.blinding === 'wallet' ? walletBlinderIndex(params) : 0
+  const blinderIndex = trial ? 0 : outputBlinderIndex(params)
   for (const output of outputs) {
     let outputBuilder = PsetOutputBuilder.newExplicit(output.script, output.amount, output.asset)
     if (output.blindingPubkey) {
@@ -166,6 +170,19 @@ function buildInput(input: PsetInputSpec, trial: boolean): PsetInput {
     builder = builder.issuanceAssetEntropy(contractHash).blindedIssuance(false)
   }
   return builder.build()
+}
+
+function outputBlinderIndex(params: BuildPsetParams): number {
+  switch (params.blinding) {
+    case 'local':
+      return 0
+    case 'wallet':
+      return walletBlinderIndex(params)
+    case 'none': {
+      const index = params.inputs.findIndex(input => input.walletCoin)
+      return index === -1 ? 0 : index
+    }
+  }
 }
 
 function walletBlinderIndex(params: BuildPsetParams): number {
