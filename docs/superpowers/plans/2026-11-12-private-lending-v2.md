@@ -58,7 +58,9 @@ TypeScript and Vite with pnpm 10.33; upstream LWK (`lwk_wasm`, the `lwk` submodu
 
 ## Phase 1: Merge upstream `main` (spec item 7)
 
-Branch `v2/phase-1-upstream-merge`. Upstream brings #190 (manual and background sync share one
+Branch `v2/phase-1-upstream-merge`. The merge takes upstream at `4ab8765` (the `origin/main` of
+2026-11-12), the commit this phase's conflict table, LWK pin and API gaps were taken from; later
+upstream commits are a separate decision. Upstream brings #190 (manual and background sync share one
 in-flight scan) and #196 (the app builds on upstream LWK instead of the `@lilbonekit/lwk-web`
 fork, and the public flows build PSETs with `web/src/lwk/psetBuilder.ts`). The private flows use
 fork-only `TxBuilder` calls that upstream LWK lacks: `setInputOrder`, `addPostIssuanceRecipient`,
@@ -87,7 +89,7 @@ The phase ports them; the merge commit itself does not type-check in `web/` unti
 ```bash
 git switch -c v2/phase-1-upstream-merge main
 git fetch origin
-git merge --no-ff --no-commit origin/main
+git merge --no-ff --no-commit 4ab8765
 ```
 
 Expected: content conflicts in the ten files above and modify/delete conflicts in the two Demo
@@ -139,9 +141,15 @@ them; none is under `web/src/hooks/`, `web/src/lib/` or `web/src/lwk/psetBuilder
 
 - [ ] **Step 7: Commit the merge**
 
+Run `git status --short` first: nothing untracked or generated (the wasm output, `node_modules`)
+may be staged. Stage the resolved files and the lockfile by name.
+
 ```bash
-git add -A .dockerignore README.md deployment web lwk .gitmodules
-git commit -m "Merge origin/main: upstream LWK (#196) and the shared wallet scan (#190)
+git add .dockerignore README.md web/README.md deployment/Dockerfile.web web/package.json \
+  web/pnpm-lock.yaml web/src/lwk/index.ts web/src/providers/wallet/WalletProvider.tsx \
+  web/src/providers/wallet/types.ts web/src/simplicity/asset-auth/program.ts \
+  web/src/simplicity/script-auth/program.ts
+git commit -m "Merge upstream 4ab8765: upstream LWK (#196) and the shared wallet scan (#190)
 
 The private flows still import the LWK fork; the next commits port them, and web/ type-checks
 again after them."
@@ -339,17 +347,20 @@ Expected: every stage `confirmed`, `scan` passes.
 Run: `docker compose build`, with the environment `deployment/README.md` describes
 Expected: the web and backend images build.
 
-- [ ] **Step 4: Fee errors stay readable**
+Steps 4 to 6 are the user's: they need the running app, a Jade and two wallets. The controller
+stops here and asks the user to run them, and does not mark them done itself.
+
+- [ ] **Step 4 (user): Fee errors stay readable**
 
 In `pnpm dev`, create an offer from a seed wallet holding collateral but too little L-BTC for
 the fee. Expected: the modal shows a message naming the missing L-BTC, not a stack trace.
 
-- [ ] **Step 5: A Jade signs the `'none'` PSETs**
+- [ ] **Step 5 (user): A Jade signs the `'none'` PSETs**
 
 With a Jade on testnet in `pnpm dev`, create an offer and cancel it. Expected: the Jade shows
 the outputs and signs both; both transactions confirm. Record the result in the commit message.
 
-- [ ] **Step 6: A wallet switch during a scan**
+- [ ] **Step 6 (user): A wallet switch during a scan**
 
 Connect seed wallet A, and while its first scan runs, disconnect and connect seed wallet B.
 Expected: B's lending-key fingerprint, B's offers only, no error toast from A's scan.
@@ -432,8 +443,8 @@ Branch `v2/phase-3-lender-terms`.
 Branch `v2/phase-4-two-areas`.
 
 - Load the `frontend-design` skill at phase start. The wireframes from the discussion are in
-  `.superpowers/brainstorm/104035-1794482974/content/` (`lender-console.html`,
-  `borrower-app.html`).
+  `docs/superpowers/specs/2026-11-12-v2-wireframes/` (`site-structure.html`,
+  `lender-console.html`, `borrower-app.html`; layout only, the numbers are made up).
 - Routes: `/` the landing page with its two entrances; `/lend/proposals`, `/lend/loans`,
   `/lend/terms`, `/lend/profile`; `/borrow` (choose a lender), `/borrow/:lenderKey` (the
   proposal), `/borrow/loans`. `web/src/pages/Private` goes once both areas replace it; its
@@ -466,8 +477,11 @@ Branch `v2/phase-5-contract`.
   `crates/contracts/src/programs/private_lending/`; `private-lending-core` (offer parameters,
   pinned outputs, secrets); the wasm; the web Simplicity bindings, the flows (a new
   `flows/partialRepayment.ts`) and the repay UI; the parity fixtures and the e2e stages.
-- **Done when:** contract tests show that two offers that differ only in expiry reveal the same
-  CMRs at acceptance and repayment; a liveness property test runs random installment sequences,
+- **Done when:** contract tests show, for item 1, that with the expiry fixed a different salt
+  changes the CMR revealed at acceptance and repayment (the salt enters the pruned subtree), that
+  recomputing that CMR from the public parameters over a range of candidate expiries, with no
+  salt or a guessed one, matches none of them, and that a liquidation witness with a wrong salt or
+  expiry fails; for item 3(a), a liveness property test runs random installment sequences,
   and after each one the full repayment and the liquidation after the term still succeed; an
   overpayment is refused in the client; `pnpm parity` and every e2e stage pass, including a new
   `repay-partial` stage.

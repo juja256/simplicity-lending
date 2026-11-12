@@ -1,7 +1,7 @@
 # Private lending v2 — design (draft)
 
 Status: collecting items. Not yet a design; nothing here is decided beyond the item list, except
-the decisions recorded in items 7 to 10.
+the decisions recorded in items 3, 4, 5 and 7 to 10 and in "Scope of v2".
 
 Builds on [the v1 design](2026-10-28-private-lending-design.md) and
 `crates/contracts/simf/private_lending.simf`.
@@ -209,8 +209,8 @@ professional tool. Choices marked *(proposed)* were not discussed and need confi
     The landing page has two entrances, "For lenders" and "For borrowers", and a link in each
     area's header switches to the other. The route decides the area *(proposed: `/lend` and
     `/borrow`)*; nothing remembers a role. Wireframes from the discussion:
-    `.superpowers/brainstorm/104035-1794482974/content/` (`lender-console.html`,
-    `borrower-app.html`; not committed).
+    `2026-11-12-v2-wireframes/` (`site-structure.html`, option A chosen; `lender-console.html`;
+    `borrower-app.html`).
     - The lender console is a dense desktop layout with a sidebar. Its header shows the lender's
       directory name, key fingerprint and connected signer. Sections:
       - Proposals: a summary strip (proposals waiting, active loans, amount lent, collateral held,
