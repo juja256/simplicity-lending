@@ -1,4 +1,4 @@
-import { SimplicityProgram } from '@lilbonekit/lwk-web'
+import { SimplicityProgram } from 'lwk_wasm'
 import { sources } from 'virtual:simplicity-sources'
 
 import { type AssetAuthProgramParams, buildAssetAuthArguments } from './arguments'
@@ -17,5 +17,9 @@ export {
 }
 
 export function loadAssetAuthProgram(params: AssetAuthProgramParams): SimplicityProgram {
-  return SimplicityProgram.load(sources.asset_auth, buildAssetAuthArguments(params))
+  return SimplicityProgram.loadWithDebugSymbols(
+    sources.asset_auth,
+    buildAssetAuthArguments(params),
+    true,
+  )
 }

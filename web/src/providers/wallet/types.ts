@@ -1,13 +1,12 @@
 import type {
+  Address,
   EsploraClient,
-  OutPoint,
   Pset,
   Transaction,
-  TxBuilder,
   WalletTxOut,
   Wollet,
   WolletDescriptor,
-} from '@lilbonekit/lwk-web'
+} from 'lwk_wasm'
 
 import type { WalletConnector } from '@/lib/wallet-core/connector/types'
 import type { WalletCache } from '@/lib/wallet-core/store/walletCache'
@@ -37,9 +36,9 @@ export interface WalletContextValue extends WalletState {
   applyBroadcastTransaction(tx: Transaction): void
   signPset(pset: Pset): Promise<Pset>
   getBlindedWalletUtxos(): Promise<WalletCoin[]>
-  fundWithWalletCoins(txBuilder: TxBuilder, outpoints: OutPoint[]): Promise<TxBuilder>
   getWollet(): Promise<Wollet>
   getReceiveAddress(): Promise<string | null>
+  getChangeAddress(): Promise<Address>
   verifyReceiveAddress(): Promise<string>
   /** Whether the signer can run private loans: Jade or the seed wallet. */
   privateCapable: boolean

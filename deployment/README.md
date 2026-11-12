@@ -27,6 +27,7 @@ Most deployment knobs live in `deployment/configs`:
 From `deployment/`:
 
 ```bash
+git submodule update --init ../lwk
 cp ./configs/compose.env.example ./configs/compose.env
 # Edit compose.env: set your domain, registry settings, and database password first.
 docker compose --env-file ./configs/compose.env -f docker-compose.yml config --quiet
