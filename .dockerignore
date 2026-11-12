@@ -15,3 +15,6 @@ deployment/configs/compose.env
 **/node_modules
 docs/build
 docs/.docusaurus
+lwk/.git
+lwk/target
+lwk/lwk_wasm/pkg

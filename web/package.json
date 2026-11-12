@@ -17,6 +17,7 @@
     "build:wasm": "wasm-pack build ../crates/private-lending-wasm --release --target web --out-dir ../../web/src/wasm/private-lending --out-name private_lending_wasm && rm -f src/wasm/private-lending/.gitignore src/wasm/private-lending/package.json",
     "preview": "vite preview",
     "preview:demo": "vite preview --mode demo",
+    "lwk:build": "bash scripts/build-lwk.sh && pnpm install --force",
     "add-icon": "tsx ./scripts/add-icon.ts",
     "parity": "tsx --tsconfig tsconfig.app.json scripts/check-private-lending-parity.ts",
     "e2e:private": "tsx --tsconfig tsconfig.app.json scripts/e2e-private-lending.ts"
@@ -25,7 +26,7 @@
     "@fontsource-variable/inter": "^5.2.8",
     "@heroui/react": "^3.0.4",
     "@hookform/resolvers": "^5.4.0",
-    "@lilbonekit/lwk-web": "0.17.2-22d0c8f.1",
+    "lwk_wasm": "file:../lwk/lwk_wasm/pkg",
     "@tanstack/react-query": "^5.100.10",
     "axios": "^1.7.0",
     "framer-motion": "^13.4.0",
