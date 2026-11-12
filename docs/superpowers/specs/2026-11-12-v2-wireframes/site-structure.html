@@ -1,0 +1,67 @@
+<h2>How should one site hold a lender area and a borrower area?</h2>
+<p class="subtitle">Public lending (Borrow, Supply, the public dashboard) is gone in all three. Click the one closest to what you picture.</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">Landing</div>
+        <div class="mockup-body">
+          <div class="mock-nav">Simplicity Lending</div>
+          <div style="display:flex;gap:12px;margin-top:12px">
+            <div class="placeholder" style="flex:1;min-height:90px">
+              <b>For lenders</b><br><small>Publish your terms, review proposals, manage your private book</small><br>
+              <button class="mock-button" style="margin-top:8px">Open lender console</button>
+            </div>
+            <div class="placeholder" style="flex:1;min-height:90px">
+              <b>For borrowers</b><br><small>Pick a lender, borrow against your collateral</small><br>
+              <button class="mock-button" style="margin-top:8px">Borrow</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. Choose a side at the door</h3>
+      <p>The landing page splits into two entrances. Each area has its own layout: the lender console is a dense desktop dashboard with a sidebar, the borrower app a simple step-by-step flow. A small link in the header switches sides.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">Any page</div>
+        <div class="mockup-body">
+          <div class="mock-nav">Simplicity Lending &nbsp;&nbsp; [ Lender | <u>Borrower</u> ] &nbsp;&nbsp; wallet ▾</div>
+          <div class="mock-content" style="margin-top:12px">
+            <div class="placeholder" style="min-height:90px">Pages for the selected role<br><small>same header, same look, different menu</small></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. One app, a role switch in the header</h3>
+      <p>Both roles share one shell and one look. A Lender / Borrower toggle in the top bar changes the menu and the pages. Closest to today's single Private page, split in two.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">Opens on the lender console</div>
+        <div class="mockup-body">
+          <div style="display:flex">
+            <div class="mock-sidebar" style="min-width:90px"><small>Proposals<br>Loans<br>Terms<br>Settings</small></div>
+            <div class="mock-content" style="flex:1">
+              <div class="placeholder" style="min-height:90px">Lender console<br><small>"See the borrower side →" link opens the borrower app in a second tab</small></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. Lender console first</h3>
+      <p>The demo audience is lenders, so the site opens straight on the console. The borrower app lives at its own path and is shown alongside, so a presenter can play both sides in two tabs.</p>
+    </div>
+  </div>
+</div>

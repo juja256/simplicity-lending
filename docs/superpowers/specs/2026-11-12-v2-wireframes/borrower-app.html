@@ -1,0 +1,53 @@
+<h2>Borrower app: a first sketch</h2>
+<p class="subtitle">Option A's borrower side, as three steps. A wireframe with made-up numbers. Tell me in the terminal what's wrong or missing.</p>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">1 · Choose a lender</div>
+    <div class="mockup-body">
+      <div class="mock-nav">Simplicity Lending · Borrow &nbsp;&nbsp; <small>My loans · Lender console →</small></div>
+      <p style="margin-top:10px">Borrow <b>USDt</b> against <b>L-BTC</b></p>
+      <div class="placeholder" style="padding:10px;margin-bottom:8px;text-align:left">
+        <b>Acme Capital</b> <small>key 3f9a…c21e</small><br>
+        <small>from 6.0% APR · collateral ≥ 150% at 95,000 USDt/L-BTC · 30–180 days · 1,000–50,000 USDt</small><br>
+        <small>terms updated 3 h ago</small><br>
+        <button class="mock-button" style="margin-top:6px">Borrow from Acme</button>
+      </div>
+      <div class="placeholder" style="padding:10px;text-align:left">
+        <b>Northwind Bank</b> <small>key 91c0…7d4a</small><br>
+        <small>from 5.5% APR · collateral ≥ 175% at 94,800 USDt/L-BTC · 90–365 days · 10,000–250,000 USDt</small><br>
+        <small>terms updated yesterday</small><br>
+        <button class="mock-button" style="margin-top:6px">Borrow from Northwind</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="mockup">
+    <div class="mockup-header">2 · Your proposal to Acme Capital</div>
+    <div class="mockup-body">
+      <p>Borrow: <input class="mock-input" value="5,000 USDt" style="width:120px"> <small>1,000–50,000</small></p>
+      <p>Term: <input class="mock-input" value="90 days" style="width:90px"> <small>30–180</small></p>
+      <p>Collateral: <input class="mock-input" value="0.085 L-BTC" style="width:120px"> <small>at least 0.0790 (150%)</small></p>
+      <p>APR: <input class="mock-input" value="7.0 %" style="width:80px"> <small>at least 6.0%</small></p>
+      <div class="placeholder" style="padding:8px;text-align:left">
+        <small>You repay <b>5,086.30 USDt</b> by 10 Feb 2027. If you don't, Acme keeps the 0.085 L-BTC.<br>
+        You can cancel and take your collateral back until Acme accepts.</small>
+      </div>
+      <button class="mock-button" style="margin-top:8px">Lock collateral and send</button>
+      <p style="font-size:12px">Fields can't go below Acme's terms. Only you and Acme can read this proposal.</p>
+    </div>
+  </div>
+</div>
+
+<div class="mockup" style="margin-top:18px">
+  <div class="mockup-header">3 · My loans</div>
+  <div class="mockup-body">
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <tr style="text-align:left;border-bottom:1px solid #8884"><th>Lender</th><th>Loan</th><th>Status</th><th>Next step</th></tr>
+      <tr style="border-bottom:1px solid #8882"><td>Acme Capital</td><td>5,000 USDt · 0.085 L-BTC</td><td>waiting for Acme</td><td><button class="mock-button">Cancel</button></td></tr>
+      <tr style="border-bottom:1px solid #8882"><td>Northwind Bank</td><td>20,000 USDt · 0.37 L-BTC</td><td>accepted</td><td><button class="mock-button">Receive 20,000 USDt</button></td></tr>
+      <tr style="border-bottom:1px solid #8882"><td>Acme Capital</td><td>3,000 USDt · 0.05 L-BTC</td><td>active · due in 12 days</td><td><button class="mock-button">Repay 3,021.40 USDt</button></td></tr>
+      <tr><td>Acme Capital</td><td>2,000 USDt · 0.03 L-BTC</td><td>repaid</td><td>collateral returned</td></tr>
+    </table>
+  </div>
+</div>
