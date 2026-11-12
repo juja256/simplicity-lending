@@ -124,8 +124,9 @@ Builds on [the v1 design](2026-10-28-private-lending-design.md) and
      `README.md`, `web/README.md`, `deployment/Dockerfile.web`, `web/package.json`,
      `web/src/lwk/index.ts`, `WalletProvider.tsx` and its `types.ts`, the asset-auth and
      script-auth `program.ts`, and the two demo files this project deleted and upstream changed
-     (`web/src/pages/Demo/CreateOfferDemo.tsx`, `helpers.ts`). In `Dockerfile.web`, one Rust stage
-     can build both wasm packages, LWK's and `private-lending-wasm`.
+     (`web/src/pages/Demo/CreateOfferDemo.tsx`, `helpers.ts`). `Dockerfile.web` keeps two Rust
+     stages: LWK pins Rust 1.91.0 (`lwk/rust-toolchain.toml`), and `private-lending-wasm` builds
+     with the workspace's 1.96.
    - Most of the work is outside the conflicts. In the merged tree, 32 files still import the fork:
      the private flows, the Simplicity bindings they use, and the parity and end-to-end scripts.
      All seven flows (`web/src/privateLending/flows/`) build an unblinded PSET with the fork's
@@ -245,10 +246,13 @@ professional tool. Choices marked *(proposed)* were not discussed and need confi
   console, which keeps hiding acceptance after expiry. Item 5 comes after v2.
 - No migration: the app knows only the v2 contract, and loans made on testnet with v1 are
   dropped.
-- Items 1 and 3 both change `private_lending.simf`, so they share one contract revision: the
-  program's CMR, the parity script and the end-to-end run change once.
-- Item 1's salt and item 6's creation message both change the terms encoding, so they share one
-  version bump.
+- Items 1 and 3(a) both change `private_lending.simf`, so they share one contract revision: the
+  program's CMR, the parity script and the end-to-end run change once. Item 3(b) needs a research
+  spike first and gets a second revision if it is feasible; with no migration, a second revision
+  costs only another parity and end-to-end run.
+- Item 6's creation message changes the terms encoding. Item 1's salt changes it too only if the
+  salt is carried in the terms instead of derived from the offer's shared secret; if so, the two
+  share one version bump.
 
 ## Open questions
 
@@ -260,4 +264,7 @@ professional tool. Choices marked *(proposed)* were not discussed and need confi
   ciphertexts.
 - Whether message senders must be able to reread their messages on another device (item 6).
 - Whether LWK and Jade sign with `SIGHASH_RANGEPROOF`; if they do, item 6's signatures still
-  name the sender but are no longer needed against malleation.
+  name the sender but are no longer needed against malleation. Checked 2026-11-12 for LWK at
+  `7f8c8213`: its software signer signs only the default sighash unless its policy allows another,
+  and nothing in `lwk_signer` handles `SIGHASH_RANGEPROOF`, so item 6's signatures are needed.
+  The Jade is unchecked.
