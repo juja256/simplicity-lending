@@ -53,7 +53,8 @@ Copy `.env.example` to `.env` and adjust as needed.
 
 ## Install
 
-The app uses [LWK](https://github.com/Blockstream/lwk) from the `lwk` git submodule, pinned to one commit. Run from the repo root:
+The app uses [LWK](https://github.com/Blockstream/lwk) from the `lwk` git submodule, pinned to one
+commit. Run from the repo root:
 
 ```bash
 git submodule update --init lwk
@@ -62,9 +63,11 @@ web/scripts/build-lwk.sh
 cd web && pnpm install
 ```
 
-`submodule.recurse` makes `git pull` update `lwk` too. If LWK changes after a pull, `pnpm dev` stops and tells you to run `pnpm lwk:build`.
+`submodule.recurse` makes `git pull` update `lwk` too. If LWK changes after a pull, `pnpm dev` stops
+and tells you to run `pnpm lwk:build`.
 
-The build needs Rust ([rustup](https://rustup.rs)), `cargo install wasm-pack --locked`, and on macOS `brew install llvm`. The script tells you if something is missing.
+The build needs Rust ([rustup](https://rustup.rs)), `cargo install wasm-pack --locked`, and on macOS
+`brew install llvm`. The script tells you if something is missing.
 
 ## Update LWK
 
@@ -74,7 +77,8 @@ git add lwk
 cd web && pnpm lwk:build
 ```
 
-Then test the app and commit `lwk`. Pin a commit, don't follow a branch: `PsetBuilder` is experimental and can change.
+Then test the app and commit `lwk`. Pin a commit, don't follow a branch: `PsetBuilder` is
+experimental and can change.
 
 ## Build the wasm module
 
@@ -182,25 +186,28 @@ Nothing is built, signed or broadcast.
 
 The `scan` stage, and the app on testnet (`VITE_API_URL` in `.env.liquidtestnet`, which the e2e
 script reads too), use a local indexer of Liquid testnet with its own database,
-`lending-indexer-testnet`. Never point the indexer tests at that database, nor run them while this
-indexer uses Postgres. From `crates/indexer`, with Postgres on `localhost:5432`:
+`lending-indexer-testnet-v2p1` for the current e2e state. Never point the indexer tests at that
+database, nor run them while this indexer uses Postgres. From `crates/indexer`, with Postgres on
+`localhost:5432`:
 
 ```bash
 # Once: sqlx-cli, then the database and its migrations.
 cargo install --version='~0.8' sqlx-cli --no-default-features --features rustls,postgres --locked
-DATABASE_URL=postgres://postgres:password@localhost:5432/lending-indexer-testnet sqlx database create
-DATABASE_URL=postgres://postgres:password@localhost:5432/lending-indexer-testnet sqlx migrate run
+DATABASE_URL=postgres://postgres:password@localhost:5432/lending-indexer-testnet-v2p1 \
+  sqlx database create
+DATABASE_URL=postgres://postgres:password@localhost:5432/lending-indexer-testnet-v2p1 \
+  sqlx migrate run
 
 # Two processes, each in its own shell with these exports.
-export SQLX_OFFLINE=true DATABASE__DATABASE_NAME=lending-indexer-testnet
+export SQLX_OFFLINE=true DATABASE__DATABASE_NAME=lending-indexer-testnet-v2p1
 export ESPLORA__BASE_URL=https://blockstream.info/liquidtestnet/api
-RUN_MODE=indexer INDEXER__LAST_INDEXED_HEIGHT=2682200 cargo run -p lending-indexer
+RUN_MODE=indexer INDEXER__LAST_INDEXED_HEIGHT=<height> cargo run -p lending-indexer
 RUN_MODE=api cargo run -p lending-indexer
 ```
 
-- `INDEXER__LAST_INDEXED_HEIGHT` is the block before the first one indexed: it must be below the
-  first e2e creation (`create` is in block 2 682 289 in the current state). It applies only to an
-  empty database; afterwards the stored sync height wins.
+- `INDEXER__LAST_INDEXED_HEIGHT` is the block before the first one indexed: a height just below
+  the first e2e creation (the tip before the run). It applies only to an empty database;
+  afterwards the stored sync height wins.
 - `ESPLORA__BASE_URL` replaces `configuration/base.yaml`'s `liquid.network` esplora with the one
   the e2e script uses.
 - The API listens on `http://localhost:8000`. The indexer catches up at 30 to 45 blocks a minute;
