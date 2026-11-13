@@ -180,7 +180,10 @@ Expected: FAIL, cannot find module `@lilbonekit/lwk-web`.
 - [ ] **Step 2: Switch the imports to `lwk_wasm`**
 
 In the Node scripts, the LWK wasm binary is now `node_modules/lwk_wasm/lwk_wasm_bg.wasm`.
-`SimplicityProgram.load` exists upstream and stays.
+The private programs load with `SimplicityProgram.loadWithDebugSymbols(source, args, true)`,
+through one `loadProgram` helper in `scripts.ts`, as upstream's public programs do. Upstream's
+`SimplicityProgram.load` compiles without debug symbols, so its CMRs are not the Rust fixtures'
+and the parity check fails.
 
 - [ ] **Step 3: Make the fee rate a number**
 
@@ -228,9 +231,23 @@ git commit -am "web: private layer and scripts on upstream LWK"
 - [ ] **Step 1: Write the failing check `checkPsetBuilderNoneBlinding`**
 
 Build with `blinding: 'none'`, one explicit L-BTC input (`walletCoin: true`, 100 000 sats,
-`maxWeightToSatisfy` 300), one output of 10 000 L-BTC sats to a confidential testnet address from
-the parity fixtures, the same address as `changeAddress`, at 100 sat/kvb (a literal: the Node
-script does not import `@/api/esplora/fee`, which pulls in the app's HTTP layer).
+`maxWeightToSatisfy` 300), one output of 10 000 L-BTC sats to a confidential testnet address, the
+same address as `changeAddress`, at 100 sat/kvb (a literal: the Node script does not import
+`@/api/esplora/fee`, which pulls in the app's HTTP layer). The parity fixtures hold no address, so
+the check derives one from them:
+
+```ts
+const lender = wasm.LendingKey.fromMasterBlindingKey(fixture.lender_master_blinding_key)
+const address = lwk.Address.parse(
+  wasm.confidentialAddress(
+    fixture.lender_nft_script_pubkey,
+    wasm.liftLendingKey(lender.xOnlyPublicKey()),
+    'liquidtestnet',
+  ),
+  network,
+)
+```
+
 Then, through `inspectPset(wasm, pset.toString())`, assert:
 
 ```ts
@@ -244,12 +261,23 @@ assert(outputs[1].amount === 100_000n - 10_000n - fee)
 ```
 
 and that `wasm.blindPset(pset.toString(), [wasm.InputSecret.explicit(0, policyAsset, 100_000n)], [])`
-returns a PSET whose outputs 0 and 1 have both commitments. Call it from the script's main.
+returns a PSET whose outputs 0 and 1 have both commitments.
+
+That single input is both input 0 and the first `walletCoin`, so it cannot tell the two blinder
+rules apart. Two more builds, with the same output, do:
+- inputs `[plain, walletCoin, walletCoin]` (a plain input has `walletCoin: false`): outputs 0 and
+  1 have blinder index 1;
+- one plain input, no `walletCoin`: outputs 0 and 1 have blinder index 0, and the build does not
+  throw.
+
+Call the check from the script's main.
 
 - [ ] **Step 2: Run it to see it fail**
 
 Run: `cd web && pnpm parity`
-Expected: FAIL; `buildPset` blinds the outputs, or `'none'` is rejected.
+Expected: FAIL at `pset builder 'none': the first walletCoin input blinds`, with blinder indices
+`0,0`. tsx does not type-check, and before the change `'none'` already gets blinder index 0 and
+no `blindLast`, so the single-input assertions pass; only `tsc` rejects `'none'`.
 
 - [ ] **Step 3: Implement `'none'` in `assemble` and export the types**
 
@@ -317,7 +345,9 @@ Expected: both PASS.
 - [ ] **Step 5: Nothing uses the fork any more**
 
 Run: `git grep -nE "@lilbonekit/lwk-web|TxBuilder\(|skipBlinding|IssuanceRecipient" -- web/src web/scripts`
-Expected: no output.
+Expected: one line, `let builder = new lwk.TxBuilder(wallet.network)` in
+`web/scripts/e2e-private-lending.ts`. It is the e2e `wallets` stage's L-BTC split, on upstream
+`lwk_wasm`'s `TxBuilder`, and it stays.
 
 - [ ] **Step 6: Commit**
 
@@ -362,8 +392,19 @@ the outputs and signs both; both transactions confirm. Record the result in the 
 
 - [ ] **Step 6 (user): A wallet switch during a scan**
 
-Connect seed wallet A, and while its first scan runs, disconnect and connect seed wallet B.
+The first scan runs inside the connect, before the wallet is ready, and Disconnect is only in the
+ready wallet's menu, so the scan to interrupt is a later one:
+1. Connect seed wallet A and wait until it is ready.
+2. Throttle the network in devtools, then start a scan: leave the tab and come back to it after
+   15 s (the minimum gap between two scans).
+3. While that scan runs, disconnect A and connect seed wallet B.
+
 Expected: B's lending-key fingerprint, B's offers only, no error toast from A's scan.
+
+Optionally, with a Jade, check a connect that ends while it opens the wallet. From a fresh page
+load (the waterfalls recipient is fetched once per page), throttle the network so that
+`/v1/server_recipient` is slow, unplug the Jade during "Connecting…" after the PIN, replug it, and
+connect again. Expected: the connect works, and a reload does not resume the unplugged session.
 
 - [ ] **Step 7: Update item 2's reference and commit**
 
