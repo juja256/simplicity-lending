@@ -24,7 +24,7 @@ export function Hero() {
           </p>
         </div>
         <div className='flex flex-wrap items-start gap-3'>
-          <Link to={RoutePath.Dashboard} className={buttonVariants({ variant: 'primary' })}>
+          <Link to={RoutePath.Private} className={buttonVariants({ variant: 'primary' })}>
             Try It on Testnet
           </Link>
         </div>

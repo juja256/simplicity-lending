@@ -1,11 +1,8 @@
-import { buttonVariants, Skeleton } from '@heroui/react'
-import { Link } from 'react-router-dom'
+import { Skeleton } from '@heroui/react'
 
-import ArrowRightIcon from '@/components/icons/ArrowRightIcon'
 import ShieldIcon from '@/components/icons/ShieldIcon'
 import { UiButton } from '@/components/ui/UiButton'
 import { env } from '@/constants/env'
-import { RoutePath } from '@/constants/routes'
 import { usePrivateOffers } from '@/privateLending/hooks/usePrivateOffers'
 import { isOpenedOffer } from '@/privateLending/offerView'
 import { usePendingTransactions } from '@/providers/pendingTransactions/usePendingTransactions'
@@ -62,7 +59,7 @@ function WalletSummary() {
         </p>
       ) : unsent ? (
         <p className='text-warning text-sm'>
-          A signed transaction needs your attention. Open private loans to retry or discard it.
+          A signed transaction needs your attention. Retry or discard it below.
         </p>
       ) : offers.some(item => !isOpenedOffer(item)) ? (
         <p className='text-muted text-sm'>Some offers need review and are not included above.</p>
@@ -83,24 +80,15 @@ export default function PrivateLoansCard() {
       aria-labelledby='private-loans-title'
       className='bg-surface-secondary border-accent/25 flex flex-col gap-5 rounded-2xl border p-4 sm:p-6'
     >
-      <div className='flex flex-col justify-between gap-4 sm:flex-row sm:items-start'>
-        <div className='flex max-w-xl flex-col gap-2'>
-          <h2 id='private-loans-title' className='text-h3 flex items-center gap-2'>
-            <ShieldIcon className='text-accent size-5 shrink-0' />
-            Private loans
-          </h2>
-          <p className='text-muted text-sm'>
-            Borrow or lend with someone you choose. Your loan terms are visible only to you and your
-            counterparty.
-          </p>
-        </div>
-        <Link
-          to={RoutePath.Private}
-          className={buttonVariants({ variant: 'primary', className: 'shrink-0 self-start' })}
-        >
-          Open private loans
-          <ArrowRightIcon className='size-4' />
-        </Link>
+      <div className='flex max-w-xl flex-col gap-2'>
+        <h2 id='private-loans-title' className='text-h3 flex items-center gap-2'>
+          <ShieldIcon className='text-accent size-5 shrink-0' />
+          Private loans
+        </h2>
+        <p className='text-muted text-sm'>
+          Borrow or lend with someone you choose. Your loan terms are visible only to you and your
+          counterparty.
+        </p>
       </div>
       {isReady && privateCapable ? (
         <WalletSummary />

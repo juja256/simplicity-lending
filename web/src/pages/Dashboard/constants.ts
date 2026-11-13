@@ -1,1 +1,0 @@
-export const DASHBOARD_TABLE_PAGE_SIZE = 10

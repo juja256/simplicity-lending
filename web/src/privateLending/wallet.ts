@@ -1,6 +1,6 @@
 // The wallet's side of a private build: coin selection over the wallet's coins with their secrets
-// (`WalletTxOut`), and the wallet's receive address. The public selection rules apply (confirmed
-// coins, the fee reserve), and the picked coins keep their type.
+// (`WalletTxOut`), and the wallet's receive address. The selection rules of `@/lwk/utxo` apply
+// (confirmed coins, the fee reserve), and the picked coins keep their type.
 import type { Address, WalletTxOut } from 'lwk_wasm'
 
 import { NETWORK_CONFIG } from '@/constants/network-config'
