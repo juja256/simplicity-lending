@@ -12,8 +12,8 @@
 // Consensus then admits the transaction from the block after the expiry, so the builder refuses,
 // before building anything, while the tip is below the expiry.
 // The lender NFT is an explicit output at a wallet address (the acceptance's output 2), which LWK
-// does not list among the wallet's coins, so it is spent as a plain input, not a wallet coin, that
-// the wallet still signs.
+// does not list among the wallet's coins, so it is spent as a plain input, not a wallet coin; the
+// wallet still recognizes its script, and signs it.
 import type { Address, WalletTxOut } from 'lwk_wasm'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
