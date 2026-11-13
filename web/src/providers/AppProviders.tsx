@@ -6,7 +6,6 @@ import { AssetDenominationProvider } from './assetDenomination/AssetDenomination
 import { IndexerSubscription } from './indexerEvents/IndexerSubscription'
 import { LwkProvider } from './lwk/LwkProvider'
 import { PendingTransactionsProvider } from './pendingTransactions/PendingTransactionsProvider'
-import { pendingTxToastQueue } from './pendingTransactions/pendingTxToastQueue'
 import { queryClient } from './queryClient'
 import { TxProgressProvider } from './txProgress/TxProgressProvider'
 import { WalletProvider } from './wallet/WalletProvider'
@@ -22,7 +21,6 @@ export function AppProviders({ children }: PropsWithChildren) {
               <PendingTransactionsProvider>{children}</PendingTransactionsProvider>
             </AssetDenominationProvider>
             <ToastProvider placement='top end' />
-            <ToastProvider queue={pendingTxToastQueue} placement='bottom' />
           </TxProgressProvider>
         </WalletProvider>
       </LwkProvider>

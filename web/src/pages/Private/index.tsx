@@ -1,6 +1,5 @@
 import { Skeleton, Spinner } from '@heroui/react'
 
-import BackLink from '@/components/BackLink'
 import CopyButton from '@/components/CopyButton'
 import ShieldIcon from '@/components/icons/ShieldIcon'
 import KeyFingerprint from '@/components/KeyFingerprint'
@@ -14,6 +13,7 @@ import { ErrorHandler } from '@/utils/errorHandler'
 import BorrowSection from './components/BorrowSection'
 import DirectorySection from './components/DirectorySection'
 import LendSection from './components/LendSection'
+import PrivateLoansCard from './components/PrivateLoansCard'
 
 /** The session's lending key: its fingerprint, its directory name, and the key to share. */
 function LendingKeyCard() {
@@ -63,7 +63,7 @@ export default function PrivatePage() {
 
   return (
     <div className='flex flex-col gap-6'>
-      <BackLink />
+      <PrivateLoansCard />
 
       {(() => {
         if (isReady && privateCapable) {

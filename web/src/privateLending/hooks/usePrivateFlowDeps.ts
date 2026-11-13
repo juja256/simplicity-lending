@@ -28,14 +28,13 @@ const PRIVATE_SOURCES: PrivateLendingSources = {
   scriptAuth: sources.script_auth,
 }
 
-// The fee-rate query the public modals share; a value this fresh is reused.
+// A fee rate this fresh is reused.
 const FEE_RATE_STALE_MS = 30_000
 
 /**
  * The fee rate a build pays, in sat/kvb: esplora's estimate if it is a finite number above zero,
  * else `FALLBACK_FEE_RATE_SAT_PER_KVB`. Esplora's answer passes through unchecked, so it can be
- * negative or infinite (`1e999` parses as `Infinity`), and the query it shares with the public
- * modals may hold anything.
+ * negative or infinite (`1e999` parses as `Infinity`).
  */
 function usableFeeRate(estimate: unknown): number {
   return typeof estimate === 'number' && Number.isFinite(estimate) && estimate > 0

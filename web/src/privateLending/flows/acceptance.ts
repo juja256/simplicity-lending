@@ -6,7 +6,7 @@
 //            blinded to the borrower's key; 2 lender NFT to the lender, explicit; 3 the principal
 //            change to the wallet, if any; then the policy-asset change and the fee.
 // `buildPset` adds only the policy-asset change, after the given outputs, so the builder pays the
-// principal change itself, at output 3 (as the public acceptance does).
+// principal change itself, at output 3 (as the public acceptance did).
 import type { Address, WalletTxOut } from 'lwk_wasm'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'

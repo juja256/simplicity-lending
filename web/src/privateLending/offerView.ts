@@ -2,8 +2,11 @@
 // indexer's candidate (status, UTXOs) is untrusted: it only decides what to show and which action
 // to offer. Every action loads its offer fresh through the gate, and its builder checks every
 // outpoint it is given. The rules that read outpoints from the candidate are in `./candidate`.
-import type { PrivateCandidateDetails, PrivateUtxoType } from '@/api/indexer/private'
-import type { OfferStatus } from '@/api/indexer/schemas'
+import type {
+  PrivateCandidateDetails,
+  PrivateOfferStatus,
+  PrivateUtxoType,
+} from '@/api/indexer/private'
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import type { PrivateOfferItem, PrivateOfferTerms } from '@/privateLending/hooks/usePrivateOffers'
 import type { PrivateTxKind, PrivateTxRecord } from '@/providers/pendingTransactions/types'
@@ -87,9 +90,12 @@ export const PRIVATE_UTXO_LABEL: Record<PrivateUtxoType, string> = {
   repayment: 'repayment',
 }
 
+/** The status an offer shows: the indexer's status, or `claimed` for a claimed repayment. */
+export type OfferStatus = PrivateOfferStatus | 'claimed'
+
 /**
  * The status to show for a candidate. A repaid offer whose every repayment UTXO is spent shows
- * as claimed, as the public pages do.
+ * as claimed.
  */
 export function displayStatus(candidate: PrivateCandidateDetails): OfferStatus {
   if (candidate.status !== 'repaid') return candidate.status

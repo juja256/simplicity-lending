@@ -1,6 +1,6 @@
 import { Chip, Spinner } from '@heroui/react'
 
-import type { OfferStatus } from '@/api/indexer/schemas'
+import type { OfferStatus } from '@/privateLending/offerView'
 
 type ChipColor = 'success' | 'warning' | 'accent' | 'danger' | 'default'
 
