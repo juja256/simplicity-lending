@@ -25,8 +25,11 @@ TypeScript and Vite with pnpm 10.33; upstream LWK (`lwk_wasm`, the `lwk` submodu
 - v2 covers items 1, 2, 3 (a and b), 6, 7, 8, 9 and 10. Item 5 comes after v2. Item 4 needs no
   work beyond keeping acceptance hidden after expiry.
 - No migration: the app knows only the v2 contract, and v1 testnet loans are dropped.
-- One branch per phase, `v2/phase-<n>-<name>`, from `main`; one commit per task; pushes go to the
-  `fork` remote only; the user decides when a phase merges into `main`.
+- One branch per phase, `v2/phase-<n>-<name>`, from the `v2` branch; one commit per task; pushes
+  go to the `fork` remote only; the user decides when a phase merges into `v2`. Nothing merges
+  into `main` during v2.
+- The checks that need the user (the running app, a Jade, two wallets) are deferred to the end of
+  v2 and run together; see "Final manual checks" after phase 7.
 - Implementers run on Opus. One whole-phase review at the end of each phase; a task marked
   **Review now** also gets its own review, for the reason it gives.
 - The `lwk` submodule stays at one pinned commit for the whole phase (its `PsetBuilder` is
@@ -377,8 +380,9 @@ Expected: every stage `confirmed`, `scan` passes.
 Run: `docker compose build`, with the environment `deployment/README.md` describes
 Expected: the web and backend images build.
 
-Steps 4 to 6 are the user's: they need the running app, a Jade and two wallets. The controller
-stops here and asks the user to run them, and does not mark them done itself.
+Steps 4 to 6 are the user's: they need the running app, a Jade and two wallets. The user deferred
+them to the end of v2 (2026-11-13); they are listed again under "Final manual checks", adapted to
+the app as it will be then. The controller does not mark them done itself.
 
 - [ ] **Step 4 (user): Fee errors stay readable**
 
@@ -421,9 +425,9 @@ The phase review follows (whole branch, Opus).
 
 ## Phase 2: Private lending only (spec items 8 and 2)
 
-Branch `v2/phase-2-private-only`, after phase 1 is merged into `main`.
+Branch `v2/phase-2-private-only`, from `v2` after phase 1 is merged into it.
 
-- **Tag first.** `git tag -a public-lending-last <phase 1 merge commit on main>`, then push the
+- **Tag first.** `git tag -a public-lending-last <phase 1 merge commit on v2>`, then push the
   tag to `fork` once the user confirms. `git checkout public-lending-last` brings back the public
   demo. From here on, upstream changes are ported by hand.
 - **One task per layer**, each leaving the workspace building and `pnpm parity` passing:
@@ -562,3 +566,25 @@ Branch `v2/phase-7-proportional-release`.
   the wasm bindings, the flow and the UI that shows the released collateral.
 - **Done when:** the releases add up exactly (128-bit arithmetic), phase 5's liveness test is
   extended to releases, and `pnpm parity` and the e2e stages pass.
+
+---
+
+## Final manual checks (deferred from task 1.5)
+
+Run by the user once phase 7 is merged into `v2`, in `pnpm dev` on testnet, before `v2` is
+proposed for `main`. Each check names the screen of the app as phase 4 leaves it.
+
+1. **Fee errors stay readable** (task 1.5 step 4). From a seed wallet holding collateral but too
+   little L-BTC for the fee, submit a proposal in the borrower app. Expected: the modal names the
+   missing L-BTC, not a stack trace.
+2. **A Jade signs the `'none'` PSETs** (task 1.5 step 5). With a Jade, submit a proposal and
+   cancel it; then, as the lender with a Jade, accept one and make a partial repayment as the
+   borrower. Expected: the Jade shows the outputs and signs each; every transaction confirms.
+3. **A wallet switch during a scan** (task 1.5 step 6). Connect seed wallet A and wait until it
+   is ready; throttle the network, leave the tab and come back after 15 s to start a scan; while
+   it runs, disconnect A and connect seed wallet B. Expected: B's lending-key fingerprint, B's
+   loans and proposals only, no error toast from A's scan. Optionally, with a Jade, unplug it
+   during "Connecting…" after the PIN with `/v1/server_recipient` throttled, replug and connect
+   again: the connect works, and a reload does not resume the unplugged session.
+
+Record the results in the commit that ticks them off.
