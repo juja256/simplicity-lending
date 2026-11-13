@@ -1,7 +1,8 @@
 // Proves that the browser (LWK + the private-lending wasm) derives the same offer addresses
 // as the Rust code. Run it with `pnpm parity`; it must pass before browser addresses are relied on.
-// It also checks, offline, the rules of the app's lending-key holder (`checkLendingKeyHolder`) and
-// the PSET builder's `'none'` blinding mode (`checkPsetBuilderNoneBlinding`).
+// It also checks, offline, the rules of the app's lending-key holder (`checkLendingKeyHolder`,
+// `checkSyncInSession`) and the PSET builder's `'none'` blinding mode
+// (`checkPsetBuilderNoneBlinding`).
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,7 +12,7 @@ import * as lwk from 'lwk_wasm'
 import { buildPset, type PsetInputSpec } from '@/lwk/psetBuilder'
 import { createWaterfallsRecipientResolver } from '@/lwk/waterfallsRecipient'
 import { inspectPset } from '@/privateLending/inspectPset'
-import { createLendingKeyHolder } from '@/privateLending/lendingKeyHolder'
+import { createLendingKeyHolder, syncInSession } from '@/privateLending/lendingKeyHolder'
 import * as wasm from '@/wasm/private-lending/private_lending_wasm'
 
 import {
@@ -194,6 +195,7 @@ async function main(): Promise<void> {
   )
 
   await checkLendingKeyHolder()
+  await checkSyncInSession()
   await checkWaterfallsRecipient()
   checkPsetBuilderNoneBlinding()
 
@@ -429,6 +431,83 @@ async function checkLendingKeyHolder(): Promise<void> {
     'lending key holder: a session that ends mid-derivation gets no key',
     outcome === 'no key' && sessionEnds === 2,
   )
+}
+
+/**
+ * `syncInSession` (`src/privateLending/lendingKeyHolder.ts`) lets a private build go on after its
+ * wallet sync only in the session the sync started in. A switch to another wallet, or to none,
+ * during the sync fails the build with a readable error instead of building in the new session.
+ * A rejected promise left unhandled here would end the script.
+ */
+async function checkSyncInSession(): Promise<void> {
+  interface Session {
+    descriptor: string
+  }
+  const descriptorOf = (masterBlindingKey: string) => `ct(slip77(${masterBlindingKey}),elwpkh(x))`
+  let current: Session | null = null
+  const holder = createLendingKeyHolder<Session>({
+    loadWasm: async () => wasm,
+    descriptorOf: session => session.descriptor,
+    isCurrent: session => current === session,
+    onSessionEnd: () => {},
+  })
+  // As the provider's `getLendingKey`: no session, or a session without a key, gives a new
+  // rejected promise on every call.
+  const getKey = (): Promise<wasm.LendingKey> =>
+    current ? holder.get(current) : Promise.reject(new Error('not connected'))
+  const switchTo = (next: Session | null) => {
+    current = null
+    holder.endSession()
+    current = next
+  }
+  const errorOf = (promise: Promise<unknown>) =>
+    promise.then(
+      () => null,
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+  const sessionOf = (masterBlindingKey: string): Session => ({
+    descriptor: descriptorOf(masterBlindingKey),
+  })
+  const name = (what: string) => `sync in session: ${what}`
+  const switched = 'The wallet changed while it was syncing, so nothing was built. Try again.'
+
+  current = sessionOf(fixture.lender_master_blinding_key)
+  const key = await syncInSession(getKey, async () => {})
+  equal(
+    name('an unchanged session gives its key'),
+    key.fingerprint(),
+    wasm.LendingKey.fromMasterBlindingKey(fixture.lender_master_blinding_key).fingerprint(),
+  )
+
+  const toOther = await errorOf(
+    syncInSession(getKey, async () => switchTo(sessionOf(fixture.borrower_master_blinding_key))),
+  )
+  equal(name('a switch to another wallet stops the build'), String(toOther), switched)
+
+  const toNone = await errorOf(syncInSession(getKey, async () => switchTo(null)))
+  equal(name('a disconnect stops the build'), String(toNone), switched)
+
+  switchTo(sessionOf(fixture.lender_master_blinding_key))
+  const failedSync = await errorOf(
+    syncInSession(getKey, async () => {
+      throw new Error('scan failed')
+    }),
+  )
+  equal(name('a failed sync fails with its own error'), String(failedSync), 'scan failed')
+
+  switchTo(null)
+  let synced = false
+  const noKey = await errorOf(
+    syncInSession(getKey, async () => {
+      synced = true
+    }),
+  )
+  check(
+    name('a key that cannot be had fails first, with its own error, and nothing syncs'),
+    noKey === 'not connected' && !synced,
+    `${noKey}, synced ${synced}`,
+  )
+  holder.endSession()
 }
 
 function outputBytesHex(tx: lwk.Transaction): string {
