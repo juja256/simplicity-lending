@@ -20,7 +20,7 @@ Builds on [the v1 design](2026-10-28-private-lending-design.md) and
 
 2. **Fix address reuse in the private flows.**
    The web app always receives at the wallet's first address (`wollet.address(0)`,
-   `web/src/providers/wallet/WalletProvider.tsx:381`), so NFTs and claims land on one address
+   `web/src/providers/wallet/WalletProvider.tsx:397`), so NFTs and claims land on one address
    and explorers flag address reuse. Idea raised: a fresh unused address for each private-flow
    receive. The public flows find a user's loans by that address's script, so they keep it.
    - The NFT outputs are explicit (the contract requires it), so they are the strongest link
