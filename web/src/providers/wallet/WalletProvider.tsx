@@ -365,6 +365,15 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         openedCache = cache
         const esploraClient = await createEsploraClient(lwkNetwork)
 
+        // A disconnect or cancel during the two awaits above found no session to end, so the
+        // attempt releases what it opened itself. Past this check, only `endSession` invalidates
+        // the attempt, and it clears `sessionRef` and the saved session itself.
+        if (attempt !== connectionChangeCounterRef.current) {
+          cache.close().catch(console.warn)
+          connector.disconnect().catch(console.warn)
+          return
+        }
+
         sessionRef.current = { connector, signerType, descriptor, wollet, esploraClient, cache }
 
         const saved: SavedSession = {
