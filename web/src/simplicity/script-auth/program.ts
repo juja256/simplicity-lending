@@ -1,4 +1,4 @@
-import { SimplicityProgram } from '@lilbonekit/lwk-web'
+import { SimplicityProgram } from 'lwk_wasm'
 import { sources } from 'virtual:simplicity-sources'
 
 import type { Bytes32 } from '@/utils/uint'
@@ -9,5 +9,9 @@ import { buildScriptAuthWitness, SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY } from './wit
 export { buildScriptAuthArguments, buildScriptAuthWitness, SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY }
 
 export function loadScriptAuthProgram(scriptHash: Bytes32): SimplicityProgram {
-  return SimplicityProgram.load(sources.script_auth, buildScriptAuthArguments(scriptHash))
+  return SimplicityProgram.loadWithDebugSymbols(
+    sources.script_auth,
+    buildScriptAuthArguments(scriptHash),
+    true,
+  )
 }

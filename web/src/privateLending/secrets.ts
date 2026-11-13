@@ -1,4 +1,4 @@
-import type { WalletTxOut } from '@lilbonekit/lwk-web'
+import type { WalletTxOut } from 'lwk_wasm'
 
 import type { InputSecret } from '@/wasm/private-lending/private_lending_wasm'
 

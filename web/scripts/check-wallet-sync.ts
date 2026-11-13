@@ -2,7 +2,7 @@
 //   TSX_TSCONFIG_PATH=tsconfig.app.json node --import tsx scripts/check-wallet-sync.ts
 import assert from 'node:assert/strict'
 
-import type { EsploraClient, Wollet } from '@lilbonekit/lwk-web'
+import type { EsploraClient, Wollet } from 'lwk_wasm'
 
 import { syncBalances } from '../src/lib/wallet-core/wallet/sync'
 

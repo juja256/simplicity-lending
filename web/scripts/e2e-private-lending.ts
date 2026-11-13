@@ -15,7 +15,7 @@
 import { randomBytes } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 
-import * as lwk from '@lilbonekit/lwk-web'
+import * as lwk from 'lwk_wasm'
 
 import { ApiError } from '@/api/errors'
 import {
@@ -1126,17 +1126,17 @@ class BuildReached extends Error {
 }
 
 /**
- * Flow deps whose LWK throws `BuildReached` at `TxBuilder`: a builder run on them stops once every
- * check before the build has passed, so nothing is built, signed, saved or broadcast.
+ * Flow deps whose `feeRate` throws `BuildReached`. The flows read it only in `buildUnblindedPset`,
+ * so a builder run on them stops once every check before the build has passed, and nothing is
+ * built, signed, saved or broadcast.
  */
 function stopAtBuild(deps: PrivateFlowDeps): PrivateFlowDeps {
-  const lwkStopped = new Proxy(deps.lwk, {
-    get(target, property, receiver) {
-      if (property === 'TxBuilder') throw new BuildReached()
-      return Reflect.get(target, property, receiver)
+  return {
+    ...deps,
+    get feeRate(): number {
+      throw new BuildReached()
     },
-  })
-  return { ...deps, lwk: lwkStopped }
+  }
 }
 
 /**
@@ -1717,14 +1717,10 @@ async function tryEarlyLiquidation(
   const base = flowDeps(ctx.wallets.lender, ctx.chain)
   const deps: PrivateFlowDeps = {
     ...base,
-    lwk: {
-      ...lwk,
-      TxBuilder: new Proxy(lwk.TxBuilder, {
-        construct(target, args) {
-          touched.push('new TxBuilder')
-          return Reflect.construct(target, args) as object
-        },
-      }),
+    // read only by `buildUnblindedPset`, at the PSET build
+    get feeRate(): number {
+      touched.push('the PSET build')
+      return base.feeRate
     },
     fetchTx: txid => {
       touched.push(`fetchTx ${txid}`)

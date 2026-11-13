@@ -10,6 +10,7 @@ import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { buildPrivateCreation } from '@/privateLending/flows/creation'
 import { usePrivateFlowDeps } from '@/privateLending/hooks/usePrivateFlowDeps'
 import { usePrivateTransaction } from '@/privateLending/hooks/usePrivateTransaction'
+import { syncInSession } from '@/privateLending/lendingKeyHolder'
 import { expiryLabel } from '@/privateLending/offerView'
 import { selectCreationCoins, walletReceiver } from '@/privateLending/wallet'
 import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
@@ -67,12 +68,8 @@ export default function CreatePrivateOfferModal({
   const execute = async () => {
     if (!draft) throw new Error('There is no offer to create')
     return run({ kind: 'private_create_offer' }, async () => {
-      await syncWallet()
-      const [deps, borrower, tip] = await Promise.all([
-        getDeps(),
-        getLendingKey(),
-        fetchLatestBlockHeight(),
-      ])
+      const borrower = await syncInSession(getLendingKey, syncWallet)
+      const [deps, tip] = await Promise.all([getDeps(), fetchLatestBlockHeight()])
       if (draft.lender.pubkey === borrower.xOnlyPublicKey()) {
         throw new Error('The lender is your own lending key')
       }

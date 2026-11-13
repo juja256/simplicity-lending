@@ -3,7 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-import * as lwk from '@lilbonekit/lwk-web'
+import * as lwk from 'lwk_wasm'
 
 import { resolveWaterfallsRecipient } from '@/lwk/waterfallsRecipient'
 import type { PrivateFlowDeps } from '@/privateLending/deps'
@@ -17,9 +17,7 @@ const simfDir = path.resolve(webRoot, '../crates/contracts/simf')
 
 export async function initRuntime(): Promise<void> {
   await lwk.default({
-    module_or_path: fs.readFileSync(
-      path.join(webRoot, 'node_modules/@lilbonekit/lwk-web/lwk_wasm_bg.wasm'),
-    ),
+    module_or_path: fs.readFileSync(path.join(webRoot, 'node_modules/lwk_wasm/lwk_wasm_bg.wasm')),
   })
   await wasm.default({
     module_or_path: fs.readFileSync(
@@ -89,7 +87,7 @@ export function flowDeps(wallet: SeedWallet, chain: Chain): PrivateFlowDeps {
     walletUtxos: () => wallet.utxos(),
     fetchTx: txid => chain.fetchTx(txid),
     fetchTipHeight: () => chain.tipHeight(),
-    feeRate: null,
+    feeRate: 100,
     assets: { ...TESTNET_ASSETS },
   }
 }

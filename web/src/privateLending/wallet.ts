@@ -1,9 +1,8 @@
 // The wallet's side of a private build: coin selection over the wallet's coins with their secrets
 // (`WalletTxOut`), and the wallet's receive address. The public selection rules apply (confirmed
 // coins, the fee reserve), and the picked coins keep their type.
-import type { Address, WalletTxOut } from '@lilbonekit/lwk-web'
+import type { Address, WalletTxOut } from 'lwk_wasm'
 
-import { FALLBACK_FEE_RATE_SAT_PER_KVB } from '@/api/esplora/fee'
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import {
   estimateFeeBudgetSats,
@@ -28,23 +27,22 @@ export function selectAssetCoins(
 
 /**
  * Confirmed policy-asset coins covering the fee of a transaction whose covenant inputs weigh
- * `weightUnits`, at `feeRate` (sat/kvb, or the fallback rate). Coins in `exclude` are left out, so
- * every input of the transaction stays distinct. Throws on an insufficient balance.
+ * `weightUnits`, at `feeRate` sat/kvb. Coins in `exclude` are left out, so every input of the
+ * transaction stays distinct. Throws on an insufficient balance.
  */
 export function selectFeeCoins(
   coins: WalletTxOut[],
   policyAsset: string,
   weightUnits: number,
-  feeRate: number | null,
+  feeRate: number,
   exclude: readonly WalletTxOut[] = [],
 ): WalletTxOut[] {
-  const rate = feeRate ?? FALLBACK_FEE_RATE_SAT_PER_KVB
   const candidates = coins.filter(coin => !exclude.includes(coin))
   const picked = selectFeeUtxos(
     candidates,
     policyAsset,
-    estimateFeeBudgetSats(weightUnits, rate),
-    rate,
+    estimateFeeBudgetSats(weightUnits, feeRate),
+    feeRate,
   )
   return candidates.filter(coin => picked.includes(coin))
 }
@@ -57,12 +55,8 @@ export function selectFeeCoins(
 const CREATION_EXTRA_WEIGHT_UNITS = 6000
 
 /** A creation's fee reserve with `inputs` wallet inputs, at `feeRate` sat/kvb. */
-export function creationFeeBudgetSats(inputs: number, feeRate: number | null): bigint {
-  return estimateFeeBudgetSats(
-    CREATION_EXTRA_WEIGHT_UNITS,
-    feeRate ?? FALLBACK_FEE_RATE_SAT_PER_KVB,
-    inputs,
-  )
+export function creationFeeBudgetSats(inputs: number, feeRate: number): bigint {
+  return estimateFeeBudgetSats(CREATION_EXTRA_WEIGHT_UNITS, feeRate, inputs)
 }
 
 /** The fewest coins a creation spends: one issues each NFT, and at least one pays the collateral. */
@@ -86,7 +80,7 @@ export function pickCreationCoins<T>(
   coins: readonly T[],
   valueOf: (coin: T) => bigint,
   collateralAmount: bigint,
-  feeRate: number | null,
+  feeRate: number,
 ): CreationCoins<T> {
   const { symbol } = NETWORK_CONFIG.collateralAsset
   const sorted = coins
@@ -133,7 +127,7 @@ export function selectCreationCoins(
   coins: WalletTxOut[],
   assets: PrivateFlowDeps['assets'],
   collateralAmount: bigint,
-  feeRate: number | null,
+  feeRate: number,
 ): CreationCoins<WalletTxOut> {
   if (assets.collateral !== assets.policy) {
     throw new Error(
