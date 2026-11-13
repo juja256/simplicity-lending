@@ -9,9 +9,9 @@
 // The covenant checks the borrower NFT burn (input 0 to output 0), the active collateral at input
 // 1 and the pinned repayment at output 1; it leaves the collateral to the spender. The borrower NFT
 // is an explicit output at a wallet address, which LWK does not list among the wallet's coins, so
-// it is spent as a plain input, not a wallet coin, that the wallet still signs. `buildPset` adds
-// only the policy-asset change, after the given outputs, so the builder pays the principal change
-// itself, at output 3.
+// it is spent as a plain input, not a wallet coin; the wallet still recognizes its script, and
+// signs it. `buildPset` adds only the policy-asset change, after the given outputs, so the builder
+// pays the principal change itself, at output 3.
 // The covenant does not check that the principal was claimed, and the borrower NFT is the only key
 // to an unclaimed principal (asset_auth(borrower NFT, 1, no burn)): burning it first would strand
 // the principal forever. So the builder spends the NFT only from the principal claim's output 0,
