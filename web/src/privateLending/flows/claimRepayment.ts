@@ -4,9 +4,9 @@
 //   outputs  0 burns the lender NFT (OP_RETURN, explicit), 1 the repayment to the lender, blinded
 //            to its wallet; change and fee follow.
 // The lender NFT is an explicit output at a wallet address (the acceptance's output 2). LWK lists
-// only blinded coins as the wallet's, so it is spent as an external UTXO; LWK still recognizes its
-// script, so the wallet signs and finalizes it.
-import type { Address, WalletTxOut } from '@lilbonekit/lwk-web'
+// only blinded coins as the wallet's, so it is spent as a plain input, not a wallet coin; LWK still
+// recognizes its script, so the wallet signs and finalizes it.
+import type { Address, WalletTxOut } from 'lwk_wasm'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
@@ -29,6 +29,7 @@ import type { VerifiedOffer } from '../verify'
 import {
   assertAllInputsFinalized,
   assertSpendLayout,
+  buildUnblindedPset,
   burnScript,
   fetchPrevoutTxs,
   outpointOf,
@@ -37,6 +38,7 @@ import {
   prevoutsOf,
   requireOutput,
   type SpendLayout,
+  walletCoinInput,
   wasmStep,
 } from './shared'
 
@@ -174,39 +176,41 @@ export async function buildRepaymentClaim(
   // The transactions of the fee coins: finalization needs every prevout.
   const feePrevoutTxs = await fetchPrevoutTxs(deps, feeInputs)
 
-  // 4. The unblinded PSET.
-  let builder = new lwk.TxBuilder(deps.network)
-  if (deps.feeRate !== null) builder = builder.feeRate(deps.feeRate)
-  builder = builder
-    .setWalletUtxos(feeInputs.map(outpoint => new lwk.OutPoint(outpoint)))
-    .setInputOrder(inputs.map(outpoint => new lwk.OutPoint(outpoint)))
-    .addExternalUtxos([
-      new lwk.ExternalUtxo(
-        repaymentRef.vout,
-        repaymentTx,
-        pinnedTxOutSecrets(deps, repayment),
-        ASSET_AUTH_BURN_MAX_WEIGHT_TO_SATISFY,
-        true,
-      ),
-      new lwk.ExternalUtxo(
-        nftRef.vout,
-        nftTx,
-        lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(lenderNft), NFT_AMOUNT),
-        EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
-        true,
-      ),
-    ])
-    .addPostIssuanceScriptOutput(burn, NFT_AMOUNT, lwk.AssetId.fromString(lenderNft))
-    .addPostIssuanceRecipient(
-      repaymentReceiver,
-      repayment.amount,
-      lwk.AssetId.fromString(repayment.asset),
-    )
-    // last, so that no later builder call can reset it
-    .skipBlinding()
-  const unblinded = builder.finish(deps.wollet)
+  // 4. The unblinded PSET: the inputs and the leading outputs in layout order.
+  const feePrevouts = prevoutsOf(feePrevoutTxs, feeInputs)
+  const unblinded = buildUnblindedPset(deps, {
+    inputs: [
+      {
+        outpoint: new lwk.OutPoint(repaymentInput),
+        prevout: requireOutput(repaymentTx, repaymentRef.vout, 'The repayment'),
+        asset: lwk.AssetId.fromString(repayment.asset),
+        amount: repayment.amount,
+        secrets: pinnedTxOutSecrets(deps, repayment),
+        maxWeightToSatisfy: ASSET_AUTH_BURN_MAX_WEIGHT_TO_SATISFY,
+      },
+      {
+        outpoint: new lwk.OutPoint(nftInput),
+        prevout: requireOutput(nftTx, nftRef.vout, 'The lender NFT'),
+        asset: lwk.AssetId.fromString(lenderNft),
+        amount: NFT_AMOUNT,
+        secrets: lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(lenderNft), NFT_AMOUNT),
+        maxWeightToSatisfy: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
+      },
+      ...params.feeCoins.map((coin, index) => walletCoinInput(deps, coin, feePrevouts[index])),
+    ],
+    outputs: [
+      { script: burn, amount: NFT_AMOUNT, asset: lwk.AssetId.fromString(lenderNft) },
+      {
+        script: repaymentReceiver.scriptPubkey(),
+        amount: repayment.amount,
+        asset: lwk.AssetId.fromString(repayment.asset),
+        blindingPubkey: repaymentReceiver.blindingPubkey(),
+      },
+    ],
+    changeAddress: deps.wollet.change(null).address(),
+  })
 
-  // 5. The layout LWK built.
+  // 5. The layout of the unblinded PSET.
   assertSpendLayout(deps, unblinded, layout, false, 'Repayment claim')
 
   // 6. Blinding: the repayment input's secrets are the pinned ones; every output is fresh.

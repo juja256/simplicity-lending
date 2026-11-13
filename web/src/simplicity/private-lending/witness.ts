@@ -1,6 +1,6 @@
 // The private lending witness and input weights. Free of `virtual:simplicity-sources`, so the
 // DOM-free private flow builders and Node can use them; `program.ts` re-exports them.
-import { SimplicityType, SimplicityTypedValue, SimplicityWitnessValues } from '@lilbonekit/lwk-web'
+import { SimplicityType, SimplicityTypedValue, SimplicityWitnessValues } from 'lwk_wasm'
 
 export type PrivateLendingBranch =
   | 'OfferAcceptance'
@@ -25,7 +25,7 @@ export const PRIVATE_LENDING_BRANCH_SPENDS_ACTIVE: Record<PrivateLendingBranch, 
   Liquidation: true,
 }
 
-// ExternalUtxo max-weight-to-satisfy for the private lending covenant input, per branch: the
+// `PsetInputSpec.maxWeightToSatisfy` for the private lending covenant input, per branch: the
 // serialized script witness (witness data + program + CMR + control block) of a real broadcast
 // transaction, plus 10 %, rounded up.
 export const PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY: Record<PrivateLendingBranch, number> = {

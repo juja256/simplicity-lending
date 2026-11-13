@@ -1,11 +1,11 @@
 // Finalizing the Simplicity inputs of private offer transactions: the offer itself, the lender
 // NFT at its script_auth lock, and the asset_auth outputs (principal, repayment). Each wraps
-// LWK's `finalizeTransactionWithSpendInfo`, which runs the program on the transaction and fails
-// if the covenant does not hold.
+// LWK's `finalizeTransaction`, which runs the program on the transaction and fails if the
+// covenant does not hold. The control block is that of the program's leaf in its spend info.
 //
 // `prevouts` are the outputs every input of `tx` spends, in input order. LWK consumes them: pass
 // a fresh array (fresh `TxOut` objects, e.g. from `tx.outputs`, which copies) to every call.
-import type { Script, SimplicityProgram, Transaction, TxOut } from '@lilbonekit/lwk-web'
+import type { Script, SimplicityProgram, Transaction, TxOut } from 'lwk_wasm'
 
 import { buildAssetAuthWitness } from '@/simplicity/asset-auth/witness'
 import {
@@ -75,11 +75,12 @@ export function finalizePrivateOfferInput(
   if (PRIVATE_LENDING_BRANCH_SPENDS_ACTIVE[branch] !== active) {
     throw new Error(`${branch} spends the ${active ? 'pending' : 'active'} offer`)
   }
+  const { program } = offer.scripts
   const spendInfo = active ? offer.scripts.activeSpendInfo : offer.scripts.pendingSpendInfo
   return wasmStep(`Finalizing the offer input ${inputIndex} (${branch})`, () =>
-    offer.scripts.program.finalizeTransactionWithSpendInfo(
+    program.finalizeTransaction(
       tx,
-      spendInfo,
+      spendInfo.controlBlock(program.cmr),
       prevouts,
       inputIndex,
       buildPrivateLendingWitness(branch),
@@ -107,9 +108,9 @@ export function finalizeScriptAuthInput(
     throw new Error("The script_auth program does not give the offer's lender NFT lock")
   }
   return wasmStep(`Finalizing the lender NFT lock input ${inputIndex} (script_auth)`, () =>
-    program.finalizeTransactionWithSpendInfo(
+    program.finalizeTransaction(
       tx,
-      spendInfo,
+      spendInfo.controlBlock(program.cmr),
       prevouts,
       inputIndex,
       buildScriptAuthWitness(toUint32(offerInputIndex, 'offerInputIndex')),
@@ -134,9 +135,9 @@ export function finalizeAssetAuthInput(
 ): Transaction {
   const { program } = pinnedAuthCovenant(deps, offer, output)
   return wasmStep(`Finalizing the ${output} input ${inputIndex} (asset_auth)`, () =>
-    program.finalizeTransactionWithSpendInfo(
+    program.finalizeTransaction(
       tx,
-      buildCovenantSpendInfo(program),
+      buildCovenantSpendInfo(program).controlBlock(program.cmr),
       prevouts,
       inputIndex,
       buildAssetAuthWitness({

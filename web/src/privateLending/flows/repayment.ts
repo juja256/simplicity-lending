@@ -9,14 +9,14 @@
 // The covenant checks the borrower NFT burn (input 0 to output 0), the active collateral at input
 // 1 and the pinned repayment at output 1; it leaves the collateral to the spender. The borrower NFT
 // is an explicit output at a wallet address, which LWK does not list among the wallet's coins, so
-// it is spent as an external UTXO that the wallet still signs. LWK puts the change of any asset
-// but the policy asset before the post-issuance outputs, so the builder pays the principal change
-// itself, after them.
+// it is spent as a plain input, not a wallet coin; the wallet still recognizes its script, and
+// signs it. `buildPset` adds only the policy-asset change, after the given outputs, so the builder
+// pays the principal change itself, at output 3.
 // The covenant does not check that the principal was claimed, and the borrower NFT is the only key
 // to an unclaimed principal (asset_auth(borrower NFT, 1, no burn)): burning it first would strand
 // the principal forever. So the builder spends the NFT only from the principal claim's output 0,
 // checked on chain, whatever the indexer says.
-import type { Address, WalletTxOut } from '@lilbonekit/lwk-web'
+import type { Address, WalletTxOut } from 'lwk_wasm'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
@@ -38,6 +38,7 @@ import type { VerifiedOffer } from '../verify'
 import {
   assertAllInputsFinalized,
   assertSpendLayout,
+  buildUnblindedPset,
   burnScript,
   type ExpectedOutput,
   fetchPrevoutTxs,
@@ -47,6 +48,7 @@ import {
   prevoutsOf,
   requireOutput,
   type SpendLayout,
+  walletCoinInput,
   wasmStep,
 } from './shared'
 
@@ -219,7 +221,7 @@ export async function buildPrivateRepayment(
   )
   const burn = burnScript(deps)
   const collateralReceiver = lwk.Address.parse(params.collateralReceiver.toString(), deps.network)
-  // the wallet's last unused address, confidential: the change is blinded to the wallet
+  // the wallet's last unused address, confidential: the principal change is blinded to the wallet
   const changeAddress = deps.wollet.address(null).address()
   const changeOutputs: ExpectedOutput[] =
     principalChange > 0n
@@ -270,51 +272,57 @@ export async function buildPrivateRepayment(
   // The transactions of the wallet coins: finalization needs every prevout.
   const walletPrevoutTxs = await fetchPrevoutTxs(deps, walletInputs)
 
-  // 4. The unblinded PSET.
-  let builder = new lwk.TxBuilder(deps.network)
-  if (deps.feeRate !== null) builder = builder.feeRate(deps.feeRate)
-  builder = builder
-    .setWalletUtxos(walletInputs.map(outpoint => new lwk.OutPoint(outpoint)))
-    .setInputOrder(inputs.map(outpoint => new lwk.OutPoint(outpoint)))
-    .addExternalUtxos([
-      new lwk.ExternalUtxo(
-        nftRef.vout,
-        nftTx,
-        lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(borrowerNft), NFT_AMOUNT),
-        EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
-        true,
-      ),
-      new lwk.ExternalUtxo(
-        offerRef.vout,
-        offerTx,
-        pinnedTxOutSecrets(deps, activeCollateral),
-        PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.FullRepayment,
-        true,
-      ),
-    ])
-    .addPostIssuanceScriptOutput(burn, NFT_AMOUNT, lwk.AssetId.fromString(borrowerNft))
-    .addPostIssuanceRecipient(
-      repaymentAddress,
-      repayment.amount,
-      lwk.AssetId.fromString(repayment.asset),
-    )
-    .addPostIssuanceRecipient(
-      collateralReceiver,
-      activeCollateral.amount,
-      lwk.AssetId.fromString(activeCollateral.asset),
-    )
-  if (principalChange > 0n) {
-    builder = builder.addPostIssuanceRecipient(
-      changeAddress,
-      principalChange,
-      lwk.AssetId.fromString(principalAsset),
-    )
-  }
-  // last, so that no later builder call can reset it
-  builder = builder.skipBlinding()
-  const unblinded = builder.finish(deps.wollet)
+  // 4. The unblinded PSET: the inputs and the leading outputs in layout order.
+  const walletPrevouts = prevoutsOf(walletPrevoutTxs, walletInputs)
+  const unblinded = buildUnblindedPset(deps, {
+    inputs: [
+      {
+        outpoint: new lwk.OutPoint(nftInput),
+        prevout: requireOutput(nftTx, nftRef.vout, 'The borrower NFT'),
+        asset: lwk.AssetId.fromString(borrowerNft),
+        amount: NFT_AMOUNT,
+        secrets: lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(borrowerNft), NFT_AMOUNT),
+        maxWeightToSatisfy: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
+      },
+      {
+        outpoint: new lwk.OutPoint(offerInput),
+        prevout: requireOutput(offerTx, offerRef.vout, 'The active offer'),
+        asset: lwk.AssetId.fromString(activeCollateral.asset),
+        amount: activeCollateral.amount,
+        secrets: pinnedTxOutSecrets(deps, activeCollateral),
+        maxWeightToSatisfy: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.FullRepayment,
+      },
+      ...walletCoins.map((coin, index) => walletCoinInput(deps, coin, walletPrevouts[index])),
+    ],
+    outputs: [
+      { script: burn, amount: NFT_AMOUNT, asset: lwk.AssetId.fromString(borrowerNft) },
+      {
+        script: repaymentAddress.scriptPubkey(),
+        amount: repayment.amount,
+        asset: lwk.AssetId.fromString(repayment.asset),
+        blindingPubkey: repaymentAddress.blindingPubkey(),
+      },
+      {
+        script: collateralReceiver.scriptPubkey(),
+        amount: activeCollateral.amount,
+        asset: lwk.AssetId.fromString(activeCollateral.asset),
+        blindingPubkey: collateralReceiver.blindingPubkey(),
+      },
+      ...(principalChange > 0n
+        ? [
+            {
+              script: changeAddress.scriptPubkey(),
+              amount: principalChange,
+              asset: lwk.AssetId.fromString(principalAsset),
+              blindingPubkey: changeAddress.blindingPubkey(),
+            },
+          ]
+        : []),
+    ],
+    changeAddress: deps.wollet.change(null).address(),
+  })
 
-  // 5. The layout LWK built.
+  // 5. The layout of the unblinded PSET.
   assertSpendLayout(deps, unblinded, layout, false, 'Repayment')
 
   // 6. Blinding: the repayment with its pinned blinders; the other outputs fresh.

@@ -82,6 +82,8 @@ To run the **demo frontend** (web app for borrowers and lenders), you need the *
 
 2. **Web** — install deps and start the dev server (see [web/README.md](web/README.md)):
    ```bash
+   git submodule update --init lwk && git config submodule.recurse true
+   web/scripts/build-lwk.sh
    cd web
    pnpm install
    pnpm build:wasm

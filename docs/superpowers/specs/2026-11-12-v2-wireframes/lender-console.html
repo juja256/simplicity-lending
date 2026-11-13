@@ -1,0 +1,70 @@
+<h2>Lender console: a first sketch</h2>
+<p class="subtitle">Option A's lender side. A wireframe with made-up numbers. Tell me in the terminal what's wrong or missing.</p>
+
+<div class="mockup">
+  <div class="mockup-header">Lender console · Proposals</div>
+  <div class="mockup-body">
+    <div class="mock-nav">Simplicity Lending · Lender console &nbsp;&nbsp;&nbsp; Acme Capital · key 3f9a…c21e &nbsp;&nbsp;&nbsp; Jade ▾ &nbsp;&nbsp;&nbsp; <small>Borrower side →</small></div>
+    <div style="display:flex">
+      <div class="mock-sidebar" style="min-width:150px">
+        <b>Proposals (3)</b><br><br>
+        Loan book<br><br>
+        Terms<br><br>
+        Profile &amp; key
+      </div>
+      <div class="mock-content" style="flex:1">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+          <div class="placeholder" style="flex:1;min-width:110px;padding:8px"><small class="label">Waiting for you</small><br><b>3 proposals</b></div>
+          <div class="placeholder" style="flex:1;min-width:110px;padding:8px"><small class="label">Active loans</small><br><b>12</b></div>
+          <div class="placeholder" style="flex:1;min-width:110px;padding:8px"><small class="label">Lent out</small><br><b>184,000 USDt</b></div>
+          <div class="placeholder" style="flex:1;min-width:110px;padding:8px"><small class="label">Collateral held</small><br><b>3.12 L-BTC</b></div>
+          <div class="placeholder" style="flex:1;min-width:110px;padding:8px"><small class="label">Due in 7 days / overdue</small><br><b>2 / 1</b></div>
+        </div>
+
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <tr style="text-align:left;border-bottom:1px solid #8884">
+            <th>Received</th><th>Borrower</th><th>Borrow</th><th>Collateral</th><th>Ratio*</th><th>APR</th><th>Term</th><th>Against your terms</th><th></th>
+          </tr>
+          <tr style="border-bottom:1px solid #8882">
+            <td>10 min ago</td><td>key 7b02…e4</td><td>5,000 USDt</td><td>0.085 L-BTC</td><td>162%</td><td>7.0%</td><td>90 days</td><td>✓ within terms</td><td><button class="mock-button">Review</button></td>
+          </tr>
+          <tr style="border-bottom:1px solid #8882">
+            <td>2 h ago</td><td>key a611…09</td><td>20,000 USDt</td><td>0.33 L-BTC</td><td>157%</td><td>6.5%</td><td>180 days</td><td>✓ within terms</td><td><button class="mock-button">Review</button></td>
+          </tr>
+          <tr style="border-bottom:1px solid #8882;opacity:.85">
+            <td>yesterday</td><td>key 52cd…71</td><td>8,000 USDt</td><td>0.10 L-BTC</td><td>119%</td><td>4.0%</td><td>30 days</td><td>⚠ ratio below 150%, APR below 6.0%<br><small>not made in the app</small></td><td><button class="mock-button">Review</button></td>
+          </tr>
+        </table>
+        <p style="font-size:12px;margin-top:8px">* at your reference price, 1 L-BTC = 95,000 USDt, set 3 h ago. Accepting asks you to confirm the terms and sign; nothing is accepted automatically.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="split" style="margin-top:18px">
+  <div class="mockup">
+    <div class="mockup-header">Lender console · Terms</div>
+    <div class="mockup-body">
+      <p><b>Your published terms</b> <small>(public in the directory, signed by your lending key)</small></p>
+      <p>Lend: <b>USDt</b> &nbsp;·&nbsp; Collateral: <b>L-BTC</b></p>
+      <p>Minimum APR: <input class="mock-input" value="6.0 %" style="width:80px"></p>
+      <p>Reference price: <input class="mock-input" value="1 L-BTC = 95,000 USDt" style="width:190px"> <small>updated 3 h ago</small></p>
+      <p>Minimum collateral ratio: <input class="mock-input" value="150 %" style="width:80px"></p>
+      <p>Term: <input class="mock-input" value="30 – 180 days" style="width:120px"></p>
+      <p>Loan size: <input class="mock-input" value="1,000 – 50,000 USDt" style="width:170px"></p>
+      <button class="mock-button">Sign and publish</button>
+    </div>
+  </div>
+  <div class="mockup">
+    <div class="mockup-header">Lender console · Loan book</div>
+    <div class="mockup-body">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <tr style="text-align:left;border-bottom:1px solid #8884"><th>Borrower</th><th>Lent</th><th>Due</th><th>Status</th><th></th></tr>
+        <tr style="border-bottom:1px solid #8882"><td>key 19ee…3a</td><td>12,000 USDt</td><td>in 41 days</td><td>active</td><td></td></tr>
+        <tr style="border-bottom:1px solid #8882"><td>key c0a4…5f</td><td>3,000 USDt</td><td>repaid</td><td>repayment waiting</td><td><button class="mock-button">Claim</button></td></tr>
+        <tr style="border-bottom:1px solid #8882"><td>key 8d71…b2</td><td>9,500 USDt</td><td>2 days ago</td><td>overdue</td><td><button class="mock-button">Liquidate</button></td></tr>
+      </table>
+      <p style="font-size:12px;margin-top:8px">Only you and each borrower can see these loans. On chain, amounts and terms are hidden.</p>
+    </div>
+  </div>
+</div>

@@ -1,14 +1,18 @@
 // Proves that the browser (LWK + the private-lending wasm) derives the same offer addresses
 // as the Rust code. Run it with `pnpm parity`; it must pass before browser addresses are relied on.
-// It also checks, offline, the rules of the app's lending-key holder (`checkLendingKeyHolder`).
+// It also checks, offline, the rules of the app's lending-key holder (`checkLendingKeyHolder`,
+// `checkSyncInSession`) and the PSET builder's `'none'` blinding mode
+// (`checkPsetBuilderNoneBlinding`).
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import * as lwk from '@lilbonekit/lwk-web'
+import * as lwk from 'lwk_wasm'
 
+import { buildPset, type PsetInputSpec } from '@/lwk/psetBuilder'
 import { createWaterfallsRecipientResolver } from '@/lwk/waterfallsRecipient'
-import { createLendingKeyHolder } from '@/privateLending/lendingKeyHolder'
+import { inspectPset } from '@/privateLending/inspectPset'
+import { createLendingKeyHolder, syncInSession } from '@/privateLending/lendingKeyHolder'
 import * as wasm from '@/wasm/private-lending/private_lending_wasm'
 
 import {
@@ -88,9 +92,7 @@ function hex(script: lwk.Script): string {
 
 async function main(): Promise<void> {
   await lwk.default({
-    module_or_path: fs.readFileSync(
-      path.join(webRoot, 'node_modules/@lilbonekit/lwk-web/lwk_wasm_bg.wasm'),
-    ),
+    module_or_path: fs.readFileSync(path.join(webRoot, 'node_modules/lwk_wasm/lwk_wasm_bg.wasm')),
   })
   await wasm.default({
     module_or_path: fs.readFileSync(
@@ -193,9 +195,108 @@ async function main(): Promise<void> {
   )
 
   await checkLendingKeyHolder()
+  await checkSyncInSession()
   await checkWaterfallsRecipient()
+  checkPsetBuilderNoneBlinding()
 
   report('private lending parity: ok')
+}
+
+/**
+ * In `'none'` mode, `buildPset` (`src/lwk/psetBuilder.ts`) leaves blinding to the caller. The
+ * confidential outputs keep their blinding key, their blinder is the first `walletCoin` input
+ * (else input 0), and nothing is committed until the private wasm's `blindPset` blinds the PSET.
+ */
+function checkPsetBuilderNoneBlinding(): void {
+  const network = lwk.Network.testnet()
+  const policyAsset = network.policyAsset()
+  // The fixtures hold no address: this one is the lender NFT lock script, blinded to the lender.
+  const lender = wasm.LendingKey.fromMasterBlindingKey(fixture.lender_master_blinding_key)
+  const address = lwk.Address.parse(
+    wasm.confidentialAddress(
+      fixture.lender_nft_script_pubkey,
+      wasm.liftLendingKey(lender.xOnlyPublicKey()),
+      'liquidtestnet',
+    ),
+    network,
+  )
+  const coin = (vout: number, walletCoin: boolean): PsetInputSpec => ({
+    outpoint: new lwk.OutPoint(`${'11'.repeat(32)}:${vout}`),
+    prevout: lwk.TxOut.fromExplicit(address.scriptPubkey(), policyAsset, 100_000n),
+    asset: policyAsset,
+    amount: 100_000n,
+    maxWeightToSatisfy: 300,
+    walletCoin,
+  })
+  const build = (inputs: PsetInputSpec[]) =>
+    buildPset({
+      network,
+      inputs,
+      outputs: [
+        {
+          script: address.scriptPubkey(),
+          amount: 10_000n,
+          asset: policyAsset,
+          blindingPubkey: address.blindingPubkey(),
+        },
+      ],
+      changeAddress: address,
+      feeRateSatPerKvb: 100,
+      blinding: 'none',
+    })
+  const name = (what: string) => `pset builder 'none': ${what}`
+
+  const { pset, fee } = build([coin(0, true)])
+  const { outputs } = inspectPset(wasm, pset.toString())
+  check(name('recipient, change and fee outputs'), outputs.length === 3, `${outputs.length}`)
+  for (const [i, o] of outputs.slice(0, 2).entries()) {
+    check(
+      name(`output ${i} keeps its blinding key, blinder input 0`),
+      o.blindingKey !== null && o.blinderIndex === 0,
+      `key ${o.blindingKey}, blinder ${o.blinderIndex}`,
+    )
+    check(
+      name(`output ${i} is not blinded`),
+      o.assetCommitment === null && o.amountCommitment === null,
+    )
+  }
+  check(
+    name('the fee output'),
+    outputs[2].script === '' && outputs[2].amount === fee && fee > 0n,
+    `script '${outputs[2].script}', amount ${outputs[2].amount}, fee ${fee}`,
+  )
+  check(
+    name('the change'),
+    outputs[1].amount === 100_000n - 10_000n - fee,
+    `${outputs[1].amount}, fee ${fee}`,
+  )
+
+  const blinded = inspectPset(
+    wasm,
+    wasm.blindPset(
+      pset.toString(),
+      [wasm.InputSecret.explicit(0, policyAsset.toString(), 100_000n)],
+      [],
+    ),
+  )
+  for (const i of [0, 1]) {
+    const o = blinded.outputs[i]
+    check(
+      name(`blindPset commits output ${i}`),
+      o.assetCommitment !== null && o.amountCommitment !== null,
+    )
+  }
+
+  // Above, the only input is both the first walletCoin and input 0; these builds tell them apart.
+  const blinders = (inputs: PsetInputSpec[]) =>
+    inspectPset(wasm, build(inputs).pset.toString())
+      .outputs.slice(0, 2)
+      .map(o => o.blinderIndex)
+      .join(',')
+  const firstWalletCoin = blinders([coin(0, false), coin(1, true), coin(2, true)])
+  check(name('the first walletCoin input blinds'), firstWalletCoin === '1,1', firstWalletCoin)
+  const noWalletCoin = blinders([coin(0, false)])
+  check(name('without a walletCoin input, input 0 blinds'), noWalletCoin === '0,0', noWalletCoin)
 }
 
 /**
@@ -330,6 +431,83 @@ async function checkLendingKeyHolder(): Promise<void> {
     'lending key holder: a session that ends mid-derivation gets no key',
     outcome === 'no key' && sessionEnds === 2,
   )
+}
+
+/**
+ * `syncInSession` (`src/privateLending/lendingKeyHolder.ts`) lets a private build go on after its
+ * wallet sync only in the session the sync started in. A switch to another wallet, or to none,
+ * during the sync fails the build with a readable error instead of building in the new session.
+ * A rejected promise left unhandled here would end the script.
+ */
+async function checkSyncInSession(): Promise<void> {
+  interface Session {
+    descriptor: string
+  }
+  const descriptorOf = (masterBlindingKey: string) => `ct(slip77(${masterBlindingKey}),elwpkh(x))`
+  let current: Session | null = null
+  const holder = createLendingKeyHolder<Session>({
+    loadWasm: async () => wasm,
+    descriptorOf: session => session.descriptor,
+    isCurrent: session => current === session,
+    onSessionEnd: () => {},
+  })
+  // As the provider's `getLendingKey`: no session, or a session without a key, gives a new
+  // rejected promise on every call.
+  const getKey = (): Promise<wasm.LendingKey> =>
+    current ? holder.get(current) : Promise.reject(new Error('not connected'))
+  const switchTo = (next: Session | null) => {
+    current = null
+    holder.endSession()
+    current = next
+  }
+  const errorOf = (promise: Promise<unknown>) =>
+    promise.then(
+      () => null,
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+  const sessionOf = (masterBlindingKey: string): Session => ({
+    descriptor: descriptorOf(masterBlindingKey),
+  })
+  const name = (what: string) => `sync in session: ${what}`
+  const switched = 'The wallet changed while it was syncing, so nothing was built. Try again.'
+
+  current = sessionOf(fixture.lender_master_blinding_key)
+  const key = await syncInSession(getKey, async () => {})
+  equal(
+    name('an unchanged session gives its key'),
+    key.fingerprint(),
+    wasm.LendingKey.fromMasterBlindingKey(fixture.lender_master_blinding_key).fingerprint(),
+  )
+
+  const toOther = await errorOf(
+    syncInSession(getKey, async () => switchTo(sessionOf(fixture.borrower_master_blinding_key))),
+  )
+  equal(name('a switch to another wallet stops the build'), String(toOther), switched)
+
+  const toNone = await errorOf(syncInSession(getKey, async () => switchTo(null)))
+  equal(name('a disconnect stops the build'), String(toNone), switched)
+
+  switchTo(sessionOf(fixture.lender_master_blinding_key))
+  const failedSync = await errorOf(
+    syncInSession(getKey, async () => {
+      throw new Error('scan failed')
+    }),
+  )
+  equal(name('a failed sync fails with its own error'), String(failedSync), 'scan failed')
+
+  switchTo(null)
+  let synced = false
+  const noKey = await errorOf(
+    syncInSession(getKey, async () => {
+      synced = true
+    }),
+  )
+  check(
+    name('a key that cannot be had fails first, with its own error, and nothing syncs'),
+    noKey === 'not connected' && !synced,
+    `${noKey}, synced ${synced}`,
+  )
+  holder.endSession()
 }
 
 function outputBytesHex(tx: lwk.Transaction): string {

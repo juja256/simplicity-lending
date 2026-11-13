@@ -19,6 +19,7 @@ import type { PrivateFlowDeps } from '@/privateLending/deps'
 import { PRIVATE_API_BASE_URL, usePrivateFlowDeps } from '@/privateLending/hooks/usePrivateFlowDeps'
 import { useLoadVerifiedOffer } from '@/privateLending/hooks/usePrivateOffers'
 import { usePrivateTransaction } from '@/privateLending/hooks/usePrivateTransaction'
+import { syncInSession } from '@/privateLending/lendingKeyHolder'
 import {
   counterpartyOf,
   displayStatus,
@@ -136,7 +137,7 @@ export default function PrivateOfferActionShell<TSummary>({
   build,
   ...shell
 }: PrivateOfferActionShellProps<TSummary>) {
-  const { syncWallet } = useWallet()
+  const { syncWallet, getLendingKey } = useWallet()
   const getDeps = usePrivateFlowDeps()
   const loadOffer = useLoadVerifiedOffer()
   const { run } = usePrivateTransaction()
@@ -146,7 +147,7 @@ export default function PrivateOfferActionShell<TSummary>({
     const held: { offer?: VerifiedOffer } = {}
     try {
       return await run({ kind, offerTxid: item.txid }, async () => {
-        await syncWallet()
+        await syncInSession(getLendingKey, syncWallet)
         const candidate = await fetchPrivateCandidate(item.txid, PRIVATE_API_BASE_URL)
         const utxo = unspentUtxo(candidate, requires)
         if (!utxo) {

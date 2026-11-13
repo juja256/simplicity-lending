@@ -1,10 +1,4 @@
-import {
-  type AssetId,
-  type OutPoint,
-  type Script,
-  Transaction,
-  type TxOut,
-} from '@lilbonekit/lwk-web'
+import { type AssetId, type OutPoint, type Script, Transaction, type TxOut } from 'lwk_wasm'
 
 import { fetchTxRaw } from '@/api/esplora/methods'
 
