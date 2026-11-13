@@ -71,3 +71,26 @@ export function createLendingKeyHolder<S>(
     },
   }
 }
+
+/**
+ * Runs `sync` for a build and resolves to the key of the session it ran in. A sync that a wallet
+ * switch made stale still resolves, and what the build reads after it would come from the new
+ * session, so this throws if the session changed during `sync`. `getKey` returns the session's key
+ * as `LendingKeyHolder.get` does, one promise per session: a different promise after the sync
+ * means another session, or none. The key is awaited before the sync, so a key that cannot be had
+ * fails with its own error. Only promises are compared: the key is never read here.
+ */
+export async function syncInSession<K>(
+  getKey: () => Promise<K>,
+  sync: () => Promise<void>,
+): Promise<K> {
+  const session = getKey()
+  const key = await session
+  await sync()
+  const current = getKey()
+  if (current !== session) {
+    current.catch(() => {})
+    throw new Error('The wallet changed while it was syncing, so nothing was built. Try again.')
+  }
+  return key
+}
