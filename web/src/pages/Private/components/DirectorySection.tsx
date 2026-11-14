@@ -66,13 +66,24 @@ function droppedPairsNote(count: number): string {
   )
 }
 
+/** How many listed entries did not verify and are not shown. */
+function hiddenNote(count: number): string {
+  return count === 1
+    ? 'One more entry is not shown: its terms could not be verified.'
+    : `${count} more entries are not shown: their terms could not be verified.`
+}
+
 /**
  * The lender directory: the wallet's own entry (register with terms, edit, remove) and every
- * listed key. Names are not verified identities: each shows next to its key's fingerprint.
+ * listed key whose entry verified. Names are not verified identities: each shows next to its
+ * key's fingerprint. The form is pre-filled only from the wallet's entry when it verified.
  */
 export default function DirectorySection() {
-  const { directory, entries, own, ownEntry, register, remove } = useDirectory()
+  const { directory, lenders, hiddenCount, identity, own, ownQuery, register, remove } =
+    useDirectory()
   const fingerprintOf = useFingerprintOf()
+  const ownEntry = own?.entry
+  const ownTerms = own?.check?.status === 'verified' ? own.check.terms : null
 
   const [isEditing, setIsEditing] = useState(false)
   const [isConfirmingRemove, setIsConfirmingRemove] = useState(false)
@@ -80,7 +91,7 @@ export default function DirectorySection() {
   const [termsForm, setTermsForm] = useState<PairTermsForm>(EMPTY_PAIR_TERMS_FORM)
   const nameError = name === '' ? null : displayNameError(name)
   const parsedTerms = lenderTermsFromForm(termsForm, PAIR)
-  const droppedPairs = otherPairs(ownEntry?.terms, PAIR).length
+  const droppedPairs = otherPairs(ownTerms, PAIR).length
   const showForm = ownEntry === null || isEditing
 
   const resetForm = () => {
@@ -92,8 +103,9 @@ export default function DirectorySection() {
   const startEditing = () => {
     register.reset()
     remove.reset()
-    setName(ownEntry?.display_name ?? '')
-    const published = findPairTerms(ownEntry?.terms, PAIR)
+    // Nothing the indexer serves pre-fills the form unless the key signed it.
+    setName(ownTerms !== null ? (ownEntry?.display_name ?? '') : '')
+    const published = findPairTerms(ownTerms, PAIR)
     setTermsForm(published ? pairTermsToForm(published, PAIR) : EMPTY_PAIR_TERMS_FORM)
     setIsConfirmingRemove(false)
     setIsEditing(true)
@@ -127,8 +139,8 @@ export default function DirectorySection() {
         <h3 className='text-foreground text-sm font-semibold'>Your entry</h3>
 
         {ownEntry === undefined ? (
-          directory.isError ? (
-            <p className='text-muted text-sm'>The directory could not be loaded.</p>
+          ownQuery.isError ? (
+            <p className='text-muted text-sm'>Your entry could not be loaded.</p>
           ) : (
             <Skeleton className='h-10 w-full rounded' />
           )
@@ -201,8 +213,14 @@ export default function DirectorySection() {
           <div className='flex flex-wrap items-start justify-between gap-3'>
             <div className='flex min-w-0 flex-col gap-1 text-sm'>
               <span className='text-muted text-xs'>Listed as</span>
-              <KeyFingerprint fingerprint={own?.fingerprint ?? ''} name={ownEntry.display_name} />
-              <PairTermsSummary terms={ownEntry.terms} publishedAt={ownEntry.terms_published_at} />
+              <KeyFingerprint
+                fingerprint={identity?.fingerprint ?? ''}
+                name={ownTerms !== null ? ownEntry.display_name : null}
+              />
+              <PairTermsSummary
+                verifiedTerms={ownTerms}
+                publishedAt={ownEntry.terms_published_at}
+              />
               {droppedPairs > 0 && (
                 <p className='text-muted text-xs'>{droppedPairsNote(droppedPairs)}</p>
               )}
@@ -260,7 +278,7 @@ export default function DirectorySection() {
 
       <div className='flex flex-col gap-3'>
         <h3 className='text-foreground text-sm font-semibold'>
-          Listed keys{directory.isSuccess ? ` (${entries.length})` : ''}
+          Listed keys{directory.isSuccess ? ` (${lenders.length})` : ''}
         </h3>
         {directory.isPending ? (
           <div className='flex flex-col gap-1'>
@@ -270,15 +288,15 @@ export default function DirectorySection() {
           </div>
         ) : directory.isError ? (
           <OffersLoadError error={directory.error} onRetry={() => void directory.refetch()} />
-        ) : entries.length === 0 ? (
+        ) : lenders.length === 0 ? (
           <div className='bg-surface border-muted flex h-14 items-center rounded border border-dashed px-4 opacity-50'>
             <span className='text-foreground text-sm font-medium'>No one is listed yet.</span>
           </div>
         ) : (
           <ul className='flex max-h-96 flex-col gap-1 overflow-y-auto'>
-            {entries.map(entry => {
+            {lenders.map(({ entry }) => {
               const fingerprint = fingerprintOf(entry.pubkey)
-              const isOwn = own !== undefined && entry.pubkey === own.pubkey
+              const isOwn = identity !== undefined && entry.pubkey === identity.pubkey
               return (
                 <li
                   key={entry.pubkey}
@@ -303,6 +321,9 @@ export default function DirectorySection() {
               )
             })}
           </ul>
+        )}
+        {directory.isSuccess && hiddenCount > 0 && (
+          <p className='text-muted text-xs'>{hiddenNote(hiddenCount)}</p>
         )}
       </div>
     </section>

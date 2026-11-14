@@ -18,7 +18,9 @@ import PrivateLoansCard from './components/PrivateLoansCard'
 /** The session's lending key: its fingerprint, its directory name, and the key to share. */
 function LendingKeyCard() {
   const identity = useLendingKeyIdentity()
-  const { ownEntry } = useDirectory()
+  const { own } = useDirectory()
+  // The name the key signed: an entry that did not verify shows the fingerprint alone.
+  const ownName = own?.check?.status === 'verified' ? own.entry?.display_name : undefined
 
   return (
     <section className='bg-surface-secondary flex flex-col gap-4 rounded-3xl p-6'>
@@ -39,11 +41,7 @@ function LendingKeyCard() {
         <div className='flex min-w-0 flex-col gap-1'>
           <span className='text-muted text-xs'>Your lending key</span>
           {identity.data ? (
-            <KeyFingerprint
-              fingerprint={identity.data.fingerprint}
-              name={ownEntry?.display_name}
-              size='lg'
-            />
+            <KeyFingerprint fingerprint={identity.data.fingerprint} name={ownName} size='lg' />
           ) : identity.isError ? (
             <span className='text-danger text-sm'>{ErrorHandler.describe(identity.error)}</span>
           ) : (

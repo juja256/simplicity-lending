@@ -65,6 +65,8 @@ export const BLOCKS_PER_DAY = 1440
 const COLLATERAL_SCALE_DECIMALS = 8
 /** Basis points are hundredths of a percent. */
 const PERCENT_DECIMALS = 2
+/** The terms form's error for an APR that is not a percent with at most 2 decimals. */
+export const APR_FORMAT_ERROR = 'Enter the minimum APR as a percent, such as 6 or 6.25'
 /** The decimals an asset can have (`resolveNetworkConfig`'s bound). */
 const MAX_ASSET_DECIMALS = 18
 
@@ -263,7 +265,13 @@ export function pairTermsFromForm(
   const errors: PairTermsFormErrors = {}
 
   const minAprBps = field(errors, 'minAprPercent', () => {
-    const bps = unitsFromDecimal(form.minAprPercent, PERCENT_DECIMALS)
+    let bps: bigint
+    try {
+      bps = unitsFromDecimal(form.minAprPercent, PERCENT_DECIMALS)
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error
+      throw new RangeError(APR_FORMAT_ERROR)
+    }
     if (bps > BigInt(U32_MAX)) throw new RangeError('The APR is too large.')
     return Number(bps)
   })
