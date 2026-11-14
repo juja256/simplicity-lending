@@ -6,7 +6,6 @@ import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { borrowerNftOutpoint } from '@/privateLending/candidate'
 import { buildPrivateCancellation } from '@/privateLending/flows/cancellation'
 import { selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
-import { useWallet } from '@/providers/wallet/useWallet'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
 import { SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/script-auth/witness'
 
@@ -26,7 +25,6 @@ const CANCEL_WEIGHT_UNITS =
 export default function CancelPrivateOfferModal(props: PrivateOfferActionModalProps) {
   const { item } = props
   const { terms } = item
-  const { getReceiveAddress } = useWallet()
   const { formatCollateralDisplay } = useFormatAmount()
 
   // The indexer must still list the pending offer unspent (`requires`). The builder spends output
@@ -42,7 +40,7 @@ export default function CancelPrivateOfferModal(props: PrivateOfferActionModalPr
     return buildPrivateCancellation(deps, offer, {
       borrowerNftOutpoint: borrowerNftOutpoint(item.txid, candidate),
       feeCoins,
-      collateralReceiver: await walletReceiver(deps, getReceiveAddress),
+      collateralReceiver: walletReceiver(deps),
     })
   }
 

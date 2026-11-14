@@ -26,7 +26,7 @@ const ACCEPT_WEIGHT_UNITS =
 export default function AcceptPrivateOfferModal(props: PrivateOfferActionModalProps) {
   const { terms } = props.item
   const { principalAsset } = NETWORK_CONFIG
-  const { getReceiveAddress, confirmedBalances } = useWallet()
+  const { confirmedBalances } = useWallet()
   const { formatCollateralDisplay, formatPrincipalAmount } = useFormatAmount()
 
   const insufficientBalance =
@@ -55,7 +55,7 @@ export default function AcceptPrivateOfferModal(props: PrivateOfferActionModalPr
     return buildPrivateAcceptance(deps, offer, {
       principalCoins,
       feeCoins,
-      lenderNftReceiver: await walletReceiver(deps, getReceiveAddress),
+      lenderNftReceiver: walletReceiver(deps),
     })
   }
 
