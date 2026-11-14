@@ -1,6 +1,7 @@
 //! Cryptography of Simplicity Lending private offers: lending keys, per-offer secrets, signed
 //! terms, the marker, pinned outputs, building offers, and finding, opening and checking them in
-//! their creation transactions.
+//! their creation transactions; and the terms lenders publish in the directory, with the check of
+//! a proposal against them.
 //!
 //! The crate depends only on `elements` and `rand`, so the contracts crate and the browser's wasm
 //! module run the same code.
@@ -15,6 +16,7 @@ mod blind;
 mod creation;
 mod directory;
 mod keys;
+mod lender_terms;
 mod marker;
 mod offer;
 mod pinned;
@@ -32,6 +34,11 @@ pub use directory::{
     verify_directory_action,
 };
 pub use keys::{LendingKey, ephemeral_key, lift_lending_key};
+pub use lender_terms::{
+    BLOCKS_PER_DAY, BLOCKS_PER_YEAR, COLLATERAL_SCALE, LENDER_TERMS_VERSION, LenderTerms,
+    LenderTermsError, MAX_PAIRS, PairTerms, Proposal, TermBreach, apr_bps, min_collateral,
+    min_repayment, principal_per_collateral,
+};
 pub use marker::Marker;
 pub use offer::{NewOffer, OfferError, OfferPinned, OpenError, OpenedOffer};
 pub use pinned::PinnedOutput;
