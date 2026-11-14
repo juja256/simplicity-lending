@@ -25,7 +25,7 @@ The stack runs five services:
 - **indexer**, the same binary with `RUN_MODE=indexer`, polling Liquid testnet.
 - **nginx**, which publishes `${API_PORT:-8000}` on the host and proxies it to the API.
 
-The example file sets `API_PORT` to 8000, so the API is at `http://localhost:8000`. Paths are the API's own paths, such as `http://localhost:8000/offers` and `http://localhost:8000/swagger-ui/`. The web app is started separately and pointed at that URL, as [Run locally](./local-setup.md) describes.
+The example file sets `API_PORT` to 8000, so the API is at `http://localhost:8000`. Paths are the API's own paths, such as `http://localhost:8000/private/candidates` and `http://localhost:8000/swagger-ui/`. The web app is started separately and pointed at that URL, as [Run locally](./local-setup.md) describes.
 
 `DATABASE_URL` in the example file uses the host name `postgres`, which is the Compose service. That value is for the containers. A database URL used from the host, for sqlx on your machine, uses `localhost` instead.
 

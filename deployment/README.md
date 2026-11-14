@@ -6,7 +6,7 @@ This deployment stack runs:
 - `migrate` to apply the SQLx schema before the app starts
 - `api` for the lending protocol HTTP API
 - `indexer` for background chain indexing
-- `web` for the frontend (public and private loans), including `/api` and `/esplora` reverse proxies
+- `web` for the frontend (private loans), including `/api` and `/esplora` reverse proxies
 
 This configuration targets the Liquid testnet demo. See the [release notes](demo-release.md)
 for validation status and unresolved contract/manual-test findings, and the
@@ -29,7 +29,7 @@ From `deployment/`:
 ```bash
 git submodule update --init ../lwk
 cp ./configs/compose.env.example ./configs/compose.env
-# Edit compose.env: set your domain, registry settings, and database password first.
+# Edit compose.env: set your domain and database password first.
 docker compose --env-file ./configs/compose.env -f docker-compose.yml config --quiet
 docker compose --env-file ./configs/compose.env -f docker-compose.yml up --build -d
 ```
@@ -51,9 +51,8 @@ The separate local `pnpm build:demo` command uses `.env.demo`; Docker does not d
 To test with a separate environment file and database volume, set `COMPOSE_ENV_FILE` to the
 absolute path of that file, pass the same file with `--env-file`, and choose a distinct project
 name with `-p`. For a localhost-only test, set `WEB_PORT=127.0.0.1:18080` and
-`PUBLIC_ORIGIN=http://127.0.0.1:18080`. Disable asset registry submissions with
-`ASSET_REGISTRY_URL=`. Each project gets its own `postgres_data` volume; do not use `down -v`
-against a project whose indexed state you need to retain.
+`PUBLIC_ORIGIN=http://127.0.0.1:18080`. Each project gets its own `postgres_data` volume; do not
+use `down -v` against a project whose indexed state you need to retain.
 
 The stack itself serves HTTP on `WEB_PORT`. Terminate HTTPS at a reverse proxy/load balancer
 before using Jade on a public hostname. Forward `/api/events` as an unbuffered event stream
@@ -80,10 +79,8 @@ Set these values in `deployment/configs/compose.env`:
 - `INDEXER_ESPLORA_BASE_URL`: the Esplora API used by the backend indexer
 - `WEB_ESPLORA_API_UPSTREAM`: the Esplora API proxied by nginx, for example `https://blockstream.info/liquidtestnet/api`
 - `INDEXER_POLL_INTERVAL_MS`: background polling interval
-- `PROTOCOL_FEE_KEEPER_ASSET_ID`: protocol-fee keeper asset tracked by the indexer
-- `INDEXER_LAST_INDEXED_HEIGHT`: last already-indexed height for a new database; scanning starts at this height plus one. Existing database sync state takes precedence. Set it below the earliest offer you need, including private offers; changing it does not rewind an existing database.
-- `ASSET_REGISTRY_DOMAIN`: your issuer domain; use the domain you control and serve the proof route from it
-- `ASSET_REGISTRY_URL`: asset registry submission endpoint, or empty to disable submissions
+- `PROTOCOL_FEE_KEEPER_ASSET_ID`: required by the indexer settings, though no tracker reads it; keep the example value
+- `INDEXER_LAST_INDEXED_HEIGHT`: last already-indexed height for a new database; scanning starts at this height plus one. Existing database sync state takes precedence. Set it below the earliest private offer you need; changing it does not rewind an existing database.
 - `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`: database connection settings
 
 ## GitLab Image Builds
@@ -123,7 +120,6 @@ Once the stack is running, verify:
 - `http://localhost:${WEB_PORT}/`
 - `http://localhost:${WEB_PORT}/api/health`
 - `http://localhost:${WEB_PORT}/api/ready`
-- `http://localhost:${WEB_PORT}/api/offers?limit=1`
 - `http://localhost:${WEB_PORT}/api/private/candidates?limit=1`
 - `http://localhost:${WEB_PORT}/app/private` (direct SPA navigation)
 

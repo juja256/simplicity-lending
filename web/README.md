@@ -15,11 +15,11 @@ and explicit test-seed login. No recovery phrase is embedded. Builds reject `VIT
 and mainnet demo mode. The developer Demo/System pages and debug overlays have been removed;
 run `pnpm lint` and `pnpm exec tsc -b` in the terminal for diagnostics.
 
-Private loans are reachable from the main navigation and the dashboard summary. Its counts are
-for the connected wallet's verified private offers; public-market totals remain separate.
-See the [private-loan user guide](../docs/docs/private-loans/guide.md) for wallet setup, the
-borrower/lender workflow and recovery, and the [protocol notes](../docs/docs/private-loans/protocol.md)
-for privacy and verification boundaries.
+The app has private loans only: `/app` opens `/app/private`, and the summary card on that page
+counts the connected wallet's verified private offers. The public market is in the git tag
+`public-lending-last`. See the [private-loan user guide](../docs/docs/private-loans/guide.md)
+for wallet setup, the borrower/lender workflow and recovery, and the
+[protocol notes](../docs/docs/private-loans/protocol.md) for privacy and verification boundaries.
 
 For a local preview against the running indexer, `.env.local` can set
 `API_PROXY_TARGET=http://127.0.0.1:8000` and `API_PROXY_STRIP_PREFIX=true`. The preview server
