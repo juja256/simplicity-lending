@@ -13,6 +13,7 @@ mod directory;
 mod error;
 mod inspect;
 mod keys;
+mod lender_terms;
 mod open;
 mod scan;
 
@@ -21,6 +22,10 @@ pub use build::{NewOffer, OfferTermsInput, contract_hash_from_json, issued_asset
 pub use directory::{DirectoryAction, sign_directory_action};
 pub use inspect::inspect_pset;
 pub use keys::{LendingKey, confidential_address, fresh_issuer_pubkey, key_fingerprint};
+pub use lender_terms::{
+    apr_bps, check_proposal, decode_lender_terms, encode_lender_terms, min_collateral,
+    min_repayment, principal_per_collateral,
+};
 pub use open::{
     ContractArguments, OpenedOffer, PinnedOutputInfo, PinnedRole, open_creation_as_borrower_hex,
     open_creation_as_lender_hex,
