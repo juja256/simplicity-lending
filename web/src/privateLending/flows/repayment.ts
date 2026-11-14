@@ -221,8 +221,12 @@ export async function buildPrivateRepayment(
   )
   const burn = burnScript(deps)
   const collateralReceiver = lwk.Address.parse(params.collateralReceiver.toString(), deps.network)
-  // the wallet's last unused address, confidential: the principal change is blinded to the wallet
-  const changeAddress = deps.wollet.address(null).address()
+  // The principal change goes to the wallet's internal chain, confidential, so it never shares a
+  // script with the receiver (the last unused external address). The policy-asset change takes the
+  // next internal address, so the two changes never share one either.
+  const changeIndex = deps.wollet.change(null).index()
+  const changeAddress = deps.wollet.change(changeIndex).address()
+  const policyChangeAddress = deps.wollet.change(changeIndex + 1).address()
   const changeOutputs: ExpectedOutput[] =
     principalChange > 0n
       ? [
@@ -319,7 +323,7 @@ export async function buildPrivateRepayment(
           ]
         : []),
     ],
-    changeAddress: deps.wollet.change(null).address(),
+    changeAddress: policyChangeAddress,
   })
 
   // 5. The layout of the unblinded PSET.

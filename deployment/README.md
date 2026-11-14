@@ -54,6 +54,10 @@ name with `-p`. For a localhost-only test, set `WEB_PORT=127.0.0.1:18080` and
 `PUBLIC_ORIGIN=http://127.0.0.1:18080`. Each project gets its own `postgres_data` volume; do not
 use `down -v` against a project whose indexed state you need to retain.
 
+Before deploying this version over an existing database, back up the indexer database
+(`pg_dump`): its migration drops the public lending tables and is one-way, and images built from
+the tag `public-lending-last` cannot run on a migrated database.
+
 The stack itself serves HTTP on `WEB_PORT`. Terminate HTTPS at a reverse proxy/load balancer
 before using Jade on a public hostname. Forward `/api/events` as an unbuffered event stream
 through that outer proxy as well. Setting `PUBLIC_ORIGIN` does not provision DNS or certificates.
