@@ -665,6 +665,10 @@ Branch `v2/phase-3-lender-terms`.
 - Indexer: a migration adding the terms and their publication time to `directory_entries`; the
   put endpoint verifies the new signature and requires terms; the list returns them.
 - Web: `privateLending/directory.ts` and `hooks/useDirectory.ts` publish and read terms.
+- **Carried from phase 2's review:** remove the indexer's unused
+  `IndexerSettings.protocol_fee_keeper_asset_id` (unknown keys are ignored, so deployed configs
+  still load), `EsploraClient::network()` (no caller) and the cache tests' identity helper
+  `active_utxo`.
 - **Done when:** core unit tests cover the arithmetic at its edges (zero-day term, principal 0,
   the rounding direction, an overflow at `u64::MAX`), `check_proposal` names every broken term,
   and a replayed or stale-challenge put is refused; `pnpm parity` checks that TS (through the
@@ -689,6 +693,20 @@ Branch `v2/phase-4-two-areas`.
   the repayment, the due date, what happens on default and that the borrower can cancel until
   acceptance. Leave room in the proposal form, the accept review, the repay modal and the loan
   views for phase 6's messages.
+- **Carried from phase 2's review:**
+  - A per-session high-water mark for receive and change indices: `walletReceiver` and the
+    internal change of acceptance and repayment take `max(address(null).index(), last handed out
+    + 1)`, so a flow started before a scan sees the previous one does not reuse its addresses
+    (LWK's `apply_transaction` does not advance `last_unused`), with a guard against index 0 (the
+    identity address) and a bound that keeps unused indices inside LWK's gap limit.
+  - Hardening of the e2e: `creationNftReceiver` compares each receiver with the identity script,
+    and `checkWalletIdentities` fails when the `wallets` stage never ran on the state file.
+  - Cleanup: the orphaned public IndexedDB `simplicity-lending:pending-transactions` (one
+    `deleteDB`), `utils/zod.ts`'s dead exports, the `z-toast` utility, `verifyReceiveAddress` and
+    `getReceiveAddress` (no callers), the wallet button's address taken once at connect, the
+    nginx `/.well-known/liquid-asset-proof-` block (its endpoint is gone), redirects for the old
+    docs URLs (`/docs/borrower/*`, `/docs/lender/*`, `/docs/protocol/*`), and the unwrapped prose
+    in `docs/docs/{developers,contracts}` and `simplicity.md`.
 - **Done when:** `pnpm build` and `pnpm lint` pass; a scripted testnet demo runs: the lender
   publishes terms, the borrower's form refuses a lower APR and less collateral, an e2e-built
   proposal outside the terms shows the badge naming the broken terms, the lender accepts, the
@@ -710,6 +728,10 @@ Branch `v2/phase-5-contract`.
   `crates/contracts/src/programs/private_lending/`; `private-lending-core` (offer parameters,
   pinned outputs, secrets); the wasm; the web Simplicity bindings, the flows (a new
   `flows/partialRepayment.ts`) and the repay UI; the parity fixtures and the e2e stages.
+- **Carried from phase 2:** the header comment of `private_lending.simf` still points at the
+  deleted `lending.simf`; rewrite it with the revision (editing the source changes the program
+  id, so phase 2 left it). Remove the dead features `lending` and `pre_lock` from
+  `crates/contracts/Cargo.toml`.
 - **Done when:** contract tests show, for item 1, that with the expiry fixed a different salt
   changes the CMR revealed at acceptance and repayment (the salt enters the pruned subtree), that
   recomputing that CMR from the public parameters over a range of candidate expiries, with no
