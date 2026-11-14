@@ -13,9 +13,10 @@ import { useFingerprintOf } from '@/privateLending/hooks/useFingerprintOf'
 import {
   EMPTY_PAIR_TERMS_FORM,
   findPairTerms,
+  lenderTermsFromForm,
   MAX_TERM_DAYS,
+  otherPairs,
   type PairTermsForm,
-  pairTermsFromForm,
   pairTermsToForm,
 } from '@/privateLending/lenderTerms'
 import { ErrorHandler } from '@/utils/errorHandler'
@@ -56,6 +57,15 @@ const TERMS_FIELDS: {
   },
 ]
 
+/** The served entry's pairs for other assets: the form publishes the configured pair alone. */
+function droppedPairsNote(count: number): string {
+  const pairs = count === 1 ? 'another pair' : `${count} other pairs`
+  return (
+    `The directory also shows terms for ${pairs} under your key. Saving publishes only ` +
+    `${PRINCIPAL.symbol} against ${COLLATERAL.symbol} and drops the rest.`
+  )
+}
+
 /**
  * The lender directory: the wallet's own entry (register with terms, edit, remove) and every
  * listed key. Names are not verified identities: each shows next to its key's fingerprint.
@@ -69,7 +79,8 @@ export default function DirectorySection() {
   const [name, setName] = useState('')
   const [termsForm, setTermsForm] = useState<PairTermsForm>(EMPTY_PAIR_TERMS_FORM)
   const nameError = name === '' ? null : displayNameError(name)
-  const parsedTerms = pairTermsFromForm(termsForm, PAIR)
+  const parsedTerms = lenderTermsFromForm(termsForm, PAIR)
+  const droppedPairs = otherPairs(ownEntry?.terms, PAIR).length
   const showForm = ownEntry === null || isEditing
 
   const resetForm = () => {
@@ -91,14 +102,8 @@ export default function DirectorySection() {
   const submit = (event: FormEvent) => {
     event.preventDefault()
     if (displayNameError(name) !== null || parsedTerms.terms === null || register.isPending) return
-    // The form edits the configured pair only: pairs the entry has for other assets are kept.
-    const otherPairs = (ownEntry?.terms?.pairs ?? []).filter(
-      pair => findPairTerms({ pairs: [pair] }, PAIR) === undefined,
-    )
-    register.mutate(
-      { displayName: name, terms: { pairs: [parsedTerms.terms, ...otherPairs] } },
-      { onSuccess: resetForm },
-    )
+    // The configured pair alone, from the form: nothing of the served entry is signed.
+    register.mutate({ displayName: name, terms: parsedTerms.terms }, { onSuccess: resetForm })
   }
 
   const writeError = register.error ?? remove.error
@@ -148,6 +153,9 @@ export default function DirectorySection() {
             <h4 className='text-foreground text-xs font-semibold'>
               Your terms for {PRINCIPAL.symbol} against {COLLATERAL.symbol}
             </h4>
+            {droppedPairs > 0 && (
+              <p className='text-muted text-xs'>{droppedPairsNote(droppedPairs)}</p>
+            )}
             <div className='grid gap-3 sm:grid-cols-2'>
               {TERMS_FIELDS.map(({ field, label, placeholder, unit }) => (
                 <UiTextField
@@ -195,6 +203,9 @@ export default function DirectorySection() {
               <span className='text-muted text-xs'>Listed as</span>
               <KeyFingerprint fingerprint={own?.fingerprint ?? ''} name={ownEntry.display_name} />
               <PairTermsSummary terms={ownEntry.terms} publishedAt={ownEntry.terms_published_at} />
+              {droppedPairs > 0 && (
+                <p className='text-muted text-xs'>{droppedPairsNote(droppedPairs)}</p>
+              )}
             </div>
             {isConfirmingRemove ? (
               <div className='flex flex-wrap items-center gap-2'>

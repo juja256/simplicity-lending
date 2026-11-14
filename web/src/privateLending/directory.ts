@@ -1,6 +1,8 @@
 // Directory writes, signed with the lending key over a server challenge: request a challenge, sign
 // it with `signDirectoryAction`, then write. A put signs the name and the lender's terms together,
-// so the indexer cannot change either. Only the x-only key leaves the browser. A rejected
+// so the indexer cannot change either. Callers pass terms the lender built (`lenderTermsFromForm`),
+// never terms an indexer served: those carry no signature the app checks, and signing them would
+// publish whatever the indexer put there. Only the x-only key leaves the browser. A rejected
 // write throws the `ApiError` (`indexerErrorMessage` gives the server's message, such as a `401`
 // "unknown, used or expired challenge").
 import {
