@@ -231,8 +231,11 @@ not `.env.local`, and keeps calling the indexer directly.
 
 ### State and resume
 
-`.e2e-private/state.json` (git-ignored) holds one record per transaction: its stage, txid, hex
-and status, `built`, `broadcast` or `confirmed`. The finalized hex is saved as `built` before it is
+`.e2e-private/state.json` (git-ignored) holds three maps. `records` has one record per
+transaction: its stage, txid, hex and status, `built`, `broadcast` or `confirmed`. `nftReceivers`
+has the borrower NFT receiver of each creation, by its record. `walletIdentities` has each
+wallet's identity script, saved by the `wallets` stage. A file that holds the records only, from
+before the other two maps, is still read. The finalized hex is saved as `built` before it is
 broadcast. A re-run never rebuilds a recorded transaction: it rebroadcasts the saved hex ("already
 known" counts as success) and waits for the confirmation. A stage whose records are all
 `confirmed` is skipped, but its on-chain checks run again. The script waits for one confirmation
