@@ -4,7 +4,8 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::{Config, SwaggerUi};
 
 use crate::api::directory::dto::{
-    DeleteDirectoryEntry, DirectoryChallenge, DirectoryEntry, DirectoryList, PutDirectoryEntry,
+    DeleteDirectoryEntry, DirectoryChallenge, DirectoryEntry, DirectoryList, LenderTermsDto,
+    PairTermsDto, PutDirectoryEntry,
 };
 use crate::api::directory::handlers as directory_handlers;
 use crate::api::events::handlers as event_handlers;
@@ -49,6 +50,8 @@ use super::schemas::{ErrorBody, ErrorResponse};
         DirectoryChallenge,
         DirectoryEntry,
         DirectoryList,
+        LenderTermsDto,
+        PairTermsDto,
         PutDirectoryEntry,
         HealthResponse,
         IndexerEvent,
@@ -114,6 +117,16 @@ mod tests {
         let json = serde_json::to_string(&ApiDoc::openapi()).expect("serialize openapi");
         assert!(json.contains("Simplicity Lending Indexer"));
         assert!(json.contains("creation_txid"));
+    }
+
+    #[test]
+    fn openapi_spec_describes_lender_terms() {
+        let spec = ApiDoc::openapi();
+        let schemas = spec.components.expect("components").schemas;
+        assert!(schemas.contains_key("LenderTermsDto"));
+        assert!(schemas.contains_key("PairTermsDto"));
+        let json = serde_json::to_string(&schemas["PutDirectoryEntry"]).expect("serialize");
+        assert!(json.contains(r#""required":["display_name","challenge","terms","signature"]"#));
     }
 
     #[test]

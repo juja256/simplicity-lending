@@ -178,19 +178,22 @@ professional tool. Choices marked *(proposed)* were not discussed and need confi
    published terms. The lender still reviews and accepts each proposal by hand; nothing is
    accepted automatically.
    - A lender registers in the directory with its display name and its terms, one set per asset
-     pair *(proposed: a list, though the demo needs only USDt against L-BTC)*:
+     pair. The data holds a list; the demo shows one pair, tL-BTC collateral against TEST
+     principal on testnet, set in the web app's build configuration rather than in code
+     (decided 2026-11-14):
      - principal asset and collateral asset;
      - minimum APR;
-     - reference price, in principal per unit of collateral;
-     - minimum collateral ratio at the reference price;
+     - maximum principal per unit of collateral, a number the lender sets by hand (decided
+       2026-11-14, in place of a reference price and a minimum collateral ratio: with no price
+       oracle the price would only be what the lender typed, and the two numbers act as one);
      - term range, in days;
      - principal range.
    - The lending key signs the name and the terms together, as it signs the name now; the signed
      message gets a new version. The entry records when its terms were last published. The
      directory lists lenders only *(proposed)*: an entry without terms is not shown to borrowers,
      and borrowers need no entry.
-   - There is no price oracle yet. The lender sets the reference price and keeps it current by
-     hand; both areas show when it was last published.
+   - There is no price oracle yet. The lender sets the maximum principal per unit of collateral
+     and keeps it current by hand; both areas show when the terms were last published.
    - The borrower's app does not let a proposal go below the lender's terms: a lower APR, less
      collateral, or a term or principal outside the ranges. This is a convenience, not a guarantee.
      A proposal built outside the app can break the terms, and the contract knows nothing of them.
@@ -201,9 +204,10 @@ professional tool. Choices marked *(proposed)* were not discussed and need confi
    - Arithmetic *(proposed)*. v1's `interest_rate_bps` is the interest over the whole term, and the
      contract enforces only the repayment amount, so the APR is derived: `APR = (repayment −
      principal) / principal · 365 / days`, with `days = (expiry height − creation height) / 1440`
-     (one-minute blocks). The borrower's app rounds the repayment up. The collateral ratio is
-     `collateral · reference price / principal`, in the assets' registry precision. One function
-     in `private-lending-core`, exposed through the wasm, serves both areas.
+     (one-minute blocks). The borrower's app rounds the repayment up. The collateral term is
+     stored as principal base units per 10^8 collateral base units (per 1 tL-BTC on testnet); the
+     least collateral for a principal is rounded up. One function in `private-lending-core`,
+     exposed through the wasm, serves both areas.
 
 10. **A lender console and a borrower app, on one site.**
     The landing page has two entrances, "For lenders" and "For borrowers", and a link in each
@@ -215,8 +219,8 @@ professional tool. Choices marked *(proposed)* were not discussed and need confi
       directory name, key fingerprint and connected signer. Sections:
       - Proposals: a summary strip (proposals waiting, active loans, amount lent, collateral held,
         loans due within seven days and overdue) and a table of pending proposals (received,
-        borrower fingerprint, principal, collateral, ratio at the reference price, APR, term, and
-        a "within terms" or "outside terms" badge naming the broken term). Review opens the
+        borrower fingerprint, principal, collateral, principal per unit of collateral, APR, term,
+        and a "within terms" or "outside terms" badge naming the broken term). Review opens the
         proposal with its terms, its message (item 6) and the acceptance, which the lender signs;
         the app keeps hiding acceptance after expiry (item 4).
       - Loan book: active, repaid and overdue loans, each with the action that applies (claim the
@@ -226,8 +230,9 @@ professional tool. Choices marked *(proposed)* were not discussed and need confi
     - The borrower app is a step-by-step flow that also works at phone width *(proposed)*:
       1. Choose a lender: the borrower picks an asset pair, then a lender from the directory,
          each shown with its name, key fingerprint, terms and when they were published.
-      2. Proposal: the form opens at the lender's minimums (collateral from the reference price
-         and ratio, the APR floor), with the principal and term limited to the lender's ranges,
+      2. Proposal: the form opens at the lender's minimums (the least collateral computed from the
+         maximum principal per unit of collateral, rounded up, as decided 2026-11-14; the APR
+         floor), with the principal and term limited to the lender's ranges,
          and an optional private message (item 6). The borrower can offer more collateral or a
          higher APR, never less. A summary says what they repay and by when, what happens if
          they do not, and that they can cancel until the lender accepts. "Lock collateral and

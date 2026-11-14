@@ -19,6 +19,7 @@
     "preview:demo": "vite preview --mode demo",
     "lwk:build": "bash scripts/build-lwk.sh && pnpm install --force",
     "add-icon": "tsx ./scripts/add-icon.ts",
+    "check:config": "tsx --tsconfig tsconfig.app.json scripts/check-network-config.ts",
     "parity": "tsx --tsconfig tsconfig.app.json scripts/check-private-lending-parity.ts",
     "e2e:private": "tsx --tsconfig tsconfig.app.json scripts/e2e-private-lending.ts"
   },

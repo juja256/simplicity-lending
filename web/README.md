@@ -41,6 +41,38 @@ Copy `.env.example` to `.env` and adjust as needed.
 - `VITE_ESPLORA_BASE_URL` - Base URL for Esplora.
 - `VITE_NETWORK` - Network name (`liquid`, `liquidtestnet`, `regtest`).
 
+### Asset pair
+
+The app lends one asset pair, read from six build settings. With none of them set, a build lends
+the network's default pair below. The three settings of an asset go together: set its id, decimals
+and symbol to replace it, or none of them to keep the default. An empty or whitespace-only value
+counts as unset, so the empty build args that Docker passes for unset settings keep the default.
+
+| Setting                          | liquid        | liquidtestnet | regtest       |
+| -------------------------------- | ------------- | ------------- | ------------- |
+| `VITE_COLLATERAL_ASSET_ID`       | `6f0279…526d` | `144c65…9a49` | `5ac9f6…b225` |
+| `VITE_COLLATERAL_ASSET_DECIMALS` | `8`           | `8`           | `8`           |
+| `VITE_COLLATERAL_ASSET_SYMBOL`   | `LBTC`        | `tL-BTC`      | `LBTC`        |
+| `VITE_PRINCIPAL_ASSET_ID`        | `ce091c…7bd2` | `38fca2…50a5` | `25b176…0064` |
+| `VITE_PRINCIPAL_ASSET_DECIMALS`  | `8`           | `3`           | `2`           |
+| `VITE_PRINCIPAL_ASSET_SYMBOL`    | `USDT`        | `TEST`        | `USDT`        |
+
+The full ids are in `src/constants/resolve-network-config.ts`. An id is 64 hex characters,
+decimals an integer from 0 to 18 and a symbol a non-empty string, and the collateral and principal
+ids must differ. A setting left out of an asset's three (or left empty) while another of them is
+set, a malformed one, or two equal ids stops the app at startup with an error naming the setting.
+A new id with the default decimals would misread every amount, hence the three go together. The
+icon follows the symbol (`LBTC`, `tL-BTC`, `USDT`, `TEST`), and any other symbol gets a generic
+coin icon. `pnpm check:config` checks the defaults, the replacements and the refusals. The e2e
+script (below) resolves the testnet pair the same way, from the process environment,
+`.env.e2e.local` and `.env.liquidtestnet`; its collateral must stay tL-BTC, which also pays its
+fees.
+
+A lender's terms in the directory are for this pair. On the Private page the lender types them per
+whole coin (the most principal per 1 collateral coin, the least APR in percent, the term range in
+days, at most 3650, and the principal range), and the app converts them exactly to the base units
+the directory stores. `pnpm parity` checks the conversion.
+
 ## Stack
 
 - Vite + React + TypeScript
@@ -156,9 +188,16 @@ With no stage named, every stage below runs in this order.
   then plays a hostile indexer that serves `create`'s candidate with `cancel-create`'s
   transaction: `create` must come out invalid, never verified, and the next sync, against the
   honest indexer, must check it again and find it verified. A cheap check that throws anything but
-  `bad-input` must fail the sync and leave the stored state unchanged. Last, the lender registers
-  "E2E Lender" in the directory, sees it listed, gets a 401 for a write signed over another name,
-  and removes the entry.
+  `bad-input` must fail the sync and leave the stored state unchanged.
+- `directory`: reads and writes the local testnet indexer's directory and broadcasts nothing. The
+  lender publishes "E2E Lender" with terms for the configured pair, typed as in the app: at least
+  10 % APR, twice the `create` offer's principal per collateral, 1 to 30 days and a tenth to a
+  hundred times its principal. `PUT` and `GET` must return the terms and their publication time,
+  and a write signed over another name or other terms must get a 401. The borrower then lists the
+  directory and finds the lender's entry and terms, and `checkProposal` must find no breach in the
+  `create` proposal (built from the amounts under Funding and the 1 440-block term, so no `create`
+  record is needed) nor at exactly the least collateral, and only `CollateralBelowMinimum` one
+  unit below it. Last, the lender removes its entry, which `GET` and the list must no longer show.
 
 Each stage prints its txids and the PSET it built, with the checks it ran. It fails if a covenant
 or NFT input's witness outweighs the constant its builder gives LWK for the fee: on chain, and in
@@ -184,12 +223,12 @@ Nothing is built, signed or broadcast.
 
 ### Local testnet indexer
 
-The `scan` stage, and the app on testnet (`VITE_API_URL` in `.env.liquidtestnet`, which the e2e
-script reads too), use a local indexer of Liquid testnet with its own database. A `scan` rerun
-needs a fresh database for the e2e state it reads, indexed from just below that state's first
-creation (`INDEXER__LAST_INDEXED_HEIGHT`, below); the commands use
-`lending-indexer-testnet-v2p1` as the example name. Never point the indexer tests at that
-database, nor run them while this indexer uses Postgres. From `crates/indexer`, with Postgres on
+The `scan` and `directory` stages, and the app on testnet (`VITE_API_URL` in `.env.liquidtestnet`,
+which the e2e script reads too), use a local indexer of Liquid testnet with its own database. A
+`scan` rerun needs a fresh database for the e2e state it reads, indexed from just below that state's
+first creation (`INDEXER__LAST_INDEXED_HEIGHT`, below); the commands use
+`lending-indexer-testnet-v2p1` as the example name. Never point the indexer tests at that database,
+nor run them while this indexer uses Postgres. From `crates/indexer`, with Postgres on
 `localhost:5432`:
 
 ```bash

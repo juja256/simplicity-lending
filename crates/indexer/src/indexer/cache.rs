@@ -104,17 +104,12 @@ mod tests {
         }
     }
 
-    /// The cached value stands for a watched offer's id.
-    fn active_utxo(offer_id: i64) -> i64 {
-        offer_id
-    }
-
     #[test]
     fn insert_and_remove_without_active_block_apply_immediately() {
         let mut cache = WatchCache::new();
         let op = outpoint(1, 0);
 
-        cache.insert(op, active_utxo(10));
+        cache.insert(op, 10);
         assert_eq!(cache.get(&op).copied(), Some(10));
 
         cache.remove(&op);
@@ -127,7 +122,7 @@ mod tests {
         let op = outpoint(2, 0);
 
         cache.begin_block();
-        cache.insert(op, active_utxo(20));
+        cache.insert(op, 20);
         cache.begin_block();
         cache.commit_block();
 
@@ -140,10 +135,10 @@ mod tests {
         let existing = outpoint(3, 0);
         let pending = outpoint(4, 0);
 
-        cache.insert(existing, active_utxo(30));
+        cache.insert(existing, 30);
         cache.begin_block();
         cache.remove(&existing);
-        cache.insert(pending, active_utxo(40));
+        cache.insert(pending, 40);
 
         assert!(cache.get(&existing).is_none());
         assert_eq!(cache.get(&pending).copied(), Some(40));
@@ -155,10 +150,10 @@ mod tests {
         let existing = outpoint(5, 0);
         let pending = outpoint(6, 0);
 
-        cache.insert(existing, active_utxo(50));
+        cache.insert(existing, 50);
         cache.begin_block();
         cache.remove(&existing);
-        cache.insert(pending, active_utxo(60));
+        cache.insert(pending, 60);
         cache.abort_block();
 
         assert_eq!(cache.get(&existing).copied(), Some(50));
@@ -171,10 +166,10 @@ mod tests {
         let existing = outpoint(7, 0);
         let pending = outpoint(8, 0);
 
-        cache.insert(existing, active_utxo(70));
+        cache.insert(existing, 70);
         cache.begin_block();
         cache.remove(&existing);
-        cache.insert(pending, active_utxo(80));
+        cache.insert(pending, 80);
         cache.commit_block();
 
         assert!(cache.get(&existing).is_none());
@@ -187,9 +182,9 @@ mod tests {
         let op = outpoint(9, 0);
 
         cache.begin_block();
-        cache.insert(op, active_utxo(90));
+        cache.insert(op, 90);
         cache.remove(&op);
-        cache.insert(op, active_utxo(91));
+        cache.insert(op, 91);
         cache.commit_block();
 
         assert_eq!(cache.get(&op).copied(), Some(91));
@@ -199,7 +194,7 @@ mod tests {
     fn commit_without_active_block_is_noop() {
         let mut cache = WatchCache::new();
         let op = outpoint(10, 0);
-        cache.insert(op, active_utxo(100));
+        cache.insert(op, 100);
 
         cache.commit_block();
 
@@ -210,7 +205,7 @@ mod tests {
     fn abort_without_active_block_is_noop() {
         let mut cache = WatchCache::new();
         let op = outpoint(11, 0);
-        cache.insert(op, active_utxo(110));
+        cache.insert(op, 110);
 
         cache.abort_block();
 
@@ -224,16 +219,16 @@ mod tests {
         let aborted_new = outpoint(13, 0);
         let committed_new = outpoint(14, 0);
 
-        cache.insert(existing, active_utxo(120));
+        cache.insert(existing, 120);
 
         cache.begin_block();
         cache.remove(&existing);
-        cache.insert(aborted_new, active_utxo(130));
+        cache.insert(aborted_new, 130);
         cache.abort_block();
 
         cache.begin_block();
         cache.remove(&existing);
-        cache.insert(committed_new, active_utxo(140));
+        cache.insert(committed_new, 140);
         cache.commit_block();
 
         assert!(cache.get(&existing).is_none());
