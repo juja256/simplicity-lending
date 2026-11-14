@@ -280,7 +280,7 @@ The directory is a public list of x-only lending keys with display names and the
 | `PUT` | `/private/directory/{pubkey}` | Creates or replaces the entry's name and terms. Body: `{ display_name, challenge, terms, signature }`; `terms` is required. Returns the entry. |
 | `DELETE` | `/private/directory/{pubkey}` | Removes the entry. Body: `{ challenge, signature }`. Returns `204`, or `404` if there is no entry. |
 
-Entries are `{ pubkey, display_name, terms, terms_published_at, created_at, updated_at }`, with unix-second timestamps. `pubkey`, `challenge` and `signature` are plain hex: 32, 32 and 64 bytes. `terms_published_at` is the time of the last put.
+Entries are `{ pubkey, display_name, terms, terms_published_at, signed_challenge, signature, created_at, updated_at }`, with unix-second timestamps. `pubkey`, `challenge` and `signature` are plain hex: 32, 32 and 64 bytes. `terms_published_at` is the time of the last put, and `signed_challenge` and `signature` are the challenge it consumed and the signature it carried, so a client can check the served name and terms against the key instead of trusting the indexer.
 
 Terms are `{ "pairs": [ ... ] }`, 1 to 8 pairs, no two with the same principal and collateral assets. Each pair has exactly these fields:
 
@@ -299,7 +299,7 @@ Terms are `{ "pairs": [ ... ] }`, 1 to 8 pairs, no two with the same principal a
 
 `u64` amounts are strings of decimal digits and `u32` fields are JSON numbers. `max_principal_per_collateral` is the most principal base units per 10^8 collateral base units. The assets differ, `max_principal_per_collateral` and `min_principal` are at least 1, `min_principal <= max_principal`, and `1 <= min_term_days <= max_term_days <= 3650`. The indexer stores the terms' encoding and serves them decoded.
 
-An entry written before the directory carried terms has `terms` and `terms_published_at` set to `null`. It is left out of the list but still served by its key, and a put with terms lists it again. Stored terms that fail to decode are logged and served as `null`.
+An entry written before the directory carried terms has `terms` and `terms_published_at` set to `null`. It is left out of the list but still served by its key, and a put with terms lists it again. Stored terms that fail to decode are logged and served as `null`. An entry written before the directory kept signatures has `signed_challenge` and `signature` set to `null` until its next put.
 
 Writes are signed over a server challenge:
 
