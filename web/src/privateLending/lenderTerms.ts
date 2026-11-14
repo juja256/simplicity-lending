@@ -61,10 +61,15 @@ export const U32_MAX = 2 ** 32 - 1
 export const MAX_TERM_DAYS = 3650
 /** The core's `BLOCKS_PER_DAY`. */
 export const BLOCKS_PER_DAY = 1440
+/**
+ * The blocks a proposal's expiry adds to the days the borrower chose, so that a proposal whose
+ * creation confirms within this many blocks of the tip it was built at counts those days.
+ */
+export const TERM_MARGIN_BLOCKS = 60
 /** `max_principal_per_collateral` counts per 10^8 collateral base units (`COLLATERAL_SCALE`). */
 const COLLATERAL_SCALE_DECIMALS = 8
-/** Basis points are hundredths of a percent. */
-const PERCENT_DECIMALS = 2
+/** Basis points are hundredths of a percent: an APR takes at most 2 decimals. */
+export const PERCENT_DECIMALS = 2
 /** The terms form's error for an APR that is not a percent with at most 2 decimals. */
 export const APR_FORMAT_ERROR = 'Enter the minimum APR as a percent, such as 6 or 6.25'
 /** The decimals an asset can have (`resolveNetworkConfig`'s bound). */
@@ -170,6 +175,26 @@ export function maxPrincipalPerCollateralToDisplay(
   checkDecimals(collateralDecimals, 'The collateral')
   if (value < 0n) throw new RangeError('The rate is negative.')
   return shiftPoint(value, principalDecimals + COLLATERAL_SCALE_DECIMALS - collateralDecimals)
+}
+
+/**
+ * The expiry of a proposal of `days` built at `tipHeight`: the days and `TERM_MARGIN_BLOCKS` after
+ * the tip. `termBlocksOf` counts the chosen days for it when its creation confirms at most the
+ * margin after the tip, a day less when it confirms later.
+ */
+export function proposalExpiry(tipHeight: number, days: number): number {
+  return tipHeight + days * BLOCKS_PER_DAY + TERM_MARGIN_BLOCKS
+}
+
+/**
+ * The term of a proposal, the term rule: the whole days from the block its creation confirmed in
+ * to its expiry, in blocks, `floor((expiry − createdAtHeight) / BLOCKS_PER_DAY) · BLOCKS_PER_DAY`;
+ * 0 when the expiry is not after the creation block. The borrower's form, the lender's console and
+ * the e2e count a term with it alone.
+ */
+export function termBlocksOf(expiry: number, createdAtHeight: number): number {
+  if (expiry <= createdAtHeight) return 0
+  return Math.floor((expiry - createdAtHeight) / BLOCKS_PER_DAY) * BLOCKS_PER_DAY
 }
 
 /** An APR in basis points as a percent, such as `"5.25 %"`. */

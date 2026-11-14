@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -70,5 +71,10 @@ export default defineConfig(({ command, mode }) => {
     server: useLocalApiProxy ? { proxy } : undefined,
     // Local smoke testing of the production bundle against the same indexer.
     preview: { proxy },
+    // `pnpm test`: the pure rules, in Node. Checks that need the chain are `pnpm e2e:private`.
+    test: {
+      environment: 'node',
+      include: ['src/**/*.test.ts'],
+    },
   }
 })
