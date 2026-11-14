@@ -23,7 +23,7 @@ pub const BLOCKS_PER_YEAR: u64 = 525_600;
 pub const COLLATERAL_SCALE: u64 = 100_000_000;
 
 /// The longest term a pair may allow, about ten years.
-const MAX_TERM_DAYS: u32 = 3650;
+pub const MAX_TERM_DAYS: u32 = 3650;
 /// The length of one encoded pair.
 const PAIR_LENGTH: usize = 32 + 32 + 4 + 8 + 4 + 4 + 8 + 8;
 /// The denominator of the interest: basis points in one, times the blocks in a year.
@@ -126,9 +126,24 @@ pub enum TermBreach {
     CollateralBelowMinimum,
 }
 
+impl TermBreach {
+    /// The variant's name, as the wasm and the web name the breach.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::UnsupportedPair => "UnsupportedPair",
+            Self::PrincipalBelowRange => "PrincipalBelowRange",
+            Self::PrincipalAboveRange => "PrincipalAboveRange",
+            Self::TermBelowRange => "TermBelowRange",
+            Self::TermAboveRange => "TermAboveRange",
+            Self::AprBelowMinimum => "AprBelowMinimum",
+            Self::CollateralBelowMinimum => "CollateralBelowMinimum",
+        }
+    }
+}
+
 impl PairTerms {
     /// Checks that the assets differ, `max_principal_per_collateral ≥ 1`, `1 ≤ min_principal ≤
-    /// max_principal` and `1 ≤ min_term_days ≤ max_term_days ≤ 3650`, in that order.
+    /// max_principal` and `1 ≤ min_term_days ≤ max_term_days ≤` [`MAX_TERM_DAYS`], in that order.
     pub fn validate(&self) -> Result<(), LenderTermsError> {
         if self.principal_asset == self.collateral_asset {
             return Err(LenderTermsError::SameAssets);
@@ -180,8 +195,9 @@ impl PairTerms {
 }
 
 impl LenderTerms {
-    /// The encoding, of the terms as they are: [`LenderTerms::decode`] rejects terms that are not
-    /// valid. A list of more than 255 pairs is written with the count 255.
+    /// The encoding, of the terms as they are: [`LenderTerms::decode`] rejects terms that
+    /// [`LenderTerms::validate`] rejects. A list of more than 255 pairs is written with the count
+    /// 255.
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(2 + self.pairs.len() * PAIR_LENGTH);
         bytes.push(LENDER_TERMS_VERSION);
@@ -192,9 +208,30 @@ impl LenderTerms {
         bytes
     }
 
+    /// Checks that there are 1 to [`MAX_PAIRS`] pairs, and then, pair by pair, that
+    /// [`PairTerms::validate`] accepts the pair and no earlier pair has its assets. A count above
+    /// 255 is reported as 255, the count the encoding carries.
+    pub fn validate(&self) -> Result<(), LenderTermsError> {
+        let count = self.pairs.len();
+        if count == 0 || count > MAX_PAIRS {
+            return Err(LenderTermsError::BadPairCount(
+                u8::try_from(count).unwrap_or(u8::MAX),
+            ));
+        }
+        for (index, pair) in self.pairs.iter().enumerate() {
+            pair.validate()?;
+            if self.pairs[..index]
+                .iter()
+                .any(|earlier| earlier.has_assets(&pair.principal_asset, &pair.collateral_asset))
+            {
+                return Err(LenderTermsError::DuplicatePair);
+            }
+        }
+        Ok(())
+    }
+
     /// Decodes terms from exactly their encoding, rejecting an unknown version, a length other
-    /// than the pair count's, 0 or more than [`MAX_PAIRS`] pairs, two pairs with the same assets
-    /// and any pair [`PairTerms::validate`] rejects.
+    /// than the pair count's and any terms [`LenderTerms::validate`] rejects.
     pub fn decode(bytes: &[u8]) -> Result<LenderTerms, LenderTermsError> {
         let [version, count, body @ ..] = bytes else {
             return Err(LenderTermsError::BadLength);
@@ -210,18 +247,11 @@ impl LenderTerms {
         }
 
         let (chunks, _) = body.as_chunks::<PAIR_LENGTH>();
-        let pairs: Vec<PairTerms> = chunks.iter().map(PairTerms::decode).collect();
-        for (index, pair) in pairs.iter().enumerate() {
-            pair.validate()?;
-            if pairs[..index]
-                .iter()
-                .any(|earlier| earlier.has_assets(&pair.principal_asset, &pair.collateral_asset))
-            {
-                return Err(LenderTermsError::DuplicatePair);
-            }
-        }
-
-        Ok(LenderTerms { pairs })
+        let terms = LenderTerms {
+            pairs: chunks.iter().map(PairTerms::decode).collect(),
+        };
+        terms.validate()?;
+        Ok(terms)
     }
 
     /// Every term of the pair with the proposal's assets that the proposal breaks, in
@@ -565,6 +595,83 @@ mod tests {
             ..sample_pair()
         };
         assert_eq!(narrowest.validate(), Ok(()));
+    }
+
+    /// Terms built in code are held to the rules [`LenderTerms::decode`] applies to bytes.
+    #[test]
+    fn validate_applies_the_decode_rules() {
+        assert_eq!(one_pair(sample_pair()).validate(), Ok(()));
+        let eight = LenderTerms {
+            pairs: distinct_pairs(8),
+        };
+        assert_eq!(eight.validate(), Ok(()));
+
+        let cases = [
+            (
+                LenderTerms { pairs: vec![] },
+                LenderTermsError::BadPairCount(0),
+            ),
+            (
+                LenderTerms {
+                    pairs: distinct_pairs(9),
+                },
+                LenderTermsError::BadPairCount(9),
+            ),
+            // a count above 255 is reported as 255, the count its encoding carries
+            (
+                LenderTerms {
+                    pairs: vec![sample_pair(); 300],
+                },
+                LenderTermsError::BadPairCount(255),
+            ),
+            (
+                LenderTerms {
+                    pairs: vec![
+                        sample_pair(),
+                        PairTerms {
+                            min_apr_bps: 900,
+                            ..sample_pair()
+                        },
+                    ],
+                },
+                LenderTermsError::DuplicatePair,
+            ),
+            (
+                LenderTerms {
+                    pairs: vec![
+                        distinct_pairs(1)[0],
+                        PairTerms {
+                            max_term_days: crate::MAX_TERM_DAYS + 1,
+                            ..sample_pair()
+                        },
+                    ],
+                },
+                LenderTermsError::BadTermRange,
+            ),
+        ];
+        for (terms, error) in cases {
+            assert_eq!(terms.validate(), Err(error));
+            if terms.pairs.len() <= usize::from(u8::MAX) {
+                assert_eq!(LenderTerms::decode(&terms.encode()), Err(error));
+            }
+        }
+    }
+
+    /// The names the wasm and the web use for the breaches.
+    #[test]
+    fn breach_names() {
+        let names = [
+            (TermBreach::UnsupportedPair, "UnsupportedPair"),
+            (TermBreach::PrincipalBelowRange, "PrincipalBelowRange"),
+            (TermBreach::PrincipalAboveRange, "PrincipalAboveRange"),
+            (TermBreach::TermBelowRange, "TermBelowRange"),
+            (TermBreach::TermAboveRange, "TermAboveRange"),
+            (TermBreach::AprBelowMinimum, "AprBelowMinimum"),
+            (TermBreach::CollateralBelowMinimum, "CollateralBelowMinimum"),
+        ];
+        for (breach, name) in names {
+            assert_eq!(breach.name(), name);
+        }
     }
 
     /// The frozen encoding of one pair, so a change of field order, width or byte order fails.
@@ -1082,7 +1189,7 @@ mod tests {
             )),
             "check_proposal": breaches
                 .iter()
-                .map(|breach| format!("{breach:?}"))
+                .map(|breach| breach.name())
                 .collect::<Vec<_>>(),
         })
     }

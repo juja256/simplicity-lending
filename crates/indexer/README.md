@@ -287,7 +287,7 @@ Entries are `{ pubkey, display_name, created_at, updated_at }`, with unix-second
 Writes are signed over a server challenge:
 
 - A challenge is 32 random bytes, valid for 300 seconds and consumed by one successful write. A rejected signature does not consume it.
-- The signed message is `tagged_hash("simplicity-lending/directory/v1", action || pubkey || challenge || display_name)`. `action` is one byte: `1` for put, `2` for delete. `pubkey` is the 32-byte x-only key, `challenge` is 32 bytes, and `display_name` is its UTF-8 bytes (empty for delete). The signature is BIP340.
+- The signed message is `tagged_hash("simplicity-lending/directory/v2", action || pubkey || challenge || name_length || display_name || terms)`. `action` is one byte: `1` for put, `2` for delete. `pubkey` is the 32-byte x-only key, `challenge` is 32 bytes, `name_length` is the name's length in bytes as a big-endian `u16`, `display_name` is its UTF-8 bytes (empty for delete), and `terms` is the lender terms' encoding (empty for delete). Puts do not carry terms yet, so a put is signed over empty terms for now. Version 1 signatures are not accepted. The signature is BIP340.
 - Display names are 1 to 64 characters, with no leading or trailing whitespace and no control characters.
 
 Errors: `400` for a malformed pubkey, challenge, signature or name; `401` with `invalid signature`, or with `unknown, used or expired challenge`.

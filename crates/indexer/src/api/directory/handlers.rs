@@ -80,7 +80,8 @@ fn check_signature(
     display_name: &str,
     signature: &schnorr::Signature,
 ) -> Result<(), ApiError> {
-    if verify_directory_action(key, action, challenge, display_name, signature) {
+    // a put is verified over no terms until the entry carries them
+    if verify_directory_action(key, action, challenge, display_name, None, signature) {
         Ok(())
     } else {
         Err(ApiError::Unauthorized("invalid signature".to_string()))
