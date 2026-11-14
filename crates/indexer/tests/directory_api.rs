@@ -3,6 +3,7 @@ mod common;
 use elements::AssetId;
 use private_lending_core::{
     DirectoryAction, LenderTerms, LendingKey, PairTerms, sign_directory_action,
+    verify_directory_action,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -726,5 +727,74 @@ async fn undecodable_stored_terms_are_served_as_none() -> anyhow::Result<()> {
     assert_eq!(items[0]["terms"], Value::Null);
     assert_eq!(items[0]["terms_published_at"], Value::Null);
     assert_eq!(items[1]["terms"], terms_json(&sample_terms()));
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn put_stores_challenge_and_signature() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let (base, _server) = start_api(pool).await?;
+    let http = reqwest::Client::new();
+    let key = lending_key(5);
+    let pk = pubkey_hex(&key);
+    let url = format!("{base}/private/directory/{pk}");
+    let c = issue_challenge(&http, &base).await?;
+    let body = put_body(&key, &c, "Acme");
+
+    let response = send_json(&http, Method::PUT, url.clone(), body.clone()).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let put = response_json(response).await?;
+    assert_eq!(put["signed_challenge"], hex::encode(c));
+    assert_eq!(put["signature"], body["signature"]);
+
+    let fetched = response_json(http.get(&url).send().await?).await?;
+    let list = response_json(http.get(format!("{base}/private/directory")).send().await?).await?;
+    assert_eq!(list["items"], json!([fetched.clone()]));
+    assert_eq!(fetched, put);
+
+    // Anyone holding the served entry can check that the key signed this name and these terms.
+    let challenge: [u8; 32] = hex::decode(fetched["signed_challenge"].as_str().unwrap())?
+        .try_into()
+        .unwrap();
+    let signature = fetched["signature"].as_str().unwrap().parse()?;
+    assert_eq!(fetched["terms"], terms_json(&sample_terms()));
+    assert!(verify_directory_action(
+        &key.x_only_public_key(),
+        DirectoryAction::Put,
+        &challenge,
+        fetched["display_name"].as_str().unwrap(),
+        Some(&sample_terms()),
+        &signature,
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn entry_before_signatures_serves_nulls() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    // An entry with terms, as written before the directory kept the put's challenge and signature.
+    let key = lending_key(5);
+    sqlx::query(
+        "INSERT INTO directory_entries (pubkey, display_name, terms, terms_published_at)
+         VALUES ($1, 'Acme', $2, now())",
+    )
+    .bind(key.x_only_public_key().serialize().to_vec())
+    .bind(sample_terms().encode())
+    .execute(&pool)
+    .await?;
+    let (base, _server) = start_api(pool).await?;
+    let http = reqwest::Client::new();
+    let url = format!("{base}/private/directory/{}", pubkey_hex(&key));
+
+    let fetched = response_json(http.get(&url).send().await?).await?;
+    assert_eq!(fetched["terms"], terms_json(&sample_terms()));
+    // Served as explicit nulls, not left out.
+    let fields = fetched.as_object().unwrap();
+    assert_eq!(fields.get("signed_challenge"), Some(&Value::Null));
+    assert_eq!(fields.get("signature"), Some(&Value::Null));
+    let list = response_json(http.get(format!("{base}/private/directory")).send().await?).await?;
+    assert_eq!(list["items"], json!([fetched]));
     Ok(())
 }

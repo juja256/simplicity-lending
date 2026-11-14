@@ -10,6 +10,8 @@ const ENTRY_COLUMNS: &str = r#"
     display_name,
     terms,
     FLOOR(EXTRACT(EPOCH FROM terms_published_at))::BIGINT AS terms_published_at,
+    signed_challenge,
+    signature,
     FLOOR(EXTRACT(EPOCH FROM created_at))::BIGINT AS created_at,
     FLOOR(EXTRACT(EPOCH FROM updated_at))::BIGINT AS updated_at
 "#;
@@ -20,6 +22,8 @@ struct EntryRow {
     display_name: String,
     terms: Option<Vec<u8>>,
     terms_published_at: Option<i64>,
+    signed_challenge: Option<Vec<u8>>,
+    signature: Option<Vec<u8>>,
     created_at: i64,
     updated_at: i64,
 }
@@ -43,6 +47,8 @@ impl From<EntryRow> for DirectoryEntry {
             pubkey,
             display_name: row.display_name,
             terms,
+            signed_challenge: row.signed_challenge.map(hex::encode),
+            signature: row.signature.map(hex::encode),
             created_at: row.created_at,
             updated_at: row.updated_at,
         }
@@ -137,29 +143,42 @@ pub async fn consume_challenge(
     Ok(row.is_some())
 }
 
-/// Creates or replaces the entry with the name and the terms' encoding, published now. An entry
-/// without terms gains them and is listed from then on.
+/// What a put writes: the name, the terms' encoding, and the challenge and signature that
+/// authorized them.
+pub struct EntryPut<'a> {
+    pub display_name: &'a str,
+    pub terms: &'a [u8],
+    pub signed_challenge: &'a [u8],
+    pub signature: &'a [u8],
+}
+
+/// Creates or replaces the entry with the put, published now. An entry without terms gains them
+/// and is listed from then on.
 pub async fn upsert_entry(
     tx: &mut Transaction<'_, Postgres>,
     pubkey: &[u8],
-    display_name: &str,
-    terms: &[u8],
+    put: EntryPut<'_>,
 ) -> Result<DirectoryEntry, sqlx::Error> {
     let row = sqlx::query_as::<_, EntryRow>(&format!(
         r#"
-        INSERT INTO directory_entries (pubkey, display_name, terms, terms_published_at)
-        VALUES ($1, $2, $3, now())
+        INSERT INTO directory_entries
+            (pubkey, display_name, terms, terms_published_at, signed_challenge, signature)
+        VALUES ($1, $2, $3, now(), $4, $5)
         ON CONFLICT (pubkey) DO UPDATE SET
             display_name = EXCLUDED.display_name,
             terms = EXCLUDED.terms,
             terms_published_at = EXCLUDED.terms_published_at,
+            signed_challenge = EXCLUDED.signed_challenge,
+            signature = EXCLUDED.signature,
             updated_at = now()
         RETURNING {ENTRY_COLUMNS}
         "#
     ))
     .bind(pubkey)
-    .bind(display_name)
-    .bind(terms)
+    .bind(put.display_name)
+    .bind(put.terms)
+    .bind(put.signed_challenge)
+    .bind(put.signature)
     .fetch_one(&mut **tx)
     .await?;
     Ok(row.into())

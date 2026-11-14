@@ -14,6 +14,7 @@ use crate::api::openapi::ErrorResponse;
 use crate::api::params::deserialize_optional_u64;
 use crate::api::{ApiError, AppState};
 
+use super::db::EntryPut;
 use super::dto::{
     DeleteDirectoryEntry, DirectoryChallenge, DirectoryEntry, DirectoryList, PutDirectoryEntry,
 };
@@ -203,8 +204,13 @@ pub async fn put_entry(
     if !super::db::consume_challenge(&mut tx, &challenge).await? {
         return Err(challenge_rejected());
     }
-    let entry =
-        super::db::upsert_entry(&mut tx, &bytes, &body.display_name, &terms.encode()).await?;
+    let put = EntryPut {
+        display_name: &body.display_name,
+        terms: &terms.encode(),
+        signed_challenge: &challenge,
+        signature: signature.as_ref(),
+    };
+    let entry = super::db::upsert_entry(&mut tx, &bytes, put).await?;
     tx.commit().await?;
     Ok(Json(entry))
 }
