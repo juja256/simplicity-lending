@@ -19,6 +19,7 @@ import * as lwk from 'lwk_wasm'
 
 import { ApiError } from '@/api/errors'
 import {
+  type DirectoryEntry,
   fetchDirectory,
   fetchDirectoryEntry,
   fetchPrivateCandidate,
@@ -28,6 +29,7 @@ import {
   type PrivateCandidateDetails,
   type PrivateUtxo,
   putDirectoryEntry,
+  type PutDirectoryEntryBody,
   requestDirectoryChallenge,
 } from '@/api/indexer/private'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
@@ -52,6 +54,17 @@ import {
 import { buildPrivateRepayment, PrincipalNotClaimedError } from '@/privateLending/flows/repayment'
 import { outpointOf } from '@/privateLending/flows/shared'
 import { type InspectedOutput, inspectPset } from '@/privateLending/inspectPset'
+import {
+  BLOCKS_PER_DAY,
+  findPairTerms,
+  formatPublishedAt,
+  type LenderTermsInput,
+  maxPrincipalPerCollateralToDisplay,
+  type PairTermsForm,
+  pairTermsFromForm,
+  type ProposalInput,
+  unitsToDecimal,
+} from '@/privateLending/lenderTerms'
 import { walletReceiver } from '@/privateLending/receiver'
 import {
   CREATION_TX_MISMATCH,
@@ -101,6 +114,7 @@ import {
   STAGE_NEEDS,
   sumNeeds,
   TESTNET_ASSETS,
+  TESTNET_PAIR,
   type Wallet,
 } from './e2e/env'
 import { type IndexerProxy, memoryScanStore, startIndexerProxy } from './e2e/indexer'
@@ -116,7 +130,7 @@ import { fingerprintGroups, flowDeps, initRuntime, type SeedWallet, seedWallet }
 interface Context {
   chain: ReturnType<typeof createChain>
   wallets: Record<Wallet, SeedWallet>
-  /** The indexer API that `scan` reads. */
+  /** The indexer API that `scan` and `directory` read. */
   apiUrl: string
 }
 
@@ -2297,41 +2311,62 @@ async function localFaultScan(ctx: Context): Promise<void> {
   )
 }
 
-/** The lender registers in the directory, is listed, and removes its entry. */
-async function directoryRoundTrip(ctx: Context): Promise<void> {
-  const { lender } = ctx.wallets
-  const deps = flowDeps(lender, ctx.chain)
-  const key = lender.lendingKey
-  const pubkey = key.xOnlyPublicKey()
-  const name = 'E2E Lender'
-  out(`directory: ${fingerprintGroups(key.fingerprint())}`)
-
-  const entry = await registerInDirectory(deps, key, name, ctx.apiUrl)
-  const fetched = await fetchDirectoryEntry(pubkey, ctx.apiUrl)
-  for (const [what, got] of [
-    ['PUT', entry],
-    ['GET', fetched],
-  ] as const) {
-    if (got.pubkey !== pubkey || got.display_name !== name) {
-      throw new Error(
-        `directory ${what} returned ${JSON.stringify(got)}, not "${name}" for ${pubkey}`,
-      )
-    }
+/** Every entry of the directory list, page by page, as the app reads it (`useDirectory`). */
+async function listWholeDirectory(apiUrl: string): Promise<DirectoryEntry[]> {
+  const entries: DirectoryEntry[] = []
+  for (;;) {
+    const page = await fetchDirectory({ limit: 100, offset: entries.length }, apiUrl)
+    entries.push(...page.items)
+    if (page.items.length === 0 || entries.length >= page.total) return entries
   }
-  const listed = await fetchDirectory({ limit: 100 }, ctx.apiUrl)
-  if (!listed.items.some(item => item.pubkey === pubkey && item.display_name === name)) {
-    throw new Error('the directory list does not show the new entry')
-  }
-  out(`  registered "${fetched.display_name}"; GET and the list show it`)
+}
 
-  // a signature over another name: refused with 401 and the server's message
-  const { challenge } = await requestDirectoryChallenge(ctx.apiUrl)
-  const signature = wasm.signDirectoryAction(key, wasm.DirectoryAction.Put, challenge, name)
-  const refusal = await putDirectoryEntry(
-    pubkey,
-    { display_name: 'E2E Impostor', challenge, signature },
-    ctx.apiUrl,
-  ).then(
+/**
+ * The proposal of the `create` stage's offer, from the constants it is built from: its amounts,
+ * and its expiry offset as the term. The `create` record is not needed, so the stage runs from any
+ * state.
+ */
+function createProposal(): ProposalInput {
+  return {
+    principal_asset: TESTNET_ASSETS.principal,
+    collateral_asset: TESTNET_ASSETS.collateral,
+    principal_amount: PRINCIPAL.toString(),
+    collateral_amount: COLLATERAL.toString(),
+    repayment_amount: REPAYMENT.toString(),
+    term_blocks: OFFER_EXPIRY_BLOCKS,
+  }
+}
+
+/**
+ * The e2e lender's terms for the configured pair, typed as a lender types them in the app: whole
+ * coins, a percent and days. The `create` proposal is within them, at the shortest term and with
+ * twice the least collateral.
+ */
+function e2eTermsForm(): PairTermsForm {
+  const { collateralAsset: collateral, principalAsset: principal } = TESTNET_PAIR
+  const rate = 2n * wasm.principalPerCollateral(PRINCIPAL, COLLATERAL)
+  return {
+    minAprPercent: '10',
+    maxPrincipalPerCollateral: maxPrincipalPerCollateralToDisplay(
+      rate,
+      principal.decimals,
+      collateral.decimals,
+    ),
+    minTermDays: String(OFFER_EXPIRY_BLOCKS / BLOCKS_PER_DAY),
+    maxTermDays: '30',
+    minPrincipal: unitsToDecimal(PRINCIPAL / 10n, principal.decimals),
+    maxPrincipal: unitsToDecimal(PRINCIPAL * 100n, principal.decimals),
+  }
+}
+
+/** A PUT of `body` must be refused with 401 "invalid signature". */
+async function expectInvalidSignature(
+  ctx: Context,
+  pubkey: string,
+  body: PutDirectoryEntryBody,
+  what: string,
+): Promise<void> {
+  const refusal = await putDirectoryEntry(pubkey, body, ctx.apiUrl).then(
     () => null,
     (error: unknown) => error,
   )
@@ -2340,9 +2375,147 @@ async function directoryRoundTrip(ctx: Context): Promise<void> {
     refusal.status !== 401 ||
     indexerErrorMessage(refusal) !== 'invalid signature'
   ) {
-    throw new Error(`a PUT signed over another name was not refused with 401: ${String(refusal)}`)
+    throw new Error(`a PUT ${what} was not refused with 401: ${String(refusal)}`)
   }
-  out(`  a PUT signed over another name: 401 "${indexerErrorMessage(refusal)}"`)
+  out(`  a PUT ${what}: 401 "${indexerErrorMessage(refusal)}"`)
+}
+
+/**
+ * The lender publishes terms for the configured pair in the local indexer's directory (`web/
+ * README.md`, "Local testnet indexer"); a write whose name or terms differ from what was signed is
+ * refused. The borrower lists the directory, finds the lender's entry and terms, and checks the
+ * `create` proposal against them: within, also at exactly the least collateral, and one unit
+ * below it only `CollateralBelowMinimum`. Last, the lender removes its entry. Nothing is broadcast.
+ */
+async function directoryStage(ctx: Context): Promise<void> {
+  const { lender } = ctx.wallets
+  const deps = flowDeps(lender, ctx.chain)
+  const key = lender.lendingKey
+  const pubkey = key.xOnlyPublicKey()
+  const name = 'E2E Lender'
+  const { collateralAsset: collateral, principalAsset: principal } = TESTNET_PAIR
+  out(`directory ${ctx.apiUrl}: lender ${fingerprintGroups(key.fingerprint())}`)
+
+  // The lender: the terms from what it types, then the signed write.
+  const form = e2eTermsForm()
+  const parsed = pairTermsFromForm(form, { collateral, principal })
+  if (parsed.terms === null) {
+    throw new Error(`the e2e terms form is refused: ${JSON.stringify(parsed.errors)}`)
+  }
+  const rate = 2n * wasm.principalPerCollateral(PRINCIPAL, COLLATERAL)
+  if (BigInt(parsed.terms.max_principal_per_collateral) !== rate) {
+    throw new Error(
+      `${form.maxPrincipalPerCollateral} ${principal.symbol} per ${collateral.symbol} gave ` +
+        `${parsed.terms.max_principal_per_collateral}, not ${rate} per 10^8 base units`,
+    )
+  }
+  const terms: LenderTermsInput = { pairs: [parsed.terms] }
+  out(
+    `  terms: APR at least ${form.minAprPercent} %, at most ${form.maxPrincipalPerCollateral} ` +
+      `${principal.symbol} per ${collateral.symbol} (${rate} per 10^8 base units), ` +
+      `${form.minTermDays} to ${form.maxTermDays} days, ${form.minPrincipal} to ` +
+      `${form.maxPrincipal} ${principal.symbol}`,
+  )
+
+  const entry = await registerInDirectory(deps, key, name, terms, ctx.apiUrl)
+  const fetched = await fetchDirectoryEntry(pubkey, ctx.apiUrl)
+  for (const [what, got] of [
+    ['PUT', entry],
+    ['GET', fetched],
+  ] as const) {
+    if (
+      got.pubkey !== pubkey ||
+      got.display_name !== name ||
+      !isDeepStrictEqual(got.terms, terms) ||
+      got.terms_published_at === null
+    ) {
+      throw new Error(
+        `directory ${what} returned ${JSON.stringify(got)}, not "${name}" and its terms`,
+      )
+    }
+  }
+  if (fetched.terms_published_at !== entry.terms_published_at) {
+    throw new Error(
+      `GET says the terms were published at ${fetched.terms_published_at}, the PUT ` +
+        `${entry.terms_published_at}`,
+    )
+  }
+  out(
+    `  published "${name}" with its terms at ${formatPublishedAt(entry.terms_published_at!)}; ` +
+      'GET shows the same',
+  )
+
+  // Signed over the name and the terms together: a write that changes either is refused.
+  const signedPut = async (): Promise<PutDirectoryEntryBody> => {
+    const { challenge } = await requestDirectoryChallenge(ctx.apiUrl)
+    const signature = wasm.signDirectoryAction(
+      key,
+      wasm.DirectoryAction.Put,
+      challenge,
+      name,
+      JSON.stringify(terms),
+    )
+    return { display_name: name, challenge, terms, signature }
+  }
+  await expectInvalidSignature(
+    ctx,
+    pubkey,
+    { ...(await signedPut()), display_name: 'E2E Impostor' },
+    'signed over another name',
+  )
+  const otherTerms = { pairs: [{ ...parsed.terms, min_apr_bps: parsed.terms.min_apr_bps + 1 }] }
+  await expectInvalidSignature(
+    ctx,
+    pubkey,
+    { ...(await signedPut()), terms: otherTerms },
+    'signed over other terms',
+  )
+
+  // The borrower: the lender's terms from the list, and the `create` proposal against them.
+  const listed = (await listWholeDirectory(ctx.apiUrl)).find(item => item.pubkey === pubkey)
+  if (listed === undefined) throw new Error('the directory list does not show the lender')
+  const pair = findPairTerms(listed.terms, { collateral, principal })
+  if (
+    pair === undefined ||
+    !isDeepStrictEqual(listed.terms, terms) ||
+    listed.terms_published_at !== entry.terms_published_at
+  ) {
+    throw new Error(`the directory lists the lender as ${JSON.stringify(listed)}`)
+  }
+  out(
+    `  the borrower lists "${listed.display_name}", terms published at ` +
+      formatPublishedAt(listed.terms_published_at!),
+  )
+
+  const listedTerms = JSON.stringify(listed.terms)
+  const check = (proposal: ProposalInput): string[] =>
+    wasm.checkProposal(listedTerms, JSON.stringify(proposal))
+  const proposal = createProposal()
+  const leastCollateral = wasm.minCollateral(
+    BigInt(proposal.principal_amount),
+    BigInt(pair.max_principal_per_collateral),
+  )
+  const cases: [string, ProposalInput, string[]][] = [
+    ['the create proposal', proposal, []],
+    ['at the least collateral', { ...proposal, collateral_amount: leastCollateral.toString() }, []],
+    [
+      'one unit below the least collateral',
+      { ...proposal, collateral_amount: (leastCollateral - 1n).toString() },
+      ['CollateralBelowMinimum'],
+    ],
+  ]
+  for (const [what, checked, expected] of cases) {
+    const breaches = check(checked)
+    if (!isDeepStrictEqual(breaches, expected)) {
+      throw new Error(
+        `checkProposal, ${what}: ${JSON.stringify(breaches)}, not ${JSON.stringify(expected)}`,
+      )
+    }
+    out(
+      `  checkProposal, ${what} (${checked.collateral_amount} collateral base units): ` +
+        JSON.stringify(breaches),
+    )
+  }
 
   await removeFromDirectory(deps, key, ctx.apiUrl)
   const gone = await fetchDirectoryEntry(pubkey, ctx.apiUrl).then(
@@ -2352,13 +2525,16 @@ async function directoryRoundTrip(ctx: Context): Promise<void> {
   if (!(gone instanceof ApiError) || gone.status !== 404) {
     throw new Error(`the entry is still there after the delete: ${String(gone)}`)
   }
-  out('  removed; GET answers 404')
+  if ((await listWholeDirectory(ctx.apiUrl)).some(item => item.pubkey === pubkey)) {
+    throw new Error('the directory still lists the lender after the delete')
+  }
+  out('  removed; GET answers 404 and the list leaves it out')
+  out('\ndirectory: ok')
 }
 
 /**
  * Both wallets scan the local indexer (`web/README.md`, "Local testnet indexer") for the e2e
- * offers, a hostile indexer cannot get an offer verified, and the lender writes the directory.
- * Nothing is broadcast.
+ * offers, and a hostile indexer cannot get an offer verified. Nothing is broadcast.
  */
 async function scanStage(ctx: Context): Promise<void> {
   const creations: Creation[] = (Object.keys(CREATION_STAGES) as CreationRecord[]).map(stage => {
@@ -2396,7 +2572,6 @@ async function scanStage(ctx: Context): Promise<void> {
   } finally {
     await proxy.close()
   }
-  await directoryRoundTrip(ctx)
   out('\nscan: ok')
 }
 
@@ -2418,6 +2593,7 @@ const STAGES: Record<string, (ctx: Context) => Promise<void>> = {
   'liquidate-dry': liquidateDryStage,
   liquidate: liquidateStage,
   scan: scanStage,
+  directory: directoryStage,
 }
 
 /**

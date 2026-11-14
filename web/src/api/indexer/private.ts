@@ -6,6 +6,8 @@
 // transaction. Callers verify every offer (`privateLending/scan.ts`) and show key fingerprints.
 import { z as zod } from 'zod'
 
+import type { LenderTermsInput, PairTermsInput } from '@/privateLending/lenderTerms'
+
 import { deleteJson, postJson, putJson, requestJson, type RequestParams } from '../client'
 import { ApiError } from '../errors'
 
@@ -21,6 +23,16 @@ const hex32 = hexBytes(32)
 const countSchema = zod.number().int().nonnegative()
 const heightSchema = zod.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
 const unixSecondsSchema = zod.number().int()
+const u32Schema = zod
+  .number()
+  .int()
+  .min(0)
+  .max(2 ** 32 - 1)
+/** A `u64` as decimal digits, as the indexer writes the terms' amounts. */
+const u64Schema = zod
+  .string()
+  .regex(/^\d{1,20}$/, 'must be decimal digits')
+  .refine(value => BigInt(value) < 2n ** 64n, 'must be at most u64::MAX')
 
 export const privateOfferStatusSchema = zod.enum([
   'pending',
@@ -95,11 +107,37 @@ export const directoryChallengeSchema = zod.object({
 })
 export type DirectoryChallenge = zod.infer<typeof directoryChallengeSchema>
 
+/** One pair of a lender's terms, with the core's `PairTerms` field names (`lenderTerms.ts`). */
+export const pairTermsSchema = zod
+  .object({
+    principal_asset: hex32,
+    collateral_asset: hex32,
+    min_apr_bps: u32Schema,
+    max_principal_per_collateral: u64Schema,
+    min_term_days: u32Schema,
+    max_term_days: u32Schema,
+    min_principal: u64Schema,
+    max_principal: u64Schema,
+  })
+  .strict() satisfies zod.ZodType<PairTermsInput, zod.ZodTypeDef, unknown>
+
+export const lenderTermsSchema = zod
+  .object({ pairs: zod.array(pairTermsSchema).min(1).max(8) })
+  .strict() satisfies zod.ZodType<LenderTermsInput, zod.ZodTypeDef, unknown>
+
 export const directoryEntrySchema = zod.object({
   /** The x-only lending key. */
   pubkey: hex32,
   /** Chosen by whoever holds the key: never a verified identity. */
   display_name: zod.string(),
+  /**
+   * The lender's terms, unchecked beyond their shape (the wasm checks them before use). Null for an
+   * entry without terms, and for terms the indexer could not decode or served malformed: one such
+   * entry must not hide the others.
+   */
+  terms: lenderTermsSchema.nullable().catch(null),
+  /** Unix seconds of the terms' publication; null when the entry has no terms. */
+  terms_published_at: unixSecondsSchema.nullable(),
   /** Unix seconds. */
   created_at: unixSecondsSchema,
   updated_at: unixSecondsSchema,
@@ -108,7 +146,7 @@ export type DirectoryEntry = zod.infer<typeof directoryEntrySchema>
 
 export const directoryListSchema = zod.object({
   items: zod.array(directoryEntrySchema),
-  /** Entries in the directory, ignoring paging. */
+  /** Entries with terms, ignoring paging. */
   total: countSchema,
   limit: countSchema,
   offset: countSchema,
@@ -118,6 +156,8 @@ export type DirectoryList = zod.infer<typeof directoryListSchema>
 export interface PutDirectoryEntryBody {
   display_name: string
   challenge: string
+  /** Signed together with the name. */
+  terms: LenderTermsInput
   signature: string
 }
 
@@ -194,7 +234,7 @@ export async function fetchPrivateCreationTx(
   return tx_hex.toLowerCase()
 }
 
-/** Directory entries, ordered by `(display_name, pubkey)`. */
+/** Directory entries with terms, ordered by `(display_name, pubkey)`. */
 export async function fetchDirectory(
   { limit, offset }: DirectoryParams,
   baseUrl: string,
@@ -208,7 +248,7 @@ export async function fetchDirectory(
   })
 }
 
-/** One directory entry; `404` if the key has none. */
+/** One directory entry, with or without terms; `404` if the key has none. */
 export async function fetchDirectoryEntry(
   pubkey: string,
   baseUrl: string,
@@ -228,7 +268,7 @@ export async function requestDirectoryChallenge(baseUrl: string): Promise<Direct
   )
 }
 
-/** Creates or renames the entry of `pubkey`; returns it. */
+/** Creates or replaces the name and the terms of the entry of `pubkey`; returns it. */
 export async function putDirectoryEntry(
   pubkey: string,
   body: PutDirectoryEntryBody,

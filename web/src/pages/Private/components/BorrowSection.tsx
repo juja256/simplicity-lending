@@ -1,19 +1,22 @@
-import { Chip } from '@heroui/react'
+import { Chip, Skeleton } from '@heroui/react'
 import { useState } from 'react'
 
 import { useBlockHeight } from '@/api/esplora/hooks'
 import { getTxExplorerUrl } from '@/api/esplora/utils'
 import CoinsIcon from '@/components/icons/CoinsIcon'
+import KeyFingerprint from '@/components/KeyFingerprint'
 import CancelPrivateOfferModal from '@/components/modals/private/CancelPrivateOfferModal'
 import ClaimPrincipalModal from '@/components/modals/private/ClaimPrincipalModal'
 import CreatePrivateOfferModal, {
   type PrivateOfferDraft,
 } from '@/components/modals/private/CreatePrivateOfferModal'
 import RepayPrivateOfferModal from '@/components/modals/private/RepayPrivateOfferModal'
+import { OffersLoadError } from '@/components/OffersLoadError'
 import { OfferStatusChip } from '@/components/OfferStatusChip'
 import { UiButton } from '@/components/ui/UiButton'
 import { repaymentBorrowerNftOutpoint, unspentUtxo } from '@/privateLending/candidate'
 import { useDirectory } from '@/privateLending/hooks/useDirectory'
+import { useFingerprintOf } from '@/privateLending/hooks/useFingerprintOf'
 import { type PrivateOfferItem, usePrivateOffers } from '@/privateLending/hooks/usePrivateOffers'
 import {
   isPastExpiry,
@@ -26,6 +29,7 @@ import { usePendingTransactions } from '@/providers/pendingTransactions/usePendi
 import { truncateAddress } from '@/utils/format'
 
 import CreatePrivateOfferForm from './CreatePrivateOfferForm'
+import PairTermsSummary from './PairTermsSummary'
 import PrivateOfferActionRow, { type OfferActions, type OfferView } from './PrivateOfferActionRow'
 import PrivateOfferList, { ScanHeight } from './PrivateOfferList'
 import { useKeyedModal } from './useKeyedModal'
@@ -144,6 +148,48 @@ function PendingCreationRow({
   )
 }
 
+/**
+ * The lenders of the directory with their terms and when they published them, to choose a lender
+ * by; never the wallet's own entry, nor a key that is not valid.
+ */
+function ListedLenders({ directory }: { directory: ReturnType<typeof useDirectory> }) {
+  const fingerprintOf = useFingerprintOf()
+  const { own, entries } = directory
+  const lenders = entries.flatMap(entry => {
+    const fingerprint = fingerprintOf(entry.pubkey)
+    return fingerprint && entry.pubkey !== own?.pubkey ? [{ entry, fingerprint }] : []
+  })
+
+  return (
+    <div className='flex flex-col gap-3'>
+      <h3 className='text-foreground text-sm font-semibold'>
+        Lenders&apos; terms{directory.directory.isSuccess ? ` (${lenders.length})` : ''}
+      </h3>
+      {directory.directory.isPending ? (
+        <Skeleton className='h-24 w-full rounded' />
+      ) : directory.directory.isError ? (
+        <OffersLoadError
+          error={directory.directory.error}
+          onRetry={() => void directory.directory.refetch()}
+        />
+      ) : lenders.length === 0 ? (
+        <div className='bg-surface border-muted flex h-14 items-center rounded border border-dashed px-4 opacity-50'>
+          <span className='text-foreground text-sm font-medium'>No lender is listed yet.</span>
+        </div>
+      ) : (
+        <ul className='flex max-h-96 flex-col gap-2 overflow-y-auto'>
+          {lenders.map(({ entry, fingerprint }) => (
+            <li key={entry.pubkey} className='bg-surface flex flex-col gap-2 rounded-2xl p-4'>
+              <KeyFingerprint fingerprint={fingerprint} name={entry.display_name} />
+              <PairTermsSummary terms={entry.terms} publishedAt={entry.terms_published_at} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 type ModalRequest =
   | { kind: 'action'; action: BorrowerAction; item: OpenedOfferItem; unsentTx?: PrivateTxRecord }
   | { kind: 'create'; draft?: PrivateOfferDraft; unsentTx?: PrivateTxRecord }
@@ -151,7 +197,8 @@ type ModalRequest =
 /** The borrower's own offers, found by scanning, and the form for a new one. */
 export default function BorrowSection() {
   const offers = usePrivateOffers()
-  const { lookup } = useDirectory()
+  const directory = useDirectory()
+  const { lookup } = directory
   const { data: tipHeight } = useBlockHeight()
   const { privateTxs } = usePendingTransactions()
   const { modal, isOpen, open, close } = useKeyedModal<ModalRequest>()
@@ -223,6 +270,8 @@ export default function BorrowSection() {
         </div>
         <ScanHeight offers={offers} />
       </header>
+
+      <ListedLenders directory={directory} />
 
       <CreatePrivateOfferForm
         key={formKey}
