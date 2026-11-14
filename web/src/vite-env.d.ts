@@ -11,11 +11,8 @@ interface ImportMeta {
 }
 declare module 'virtual:simplicity-sources' {
   export interface SimplicitySources {
-    lending: string
     asset_auth: string
-    asset_auth_vault: string
     script_auth: string
-    issuance_factory: string
     private_lending: string
   }
 
