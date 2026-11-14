@@ -6,8 +6,9 @@
 terms, a lender console and a borrower app) on upstream LWK, then add v2's contract and privacy
 changes: fresh addresses, the hidden expiry, partial repayment and private messages.
 
-**Architecture:** Seven phases, run in order, each on its own branch and closed by one review.
-Phase 1 is broken into tasks here. Phases 2 to 7 give their scope, files, done-when checks and
+**Architecture:** Six phases, run in order, each on its own branch and closed by one review
+(phase 7, item 3(b), is postponed; see its section). Phase 1 is broken into tasks here. Phases 2
+to 7 give their scope, files, done-when checks and
 decision gates, and each is broken into tasks (with this skill) when the phase before it is
 merged: phase 1 moves every private flow onto `psetBuilder.ts`, so file-level tasks written now
 would describe code that is about to change.
@@ -22,14 +23,15 @@ TypeScript and Vite with pnpm 10.33; upstream LWK (`lwk_wasm`, the `lwk` submodu
 
 ## Global Constraints
 
-- v2 covers items 1, 2, 3 (a and b), 6, 7, 8, 9 and 10. Item 5 comes after v2. Item 4 needs no
+- v2 covers items 1, 2, 3(a), 6, 7, 8, 9 and 10. Item 5 comes after v2, and item 3(b) waits
+  until the user brings it back (2026-11-14). Item 4 needs no
   work beyond keeping acceptance hidden after expiry.
 - No migration: the app knows only the v2 contract, and v1 testnet loans are dropped.
 - One branch per phase, `v2/phase-<n>-<name>`, from the `v2` branch; one commit per task; pushes
   go to the `fork` remote only; the user decides when a phase merges into `v2`. Nothing merges
   into `main` during v2.
 - The checks that need the user (the running app, a Jade, two wallets) are deferred to the end of
-  v2 and run together; see "Final manual checks" after phase 7.
+  v2 and run together; see "Final manual checks" at the end.
 - Implementers run on Opus. One whole-phase review at the end of each phase; a task marked
   **Review now** also gets its own review, for the reason it gives.
 - The `lwk` submodule stays at one pinned commit for the whole phase (its `PsetBuilder` is
@@ -1362,7 +1364,11 @@ Branch `v2/phase-6-messages`.
   message; `pnpm parity` and the e2e stages pass with messages at creation, acceptance and
   repayment.
 
-## Phase 7: Proportional collateral release (spec item 3b)
+## Phase 7: Proportional collateral release (spec item 3b) — postponed
+
+**Postponed on 2026-11-14:** the demo repays in installments without releasing collateral
+(phase 5's item 3(a)). This phase starts only when the user brings it back; v2's final checks run
+after phase 6. The notes below stay for that day.
 
 Branch `v2/phase-7-proportional-release`.
 
@@ -1380,7 +1386,7 @@ Branch `v2/phase-7-proportional-release`.
 
 ## Final manual checks (deferred from task 1.5)
 
-Run by the user once phase 7 is merged into `v2`, in `pnpm dev` on testnet, before `v2` is
+Run by the user once phase 6 is merged into `v2/main`, in `pnpm dev` on testnet, before `v2` is
 proposed for `main`. Each check names the screen of the app as phase 4 leaves it.
 
 1. **Fee errors stay readable** (task 1.5 step 4). From a seed wallet holding collateral but too
