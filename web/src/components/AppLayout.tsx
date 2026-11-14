@@ -1,27 +1,18 @@
 import { buttonVariants, Chip } from '@heroui/react'
 import { Link, NavLink, Outlet } from 'react-router-dom'
 
-import { BellNotificationButton } from '@/components/BellNotificationButton'
 import ArrowSquareOutIcon from '@/components/icons/ArrowSquareOutIcon'
 import { JadeUnlockModal } from '@/components/JadeUnlockModal'
-import OfferActionModal from '@/components/modals/OfferActionModal'
 import { WalletButton } from '@/components/WalletButton'
 import { env } from '@/constants/env'
 import { ExternalLink } from '@/constants/links'
 import { RoutePath } from '@/constants/routes'
-import { useOfferModal } from '@/hooks/useOfferModal'
 
-const NAV = [
-  { to: RoutePath.Dashboard, label: 'Dashboard' },
-  { to: RoutePath.Borrow, label: 'Borrow' },
-  { to: RoutePath.Supply, label: 'Supply' },
-  { to: RoutePath.Private, label: 'Private loans' },
-]
+const NAV = [{ to: RoutePath.Private, label: 'Private loans' }]
 
 const NETWORK_LABEL = { liquid: 'Liquid', liquidtestnet: 'Liquid testnet', regtest: 'Regtest' }
 
 export default function AppLayout() {
-  const { close, isOpen, lastOffer } = useOfferModal()
   return (
     <main className='bg-surface text-foreground min-h-screen'>
       <div className='mx-auto flex w-full max-w-7xl flex-col gap-8 px-4 pt-6 pb-12 sm:px-8 lg:gap-10 lg:px-20 lg:pt-10 lg:pb-20'>
@@ -50,7 +41,6 @@ export default function AppLayout() {
               About Simplicity
               <ArrowSquareOutIcon className='size-4' />
             </a>
-            <BellNotificationButton />
             <WalletButton />
           </div>
         </header>
@@ -63,7 +53,6 @@ export default function AppLayout() {
             <NavLink
               key={to}
               to={to}
-              end={to === RoutePath.Dashboard}
               className={({ isActive }) =>
                 `rounded-lg px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${
                   isActive
@@ -77,7 +66,6 @@ export default function AppLayout() {
           ))}
         </nav>
 
-        <OfferActionModal offer={lastOffer} isOpen={isOpen} onClose={close} onSuccess={close} />
         <Outlet />
         <JadeUnlockModal />
 

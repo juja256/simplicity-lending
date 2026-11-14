@@ -9,7 +9,6 @@ import {
 import { UiButton, type UiButtonProps } from '@/components/ui/UiButton'
 import { UiModal } from '@/components/ui/UiModal'
 import { useTxStatus } from '@/hooks/useTxStatus'
-import { usePendingTransactions } from '@/providers/pendingTransactions/usePendingTransactions'
 
 export interface OfferAction {
   label: string
@@ -67,7 +66,6 @@ export default function OfferActionShell({
   onSuccess,
   children,
 }: OfferActionShellProps) {
-  const { addSurfaceToast } = usePendingTransactions()
   const liveView = deriveView(action)
   const liveTx = useTxStatus(action?.status === 'success' ? action.txid : null)
 
@@ -87,7 +85,6 @@ export default function OfferActionShell({
     if (open) return
     if (liveView.isTxActive) setClosing({ view: liveView, tx: liveTx })
     if (action?.status === 'success') onSuccess?.()
-    if (action?.txid) addSurfaceToast(action.txid)
     onClose()
   }
 

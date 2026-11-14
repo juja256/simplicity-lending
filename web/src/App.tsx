@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react'
-import { createBrowserRouter, Outlet, RouterProvider, useLocation } from 'react-router-dom'
+import {
+  createBrowserRouter,
+  Navigate,
+  Outlet,
+  RouterProvider,
+  useLocation,
+} from 'react-router-dom'
 
 import AppLayout from '@/components/AppLayout'
 import { RoutePath } from '@/constants/routes'
@@ -7,11 +13,8 @@ import { AppProviders } from '@/providers/AppProviders'
 import { initAnalytics, trackPageView } from '@/utils/analytics'
 
 import ErrorBoundary from './components/ErrorBoundary'
-import BorrowPage from './pages/Borrow'
-import DashboardPage from './pages/Dashboard'
 import LandingPage from './pages/Landing'
 import PrivatePage from './pages/Private'
-import SupplyPage from './pages/Supply'
 
 function ProvidersLayout() {
   const { pathname } = useLocation()
@@ -55,20 +58,17 @@ const router = createBrowserRouter([
         element: <AppLayout />,
         children: [
           {
-            index: true,
-            element: <DashboardPage />,
-          },
-          {
-            path: RoutePath.Borrow,
-            element: <BorrowPage />,
-          },
-          {
-            path: RoutePath.Supply,
-            element: <SupplyPage />,
-          },
-          {
             path: RoutePath.Private,
             element: <PrivatePage />,
+          },
+          // The private page is the app: `/app` and old links such as `/app/borrow` land on it.
+          {
+            index: true,
+            element: <Navigate to={RoutePath.Private} replace />,
+          },
+          {
+            path: '*',
+            element: <Navigate to={RoutePath.Private} replace />,
           },
         ],
       },

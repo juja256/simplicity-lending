@@ -6,7 +6,6 @@ use simplex::transaction::{
 };
 
 use lending_contracts::programs::asset_auth::{AssetAuth, AssetAuthWitnessParams};
-use lending_contracts::programs::lending::OfferParameters;
 use lending_contracts::programs::private_lending::{
     PrivateLendingOffer, PrivateLendingParameters, add_nft_issuances, verify_offer_as_borrower,
 };
@@ -17,7 +16,7 @@ use lending_contracts::utils::confidential::{
 use private_lending_core::{LendingKey, NewOffer, OfferTerms};
 
 use lending_contracts::utils::confidential::wait_for_confirmation;
-use lending_contracts::utils::get_random_seed;
+use lending_contracts::utils::{apply_basis_points, get_random_seed};
 use simplex::transaction::partial_input::IssuanceInput;
 
 use super::common::wallet::get_split_utxo_ft;
@@ -26,6 +25,25 @@ pub(super) const COLLATERAL_AMOUNT: u64 = 3_000;
 pub(super) const PRINCIPAL_AMOUNT: u64 = 10_000;
 pub(super) const PRINCIPAL_INTEREST_RATE: u16 = 1_000; // 10%
 pub(super) const TOTAL_PRINCIPAL_AMOUNT: u64 = 200_000;
+
+/// The terms the tests create an offer with: the repayment amount is the principal plus its
+/// interest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct OfferParameters {
+    pub collateral_amount: u64,
+    pub principal_amount: u64,
+    pub loan_expiration_time: u32,
+    pub principal_interest_rate: u16,
+}
+
+impl OfferParameters {
+    pub(super) fn get_total_amount_to_repay(&self) -> u64 {
+        let interest = apply_basis_points(self.principal_amount, self.principal_interest_rate)
+            .expect("the interest fits in a u64");
+
+        self.principal_amount + interest
+    }
+}
 
 pub(super) struct PrivateOfferSetup {
     pub offer: PrivateLendingOffer,

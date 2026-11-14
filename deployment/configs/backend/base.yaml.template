@@ -14,6 +14,3 @@ indexer:
   protocol_fee_keeper_asset_id: "${PROTOCOL_FEE_KEEPER_ASSET_ID}"
   interval: ${INDEXER_POLL_INTERVAL_MS}
   last_indexed_height: ${INDEXER_LAST_INDEXED_HEIGHT}
-  asset_registry:
-    domain: "${ASSET_REGISTRY_DOMAIN}"
-    registry_url: "${ASSET_REGISTRY_URL}"

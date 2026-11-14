@@ -571,3 +571,36 @@ async fn tracking_survives_a_restart_before_cancellation() -> anyhow::Result<()>
     assert_eq!(row.current_status, PrivateOfferStatus::Cancelled);
     Ok(())
 }
+
+#[sqlx::test]
+async fn public_lending_tables_are_dropped(pool: sqlx::PgPool) -> anyhow::Result<()> {
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT table_name::text FROM information_schema.tables WHERE table_schema = 'public'",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    for dropped in [
+        "factories",
+        "factory_utxos",
+        "factory_auths",
+        "offers",
+        "offer_utxos",
+        "offer_participants",
+    ] {
+        assert!(
+            !tables.iter().any(|t| t == dropped),
+            "{dropped} still exists"
+        );
+    }
+    for kept in [
+        "sync_state",
+        "private_offers",
+        "private_offer_utxos",
+        "directory_entries",
+        "directory_challenges",
+    ] {
+        assert!(tables.iter().any(|t| t == kept), "{kept} is missing");
+    }
+    Ok(())
+}

@@ -12,22 +12,15 @@ cargo --version
 
 ### Install simplex
 
-```bash
-git clone https://github.com/BlockstreamResearch/smplx.git
-cd smplx
-
-git checkout v0.0.5
-
-cargo install --path crates/cli
-
-simplex --version # Simplex 0.0.5
-```
-
-## Checkout the `main` branch
+Install Simplex with its installer, pinned to the commit the repository uses (see
+[Versions](../../docs/docs/developers/versions.md)):
 
 ```bash
-git checkout main
+curl -fsSL https://smplx.simplicity-lang.org | bash
+~/.simplex/bin/simplexup --commit 1945d11b47fff8838c3e99c210133519a9522324
 ```
+
+Add `~/.simplex/bin` to `PATH`.
 
 ## Make sure you have .env file in the root
 
@@ -56,4 +49,5 @@ From repo root:
 docker compose up -d --build
 ```
 
-After this, the indexer should be available at http://localhost:80
+After this, the indexer API is at http://localhost:8000 (`API_PORT` in `.env`), for example
+http://localhost:8000/private/candidates.

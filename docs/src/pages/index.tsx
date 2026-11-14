@@ -18,20 +18,20 @@ const roles: {
 }[] = [
   {
     title: 'Borrower',
-    description: 'Borrow against your collateral.',
-    href: '/docs/borrower/create-account',
+    description: 'Borrow against your collateral from a lender you choose.',
+    href: '/docs/private-loans/guide#borrow',
     icon: CoinsIcon,
   },
   {
     title: 'Lender',
-    description: 'Fund offers and earn interest.',
-    href: '/docs/lender/review-offer',
+    description: 'Accept offers made to you and earn interest.',
+    href: '/docs/private-loans/guide#lend',
     icon: HandCoinsIcon,
   },
   {
     title: 'Developer',
-    description: 'Read the contracts and build.',
-    href: '/docs/contracts/lending',
+    description: 'Read the protocol and build.',
+    href: '/docs/private-loans/protocol',
     icon: FileTextIcon,
   },
 ];
@@ -56,7 +56,7 @@ function HomepageHeader() {
 
 export default function Home(): ReactNode {
   return (
-    <Layout description="Documentation for the Simplicity lending protocol.">
+    <Layout description="Documentation for the Simplicity private lending demo.">
       <HomepageHeader />
       <main>
         <div className={`container ${styles.home}`}>

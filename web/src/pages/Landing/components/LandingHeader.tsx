@@ -146,7 +146,7 @@ export function LandingHeader() {
                     </Drawer.Body>
                     <Drawer.Footer className='flex-col items-stretch'>
                       <Link
-                        to={RoutePath.Dashboard}
+                        to={RoutePath.Private}
                         className={buttonVariants({
                           variant: 'primary',
                           size: 'lg',
@@ -164,7 +164,7 @@ export function LandingHeader() {
             </Drawer.Root>
 
             <Link
-              to={RoutePath.Dashboard}
+              to={RoutePath.Private}
               className={`${buttonVariants({ variant: 'primary' })} hidden sm:inline-flex`}
             >
               Launch App
