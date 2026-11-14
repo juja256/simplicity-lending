@@ -43,8 +43,9 @@ Copy `.env.example` to `.env` and adjust as needed.
 
 ### Asset pair
 
-The app lends one asset pair, read from six build settings. Each unset setting keeps the
-network's default, so a build that sets none of them lends the pair below.
+The app lends one asset pair, read from six build settings. With none of them set, a build lends
+the network's default pair below. The three settings of an asset go together: set its id, decimals
+and symbol to replace it, or none of them to keep the default.
 
 | Setting                          | liquid        | liquidtestnet | regtest       |
 | -------------------------------- | ------------- | ------------- | ------------- |
@@ -56,11 +57,12 @@ network's default, so a build that sets none of them lends the pair below.
 | `VITE_PRINCIPAL_ASSET_SYMBOL`    | `USDT`        | `TEST`        | `USDT`        |
 
 The full ids are in `src/constants/resolve-network-config.ts`. An id is 64 hex characters,
-decimals an integer from 0 to 18 and a symbol a non-empty string; a malformed setting stops the
-app at startup with an error naming it. Set the three settings of an asset together: a new id with
-the default decimals would misread its amounts. The icon follows the symbol (`LBTC`, `tL-BTC`,
-`USDT`, `TEST`), and any other symbol gets a generic coin icon. `pnpm check:config` checks the
-defaults, the overrides and the refusals.
+decimals an integer from 0 to 18 and a symbol a non-empty string, and the collateral and principal
+ids must differ. A setting left out of an asset's three (an empty value counts as set), a malformed
+one, or two equal ids stops the app at startup with an error naming the setting. A new id with
+the default decimals would misread every amount, hence the three go together. The icon follows
+the symbol (`LBTC`, `tL-BTC`, `USDT`, `TEST`), and any other symbol gets a generic coin icon.
+`pnpm check:config` checks the defaults, the replacements and the refusals.
 
 ## Stack
 

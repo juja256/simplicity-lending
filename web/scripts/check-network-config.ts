@@ -1,7 +1,8 @@
 // Checks how the build configuration picks the asset pair. Run it with `pnpm check:config`.
 // With no pair setting, each network keeps the assets it had before the pair became configurable.
-// Each setting overrides only its own field, and a malformed one throws with the setting's name,
-// so the app never starts with a wrong id or `NaN` decimals.
+// The settings replace an asset three at a time (id, decimals and symbol), the two assets must
+// differ, and a missing or malformed setting throws with its name, so the app never starts with a
+// wrong id or `NaN` decimals.
 import assert from 'node:assert/strict'
 
 import {
@@ -80,60 +81,36 @@ check('defaults', () => {
   )
 })
 
-// Each override changes its own field and nothing else.
-const overrides: { setting: PairSetting; value: string; expect: (c: NetworkConfig) => void }[] = [
-  {
-    setting: 'VITE_COLLATERAL_ASSET_ID',
-    value: OTHER_ID,
-    expect: c => (c.collateralAsset.id = OTHER_ID),
-  },
-  {
-    setting: 'VITE_COLLATERAL_ASSET_DECIMALS',
-    value: '0',
-    expect: c => (c.collateralAsset.decimals = 0),
-  },
-  {
-    setting: 'VITE_COLLATERAL_ASSET_SYMBOL',
-    value: 'L-BTC',
-    expect: c => (c.collateralAsset.symbol = 'L-BTC'),
-  },
-  {
-    setting: 'VITE_PRINCIPAL_ASSET_ID',
-    value: OTHER_ID,
-    expect: c => (c.principalAsset.id = OTHER_ID),
-  },
-  {
-    setting: 'VITE_PRINCIPAL_ASSET_DECIMALS',
-    value: '18',
-    expect: c => (c.principalAsset.decimals = 18),
-  },
-  {
-    setting: 'VITE_PRINCIPAL_ASSET_SYMBOL',
-    value: 'USDt',
-    expect: c => (c.principalAsset.symbol = 'USDt'),
-  },
-]
-
-for (const { setting, value, expect } of overrides) {
-  check(`override ${setting}`, () => {
-    const expected = structuredClone(TESTNET)
-    expect(expected)
-    assert.deepEqual(resolveNetworkConfig('liquidtestnet', { [setting]: value }), expected)
-  })
+// A full replacement of each asset: its id, decimals and symbol together.
+const COLLATERAL_ENV: PairEnv = {
+  VITE_COLLATERAL_ASSET_ID: OTHER_ID,
+  VITE_COLLATERAL_ASSET_DECIMALS: '0',
+  VITE_COLLATERAL_ASSET_SYMBOL: 'L-BTC',
+}
+const PRINCIPAL_ENV: PairEnv = {
+  VITE_PRINCIPAL_ASSET_ID: 'cd'.repeat(32),
+  VITE_PRINCIPAL_ASSET_DECIMALS: '18',
+  VITE_PRINCIPAL_ASSET_SYMBOL: 'USDt',
 }
 
-check('all six overrides together, on another network', () => {
-  const env: PairEnv = {
-    VITE_COLLATERAL_ASSET_ID: OTHER_ID,
-    VITE_COLLATERAL_ASSET_DECIMALS: '8',
-    VITE_COLLATERAL_ASSET_SYMBOL: 'tL-BTC',
-    VITE_PRINCIPAL_ASSET_ID: 'cd'.repeat(32),
-    VITE_PRINCIPAL_ASSET_DECIMALS: '6',
-    VITE_PRINCIPAL_ASSET_SYMBOL: 'TEST',
-  }
-  assert.deepEqual(resolveNetworkConfig('regtest', env), {
-    collateralAsset: { id: OTHER_ID, decimals: 8, symbol: 'tL-BTC' },
-    principalAsset: { id: 'cd'.repeat(32), decimals: 6, symbol: 'TEST' },
+check('the collateral asset replaced, the principal kept', () => {
+  assert.deepEqual(resolveNetworkConfig('liquidtestnet', COLLATERAL_ENV), {
+    ...TESTNET,
+    collateralAsset: { id: OTHER_ID, decimals: 0, symbol: 'L-BTC' },
+  })
+})
+
+check('the principal asset replaced, the collateral kept', () => {
+  assert.deepEqual(resolveNetworkConfig('liquidtestnet', PRINCIPAL_ENV), {
+    ...TESTNET,
+    principalAsset: { id: 'cd'.repeat(32), decimals: 18, symbol: 'USDt' },
+  })
+})
+
+check('both assets replaced, on another network', () => {
+  assert.deepEqual(resolveNetworkConfig('regtest', { ...COLLATERAL_ENV, ...PRINCIPAL_ENV }), {
+    collateralAsset: { id: OTHER_ID, decimals: 0, symbol: 'L-BTC' },
+    principalAsset: { id: 'cd'.repeat(32), decimals: 18, symbol: 'USDt' },
     policyAssetSatsUnit: 'Lsats',
   })
 })
@@ -147,7 +124,43 @@ check('ids are lowercased and values trimmed', () => {
   assert.deepEqual(config.principalAsset, { id: OTHER_ID, decimals: 6, symbol: 'USDt' })
 })
 
-// Each malformed value throws, and the message names the setting.
+function throwsNaming(env: PairEnv, prefix: string): void {
+  assert.throws(
+    () => resolveNetworkConfig('liquidtestnet', env),
+    (error: unknown) => error instanceof Error && error.message.startsWith(prefix),
+  )
+}
+
+// An asset's settings go together: with one of the three left out, the error names it.
+for (const full of [COLLATERAL_ENV, PRINCIPAL_ENV]) {
+  for (const missing of Object.keys(full) as PairSetting[]) {
+    check(`${missing} unset while the other two are set`, () => {
+      const env = { ...full, [missing]: undefined }
+      throwsNaming(env, `Invalid build setting ${missing}: unset while `)
+    })
+  }
+}
+
+check('an empty setting counts as set, so the other two are needed', () => {
+  throwsNaming(
+    { VITE_PRINCIPAL_ASSET_SYMBOL: '' },
+    'Invalid build setting VITE_PRINCIPAL_ASSET_ID: unset while VITE_PRINCIPAL_ASSET_SYMBOL is set',
+  )
+})
+
+// The two assets must differ, whether one or both are replaced, whatever the case of the ids.
+const SAME_IDS = 'Invalid build settings VITE_COLLATERAL_ASSET_ID and VITE_PRINCIPAL_ASSET_ID:'
+check('a principal equal to the default collateral is refused', () => {
+  throwsNaming({ ...PRINCIPAL_ENV, VITE_PRINCIPAL_ASSET_ID: TESTNET.collateralAsset.id }, SAME_IDS)
+})
+check('the same id for both assets is refused', () => {
+  throwsNaming(
+    { ...COLLATERAL_ENV, ...PRINCIPAL_ENV, VITE_PRINCIPAL_ASSET_ID: OTHER_ID.toUpperCase() },
+    SAME_IDS,
+  )
+})
+
+// Each malformed value, in an otherwise valid asset, throws with the setting's name.
 const malformed: { setting: PairSetting; values: string[] }[] = [
   {
     setting: 'VITE_COLLATERAL_ASSET_ID',
@@ -164,12 +177,10 @@ const malformed: { setting: PairSetting; values: string[] }[] = [
 ]
 
 for (const { setting, values } of malformed) {
+  const full = setting.startsWith('VITE_COLLATERAL_') ? COLLATERAL_ENV : PRINCIPAL_ENV
   for (const value of values) {
     check(`malformed ${setting}=${JSON.stringify(value)}`, () => {
-      assert.throws(
-        () => resolveNetworkConfig('liquidtestnet', { [setting]: value }),
-        (error: unknown) => error instanceof Error && error.message.includes(setting),
-      )
+      throwsNaming({ ...full, [setting]: value }, `Invalid build setting ${setting}=`)
     })
   }
 }

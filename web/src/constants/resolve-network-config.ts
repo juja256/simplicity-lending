@@ -1,10 +1,10 @@
 // The asset pair the app lends in, read from the build configuration. Covenants are
 // asset-agnostic: this is the one place that says which asset is the collateral and which the
-// principal. Each network has a default pair, and each of the six `VITE_*_ASSET_*` settings
-// overrides one field of it.
+// principal. Each network has a default pair. The six `VITE_*_ASSET_*` settings replace an asset
+// of it, three at a time (id, decimals and symbol together), and the two assets must differ.
 //
 // This module is pure (no `import.meta.env`, no React) so Node scripts can import it;
-// `network-config.ts` calls it with `import.meta.env` and adds the icons.
+// `network-config.ts` calls it with the settings from `import.meta.env` and adds the icons.
 
 export type NetworkName = 'liquid' | 'liquidtestnet' | 'regtest'
 
@@ -91,29 +91,49 @@ const DEFAULTS: Record<NetworkName, NetworkConfig> = {
 export function resolveNetworkConfig(network: NetworkName, env: PairEnv): NetworkConfig {
   const defaults = DEFAULTS[network]
   if (!defaults) throw new Error(`Unknown network ${JSON.stringify(network)}.`)
-  return {
-    collateralAsset: resolveAsset(defaults.collateralAsset, 'COLLATERAL', env),
-    principalAsset: resolveAsset(defaults.principalAsset, 'PRINCIPAL', env),
-    policyAssetSatsUnit: defaults.policyAssetSatsUnit,
+  const collateralAsset = resolveAsset(defaults.collateralAsset, 'COLLATERAL', env)
+  const principalAsset = resolveAsset(defaults.principalAsset, 'PRINCIPAL', env)
+  // Ids are lowercase by now, so equal ids are equal strings.
+  if (collateralAsset.id === principalAsset.id) {
+    throw new Error(
+      'Invalid build settings VITE_COLLATERAL_ASSET_ID and VITE_PRINCIPAL_ASSET_ID: the ' +
+        `collateral and principal assets must differ, both are ${collateralAsset.id}.`,
+    )
   }
+  return { collateralAsset, principalAsset, policyAssetSatsUnit: defaults.policyAssetSatsUnit }
 }
 
+// An asset's three settings go together: all unset keeps the default asset, and setting any of
+// them (even to an empty string) needs the other two. A new id with the default decimals would
+// misread every amount of that asset.
 function resolveAsset(
   defaults: PairAsset,
   role: 'COLLATERAL' | 'PRINCIPAL',
   env: PairEnv,
 ): PairAsset {
-  const id = env[`VITE_${role}_ASSET_ID`]
-  const decimals = env[`VITE_${role}_ASSET_DECIMALS`]
-  const symbol = env[`VITE_${role}_ASSET_SYMBOL`]
+  const names = {
+    id: `VITE_${role}_ASSET_ID`,
+    decimals: `VITE_${role}_ASSET_DECIMALS`,
+    symbol: `VITE_${role}_ASSET_SYMBOL`,
+  } as const
+  const id = env[names.id]
+  const decimals = env[names.decimals]
+  const symbol = env[names.symbol]
+  if (id === undefined && decimals === undefined && symbol === undefined) return { ...defaults }
+
+  const set = [names.id, names.decimals, names.symbol].find(name => env[name] !== undefined)
+  const unset = (name: PairSetting) =>
+    new Error(
+      `Invalid build setting ${name}: unset while ${set} is set; an asset's id, decimals and ` +
+        'symbol are set together.',
+    )
+  if (id === undefined) throw unset(names.id)
+  if (decimals === undefined) throw unset(names.decimals)
+  if (symbol === undefined) throw unset(names.symbol)
   return {
-    id: id === undefined ? defaults.id : parseAssetId(`VITE_${role}_ASSET_ID`, id),
-    decimals:
-      decimals === undefined
-        ? defaults.decimals
-        : parseDecimals(`VITE_${role}_ASSET_DECIMALS`, decimals),
-    symbol:
-      symbol === undefined ? defaults.symbol : parseSymbol(`VITE_${role}_ASSET_SYMBOL`, symbol),
+    id: parseAssetId(names.id, id),
+    decimals: parseDecimals(names.decimals, decimals),
+    symbol: parseSymbol(names.symbol, symbol),
   }
 }
 
