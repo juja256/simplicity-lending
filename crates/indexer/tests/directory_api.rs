@@ -38,7 +38,8 @@ fn pubkey_hex(key: &LendingKey) -> String {
 }
 
 fn put_body(key: &LendingKey, challenge: &[u8; 32], name: &str) -> Value {
-    let signature = sign_directory_action(key, DirectoryAction::Put, challenge, name);
+    let signature =
+        sign_directory_action(key, DirectoryAction::Put, challenge, name, None).unwrap();
     json!({
         "display_name": name,
         "challenge": hex::encode(challenge),
@@ -47,7 +48,8 @@ fn put_body(key: &LendingKey, challenge: &[u8; 32], name: &str) -> Value {
 }
 
 fn delete_body(key: &LendingKey, challenge: &[u8; 32]) -> Value {
-    let signature = sign_directory_action(key, DirectoryAction::Delete, challenge, "");
+    let signature =
+        sign_directory_action(key, DirectoryAction::Delete, challenge, "", None).unwrap();
     json!({
         "challenge": hex::encode(challenge),
         "signature": signature.to_string(),
@@ -215,7 +217,9 @@ async fn signature_for_another_action_or_name_is_rejected() -> anyhow::Result<()
     let key = lending_key(5);
     let url = format!("{base}/private/directory/{}", pubkey_hex(&key));
     let c = issue_challenge(&http, &base).await?;
-    let put_signature = sign_directory_action(&key, DirectoryAction::Put, &c, "Acme").to_string();
+    let put_signature = sign_directory_action(&key, DirectoryAction::Put, &c, "Acme", None)
+        .unwrap()
+        .to_string();
 
     let as_delete = json!({ "challenge": hex::encode(c), "signature": put_signature });
     let response = send_json(&http, Method::DELETE, url.clone(), as_delete).await?;

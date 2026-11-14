@@ -40,7 +40,9 @@ pub fn sign_directory_action(
         ));
     }
     let challenge = decode_hex_array::<32>(challenge_hex)?;
-    let signature = sign(key.inner(), action.into(), &challenge, display_name);
+    // a put signs no terms until this function takes them
+    let signature =
+        sign(key.inner(), action.into(), &challenge, display_name, None).map_err(bad_input)?;
     Ok(encode_hex(signature.as_ref()))
 }
 
@@ -70,6 +72,7 @@ mod tests {
             private_lending_core::DirectoryAction::Put,
             &challenge,
             "Acme Bank",
+            None,
             &signature
         ));
         assert!(!private_lending_core::verify_directory_action(
@@ -77,6 +80,7 @@ mod tests {
             private_lending_core::DirectoryAction::Delete,
             &challenge,
             "Acme Bank",
+            None,
             &signature
         ));
     }
