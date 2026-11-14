@@ -1,5 +1,6 @@
 // Directory writes, signed with the lending key over a server challenge: request a challenge, sign
-// it with `signDirectoryAction`, then write. Only the x-only key leaves the browser. A rejected
+// it with `signDirectoryAction`, then write. A put signs the name and the lender's terms together,
+// so the indexer cannot change either. Only the x-only key leaves the browser. A rejected
 // write throws the `ApiError` (`indexerErrorMessage` gives the server's message, such as a `401`
 // "unknown, used or expired challenge").
 import {
@@ -11,24 +12,33 @@ import {
 import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from './deps'
+import type { LenderTermsInput } from './lenderTerms'
 
-/** Creates or renames the key's directory entry; returns it. */
+/**
+ * Creates the key's directory entry, or replaces its name and terms, and returns it. Terms the
+ * wasm refuses (`LenderTerms::validate`) throw its `bad-input` error before anything is sent.
+ */
 export async function registerInDirectory(
   deps: Pick<PrivateFlowDeps, 'wasm'>,
   key: LendingKey,
   displayName: string,
+  terms: LenderTermsInput,
   apiBaseUrl: string,
 ): Promise<DirectoryEntry> {
+  const termsJson = JSON.stringify(terms)
+  // Checked before the challenge, so invalid terms do not use one up.
+  deps.wasm.encodeLenderTerms(termsJson)
   const { challenge } = await requestDirectoryChallenge(apiBaseUrl)
   const signature = deps.wasm.signDirectoryAction(
     key,
     deps.wasm.DirectoryAction.Put,
     challenge,
     displayName,
+    termsJson,
   )
   return putDirectoryEntry(
     key.xOnlyPublicKey(),
-    { display_name: displayName, challenge, signature },
+    { display_name: displayName, challenge, terms, signature },
     apiBaseUrl,
   )
 }
@@ -40,7 +50,7 @@ export async function removeFromDirectory(
   apiBaseUrl: string,
 ): Promise<void> {
   const { challenge } = await requestDirectoryChallenge(apiBaseUrl)
-  // A delete is signed over an empty name, as the indexer verifies it.
+  // A delete is signed over an empty name and no terms, as the indexer verifies it.
   const signature = deps.wasm.signDirectoryAction(
     key,
     deps.wasm.DirectoryAction.Delete,

@@ -4,14 +4,14 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
+import {
+  type NetworkConfig,
+  PAIR_SETTINGS,
+  type PairEnv,
+  resolveNetworkConfig,
+} from '@/constants/resolve-network-config'
 
-// tL-BTC and TEST on Liquid testnet (src/constants/network-config.ts, which pulls in React).
-export const TESTNET_ASSETS = {
-  policy: '144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49',
-  collateral: '144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49',
-  principal: '38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5',
-} as const
+export const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 
 function parseEnvFile(file: string): Record<string, string> {
   const out: Record<string, string> = {}
@@ -35,6 +35,42 @@ function parseEnvFile(file: string): Record<string, string> {
   return out
 }
 
+const fileSettings = {
+  ...parseEnvFile(path.join(webRoot, '.env.liquidtestnet')),
+  ...parseEnvFile(path.join(webRoot, '.env.e2e.local')),
+}
+
+/** A setting of the process environment, else of `.env.e2e.local`, else of `.env.liquidtestnet`. */
+function readSetting(name: string): string | undefined {
+  return process.env[name] ?? fileSettings[name]
+}
+
+/** Liquid testnet's policy asset, tL-BTC, which pays every fee. */
+const TESTNET_POLICY_ASSET = '144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49'
+
+/**
+ * The testnet asset pair as the app's build resolves it (`resolveNetworkConfig`): the network's
+ * defaults, tL-BTC and TEST, unless the pair settings replace them.
+ */
+export const TESTNET_PAIR: NetworkConfig = resolveNetworkConfig(
+  'liquidtestnet',
+  Object.fromEntries(PAIR_SETTINGS.map(name => [name, readSetting(name)])) as PairEnv,
+)
+
+// The e2e takes the collateral and the fees from the same tL-BTC coins (`STAGE_NEEDS`).
+if (TESTNET_PAIR.collateralAsset.id !== TESTNET_POLICY_ASSET) {
+  throw new Error(
+    `the e2e needs tL-BTC (${TESTNET_POLICY_ASSET}) as the collateral, not ` +
+      `${TESTNET_PAIR.collateralAsset.id} (VITE_COLLATERAL_ASSET_ID)`,
+  )
+}
+
+export const TESTNET_ASSETS = {
+  policy: TESTNET_POLICY_ASSET,
+  collateral: TESTNET_PAIR.collateralAsset.id,
+  principal: TESTNET_PAIR.principalAsset.id,
+} as const
+
 export interface E2eEnv {
   waterfallsUrl: string
   /** A pinned waterfalls key; unset, the server's own is fetched. */
@@ -47,22 +83,16 @@ export interface E2eEnv {
 }
 
 export function loadEnv(): E2eEnv {
-  const merged = {
-    ...parseEnvFile(path.join(webRoot, '.env.liquidtestnet')),
-    ...parseEnvFile(path.join(webRoot, '.env.e2e.local')),
-  }
   const need = (name: string): string => {
-    const value = process.env[name] ?? merged[name]
+    const value = readSetting(name)
     if (!value) throw new Error(`${name} is not set (.env.liquidtestnet / .env.e2e.local)`)
     return value
   }
-  const apiUrl = process.env.VITE_API_URL ?? merged.VITE_API_URL ?? 'http://localhost:8000'
+  const apiUrl = readSetting('VITE_API_URL') ?? 'http://localhost:8000'
   return {
     apiUrl: apiUrl.replace(/\/+$/, ''),
     waterfallsUrl: need('VITE_WATERFALLS_URL'),
-    waterfallsRecipient:
-      (process.env.VITE_WATERFALLS_RECIPIENT ?? merged.VITE_WATERFALLS_RECIPIENT)?.trim() ||
-      undefined,
+    waterfallsRecipient: readSetting('VITE_WATERFALLS_RECIPIENT')?.trim() || undefined,
     esploraApi: `${need('VITE_ESPLORA_BASE_URL').replace(/\/+$/, '')}/api`,
     borrowerMnemonic: need('PRIVATE_E2E_BORROWER_MNEMONIC'),
     lenderMnemonic: need('PRIVATE_E2E_LENDER_MNEMONIC'),
@@ -88,8 +118,8 @@ export interface Need {
  * The state records of the transactions that spend from the wallets, one per transaction. Most
  * stages broadcast one; `cancel` broadcasts its own creation (`cancel-create`), then the
  * cancellation, and `liquidate` its creation (`liquidate-create`), the lender's acceptance
- * (`liquidate-accept`), then the liquidation. `scan` broadcasts nothing (it reads the indexer and
- * writes the directory, off-chain), so it never has a record.
+ * (`liquidate-accept`), then the liquidation. `scan` and `directory` broadcast nothing (they read
+ * the indexer and write the directory, off-chain), so they never have a record.
  */
 export type Stage =
   | 'create'
@@ -103,13 +133,15 @@ export type Stage =
   | 'liquidate-accept'
   | 'liquidate'
   | 'scan'
+  | 'directory'
 
 const NONE: Need = { lbtc: 0n, test: 0n }
 
 /**
  * What each record's transaction needs from each wallet when it is built. A creation needs two
  * coins besides the collateral (2 × COLLATERAL, as the coins come) and a fee. The `wallets` stage
- * only moves coins within a wallet and checks its split itself; `scan` needs nothing.
+ * only moves coins within a wallet and checks its split itself; `scan` and `directory` need
+ * nothing.
  */
 export const STAGE_NEEDS: Record<Stage, Record<Wallet, Need>> = {
   create: {
@@ -156,9 +188,10 @@ export const STAGE_NEEDS: Record<Stage, Record<Wallet, Need>> = {
     lender: { lbtc: FEE_BUDGET, test: 0n },
   },
   scan: { borrower: NONE, lender: NONE },
+  directory: { borrower: NONE, lender: NONE },
 }
 
-/** Whether `stage` needs nothing from either wallet, as `scan`, which spends no coins. */
+/** Whether `stage` needs nothing from either wallet, as `scan` and `directory`. */
 export function needsNothing(stage: Stage): boolean {
   const { borrower, lender } = STAGE_NEEDS[stage]
   return borrower.lbtc === 0n && borrower.test === 0n && lender.lbtc === 0n && lender.test === 0n

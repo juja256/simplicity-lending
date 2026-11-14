@@ -1,6 +1,8 @@
 // The lender directory: the whole list with a lookup by x-only key, the wallet's own entry, and
-// the signed writes. Names are chosen by whoever holds a key and are never verified: always show
-// them (inside <bdi>) next to the key's fingerprint.
+// the signed writes. Each entry carries the lender's terms and when they were published; the list
+// holds only entries with terms, though an entry's terms are null when the indexer could not
+// decode them. Names are chosen by whoever holds a key and are never verified: always show them
+// (inside <bdi>) next to the key's fingerprint.
 //
 // Reads never carry the wallet's key: its own entry is found in the list. The x-only key leaves
 // the browser only in a write (and in the offers it creates).
@@ -10,6 +12,7 @@ import { useCallback, useMemo } from 'react'
 import { type DirectoryEntry, fetchDirectory, indexerErrorMessage } from '@/api/indexer/private'
 import { privateDirectoryQueryKeys } from '@/api/indexer/queryKeys'
 import { registerInDirectory, removeFromDirectory } from '@/privateLending/directory'
+import type { LenderTermsInput } from '@/privateLending/lenderTerms'
 import { getPrivateLendingWasm } from '@/privateLending/wasm'
 import { useWallet } from '@/providers/wallet/useWallet'
 import { normalizeHex } from '@/utils/hex'
@@ -87,12 +90,18 @@ export function useDirectory() {
     [queryClient],
   )
 
-  /** Creates or renames the wallet's entry. */
+  /** Creates the wallet's entry, or replaces its name and terms. */
   const register = useMutation({
-    mutationFn: async (displayName: string): Promise<DirectoryEntry> => {
+    mutationFn: async ({
+      displayName,
+      terms,
+    }: {
+      displayName: string
+      terms: LenderTermsInput
+    }): Promise<DirectoryEntry> => {
       try {
         const [wasm, key] = await Promise.all([getPrivateLendingWasm(), getLendingKey()])
-        return await registerInDirectory({ wasm }, key, displayName, PRIVATE_API_BASE_URL)
+        return await registerInDirectory({ wasm }, key, displayName, terms, PRIVATE_API_BASE_URL)
       } catch (error) {
         throw toDirectoryWriteError(error)
       }
@@ -125,14 +134,15 @@ export function useDirectory() {
   return {
     /** The list query: loading and error state, `refetch`. */
     directory,
-    /** Every entry, ordered by name, then key. */
+    /** Every listed entry, ordered by name, then key, with its `terms` and `terms_published_at`. */
     entries,
     lookup,
     /** The wallet's lending-key identity; undefined until known (or without a capable wallet). */
     own,
     /**
      * The wallet's entry, found in the loaded list: undefined until the list and the identity are
-     * known, null if the list does not have it.
+     * known, null if the list does not have it (also an entry without terms, which the list leaves
+     * out until a put publishes terms).
      */
     ownEntry: own !== undefined && directory.isSuccess ? (lookup(own.pubkey) ?? null) : undefined,
     register,
