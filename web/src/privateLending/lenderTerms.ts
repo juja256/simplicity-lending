@@ -322,6 +322,27 @@ export function pairTermsFromForm(
   }
 }
 
+/**
+ * The terms a lender publishes from the form: the configured pair alone. It takes nothing from the
+ * entry the indexer serves, whose terms carry no signature the app can check: carrying its other
+ * pairs into a new signature would sign whatever the indexer injected.
+ */
+export function lenderTermsFromForm(
+  form: PairTermsForm,
+  pair: TermsPair,
+): { terms: LenderTermsInput; errors: null } | { terms: null; errors: PairTermsFormErrors } {
+  const parsed = pairTermsFromForm(form, pair)
+  return parsed.terms === null ? parsed : { terms: { pairs: [parsed.terms] }, errors: null }
+}
+
+/** The pairs of served terms for assets other than the configured pair, which a save drops. */
+export function otherPairs(
+  terms: LenderTermsInput | null | undefined,
+  pair: TermsPair,
+): PairTermsInput[] {
+  return (terms?.pairs ?? []).filter(other => findPairTerms({ pairs: [other] }, pair) === undefined)
+}
+
 /** The form of published terms, to edit them: the inverse of `pairTermsFromForm`. */
 export function pairTermsToForm(terms: PairTermsInput, pair: TermsPair): PairTermsForm {
   const { principal, collateral } = pair

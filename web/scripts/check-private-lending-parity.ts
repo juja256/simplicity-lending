@@ -18,8 +18,10 @@ import { createWaterfallsRecipientResolver } from '@/lwk/waterfallsRecipient'
 import { inspectPset } from '@/privateLending/inspectPset'
 import {
   EMPTY_PAIR_TERMS_FORM,
+  lenderTermsFromForm,
   maxPrincipalPerCollateralFromDisplay,
   maxPrincipalPerCollateralToDisplay,
+  otherPairs,
   type PairTermsForm,
   pairTermsFromForm,
   pairTermsToForm,
@@ -515,6 +517,28 @@ function checkTermsConversion(): void {
       `terms form: ${field} ${JSON.stringify(typed)} is refused`,
       result.terms === null && typeof result.errors[field] === 'string',
       JSON.stringify(result),
+    )
+  }
+  // A served entry with a pair for other assets (as a hostile indexer could add): the lender
+  // publishes, and so signs, the form's pair alone.
+  if (parsed.terms !== null) {
+    const injected = { ...parsed.terms, principal_asset: 'ab'.repeat(32) }
+    const served = { pairs: [parsed.terms, injected] }
+    const published = lenderTermsFromForm(form, pair)
+    check(
+      "terms form: the published terms are the form's pair alone",
+      isDeepStrictEqual(published.terms, { pairs: [parsed.terms] }),
+      JSON.stringify(published),
+    )
+    check(
+      'terms form: a served pair for other assets is found, to be dropped',
+      isDeepStrictEqual(otherPairs(served, pair), [injected]) &&
+        otherPairs({ pairs: [parsed.terms] }, pair).length === 0 &&
+        otherPairs(null, pair).length === 0,
+    )
+    check(
+      'terms form: an invalid form publishes nothing',
+      lenderTermsFromForm({ ...form, maxTermDays: '3651' }, pair).terms === null,
     )
   }
   const largest = pairTermsFromForm({ ...form, minAprPercent: '42949672.95' }, pair)
