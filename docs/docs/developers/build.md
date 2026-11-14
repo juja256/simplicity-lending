@@ -37,18 +37,22 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 `SQLX_OFFLINE=true` uses the checked-in `.sqlx` metadata, so this check does not need a running database. The indexer tests do. They are described in [Run locally](./local-setup.md).
 
-The workspace members under `crates/` are the contracts, the session library that builds protocol transactions, the `lending-cli` binary, and the indexer. The indexer binary is `simplicity-lending-indexer`.
+The workspace members under `crates/` are the contracts (`lending-contracts`), the private lending core library that opens and verifies offers (`private-lending-core`), its browser bindings (`private-lending-wasm`), and the indexer (`lending-indexer`). The indexer binary is `simplicity-lending-indexer`.
 
 ## Web app
 
-From `web/`:
+The web app needs LWK from the `lwk` submodule and the `private-lending-wasm` module built from Rust. The [web README](https://github.com/BlockstreamResearch/simplicity-lending/blob/main/web/README.md) lists their prerequisites. From the repository root:
 
 ```bash
+git submodule update --init lwk
+web/scripts/build-lwk.sh
+cd web
 pnpm install
+pnpm build:wasm
 pnpm build
 ```
 
-`pnpm build` typechecks the app and produces the Vite bundle. Running it against a local API is covered in [Run locally](./local-setup.md).
+`pnpm build:wasm` compiles `crates/private-lending-wasm` into `web/src/wasm/private-lending/`. `pnpm build` typechecks the app and produces the Vite bundle. Running it against a local API is covered in [Run locally](./local-setup.md).
 
 ## This site
 

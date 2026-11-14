@@ -425,38 +425,226 @@ The phase review follows (whole branch, Opus).
 
 ## Phase 2: Private lending only (spec items 8 and 2)
 
-Branch `v2/phase-2-private-only`, from `v2` after phase 1 is merged into it.
+Branch `v2/phase-2-private-only`, from `v2/main` after phase 1 is merged into it. The tag
+`public-lending-last` is on that merge commit (`a55aa8e`, made 2026-11-13; push it to `fork` once
+the user confirms); `git checkout public-lending-last` brings back the public demo. From here on,
+upstream changes are ported by hand.
 
-- **Tag first.** `git tag -a public-lending-last <phase 1 merge commit on v2>`, then push the
-  tag to `fork` once the user confirms. `git checkout public-lending-last` brings back the public
-  demo. From here on, upstream changes are ported by hand.
-- **One task per layer**, each leaving the workspace building and `pnpm parity` passing:
-  1. Web: delete `web/src/pages/{Borrow,Supply,Dashboard}`, their routes in `web/src/App.tsx`,
-     and `web/src/simplicity/{lending,asset-auth-vault,issuance-factory}`. Then repeatedly delete
-     the modules no longer imported (`npx -y knip --include files`) until none are left: the
-     public hooks in `web/src/hooks/` and their components. Keep `PrivateLoansCard`'s content for
-     phase 4.
-  2. Indexer: delete the public trackers (`offers`, `offers_creation`, `factories`,
-     `factory_creation`), API modules and OpenAPI schemas, and add a migration that drops
-     `factories`, `factory_utxos`, `factory_auths`, `offers`, `offer_utxos` and
-     `offer_participants`. `sync_state`, `private_offers`, `private_offer_utxos`,
-     `directory_entries` and `directory_challenges` stay; check that the API modules `borrowers`
-     and `lenders` serve only public data before deleting them.
-  3. Contracts: delete `lending.simf`, `asset_auth_vault.simf`, `issuance_factory.simf`, their
-     programs in `crates/contracts/src/programs/` and artifacts, and their tests. The untracked
-     `crates/contracts/tests/lending_security_audit.rs` is the user's: ask before deleting it.
-  4. CLI: remove `crates/cli` from the workspace and from `deployment/`, `docker-compose.yml` and
-     `gitlab/`.
-  5. Docs site: delete `docs/docs/{borrower,lender,protocol,schemas}` and the removed contracts'
-     pages in `docs/docs/contracts`; update `docs/sidebars.ts` and `docs/docs/intro.md`.
-  6. Item 2: every private-flow receive (NFT receivers, principal, repayment claims, collateral
-     returns) uses a fresh address (`wollet.address(null)`), and `getReceiveAddress` too.
-- **Done when:** `cargo test --workspace`, `pnpm build`, `pnpm lint`, `pnpm parity`, the
-  docs build and every e2e stage pass; the migration, run on a copy of the testnet database,
-  leaves the private tables' row counts unchanged;
-  `git grep -nE "lending\.simf|issuance_factory|asset_auth_vault|wollet\.address\(0\)"` finds
-  nothing outside `docs/security/` and `docs/superpowers/`; two e2e creations from one wallet
-  receive their NFTs at different addresses.
+Tasks 1 to 5 delete one layer each, in an order where nothing deleted is still imported: the web
+first, then the CLI and `crates/session` (they use the indexer and the public contracts), the
+indexer (it uses the public contracts), the contracts, the docs. Task 6 is item 2, task 7 the
+phase's checks. Every task leaves `cargo build --workspace --all-targets` (with
+`SQLX_OFFLINE=true`), `pnpm build` and `pnpm parity` passing.
+
+Decided while breaking the phase down (2026-11-13):
+- The `/app` index redirects to `/app/private`, and `PrivateLoansCard` moves onto that page;
+  phase 4 replaces both. The nav keeps "Private loans" only.
+- The landing page loses its public-market sections (`ForBorrowers`, `ForLenders`, `RateIndex`
+  and the live previews they embed); its other links point at `/app/private`. Phase 4 rewrites it.
+- The indexer's assets API (`/.well-known/{proof_file}`) and asset registration go: they serve
+  ELIP-0100 proofs for factory assets and public offer NFTs only. Its event stream keeps
+  `block_indexed`, which the private views refetch on.
+- `crates/session` goes with `crates/cli`: its tests drive the public flows only. Neither crate is
+  referenced by `deployment/`, `docker-compose.yml` or `gitlab/`.
+- Item 2 changes where funds are received, not who the wallet is: the session's `scriptPubkey`
+  (address 0's script) keys the saved private transactions (`PrivateTxRecord.walletScriptPubkey`),
+  so it stays, computed by one helper, and nothing pays to it.
+
+### Phase 2 review focus
+
+1. Saved private transactions after item 2: a wallet's unsent or processing private transactions
+   must still show for it, so its identity script must not change. Task 6 asserts it in the e2e.
+2. An existing indexer database: the migration must keep every private row and the sync height.
+   Task 7 step 3 runs it on a copy of the testnet database.
+3. An existing indexer config that still has `asset_registry` (the deployed one) must load. Task 3
+   step 1 tests it.
+4. Old links to `/app/borrow`, `/app/supply` or `/app`: they land on the private page, not the
+   error screen. Task 1 adds the redirects; the phase review reads the router.
+5. A fresh address taken before the wallet applied the previous broadcast repeats that address.
+   Task 6's e2e check builds three creations from one wallet and requires three receivers.
+
+### Task 1: The web app keeps the private pages only
+
+**Files:**
+- Delete: `web/src/pages/{Borrow,Supply,Dashboard}`,
+  `web/src/simplicity/{lending,asset-auth-vault,issuance-factory}`, the landing's `ForBorrowers`, `ForLenders`, `RateIndex`, `LiveCreateOfferPreview`,
+  `LiveOffersPreview` and `mock/`
+- Move: `web/src/pages/Dashboard/components/PrivateLoansCard.tsx` to
+  `web/src/pages/Private/components/PrivateLoansCard.tsx`
+- Modify: `web/src/App.tsx`, `web/src/constants/routes.ts`, `web/src/components/AppLayout.tsx`,
+  `web/src/pages/Private/index.tsx`, `web/src/pages/Landing/index.tsx` and the landing components
+  that link to `RoutePath.Borrow`, the public parts of `web/src/api/indexer/` (`events`,
+  `invalidateEventQueries`, `methods`, `schemas`, `queryKeys`, `hooks`), `web/src/providers/pendingTransactions/*`
+
+- [ ] **Step 1: Routes.** `RoutePath` keeps `Landing`, `Dashboard` (`/app`) and `Private`. Under
+  `/app`, the index route and a `*` route render `<Navigate to={RoutePath.Private} replace />`.
+  The nav lists "Private loans" only; `AppLayout` drops `useOfferModal` and the public offer modal.
+- [ ] **Step 2: Pages.** Delete the three public pages and the three public Simplicity modules.
+  Render `PrivateLoansCard` at the top of the Private page, without its link to that same page.
+  Remove the landing's public-market sections; every remaining landing link to the app points at
+  `RoutePath.Private`.
+- [ ] **Step 3: Indexer client.** Remove the public endpoints (`/offers`, `/borrowers/*`,
+  `/lenders/*`, factories), their schemas and query keys. `IndexerEvent` keeps `block_indexed`
+  only, and `invalidateEventQueries` keeps that case. The pending-transactions provider drops
+  the public `PendingTxRecord` side (its kinds, records, store and reconciliation queries) and
+  keeps the private side unchanged.
+- [ ] **Step 4: Delete what is no longer imported.** Repeat
+  `cd web && npx -y knip --include files` and delete the files it lists until it lists none (the
+  public hooks in `web/src/hooks/`, their components and modals, `lwk/assetContract.ts`). Do not
+  delete files under `src/wasm/` or `scripts/`.
+- [ ] **Step 5: Check.**
+  Run: `cd web && pnpm build && pnpm lint && pnpm parity && pnpm e2e:private wallets`,
+  `TSX_TSCONFIG_PATH=tsconfig.app.json node --import tsx scripts/check-wallet-sync.ts` and `git grep -nE "simplicity/(lending|asset-auth-vault|issuance-factory)|pages/(Borrow|Supply|Dashboard)|RoutePath\.(Borrow|Supply)" web/src`
+  Expected: all pass (`wallets` only reads balances, and loads every module the e2e imports);
+  the grep finds nothing.
+- [ ] **Step 6: Commit** `web: keep the private lending pages only`
+
+### Task 2: Remove the CLI and the session crate
+
+**Files:** Delete `crates/cli`, `crates/session`; `Cargo.lock` follows.
+
+- [ ] **Step 1:** `git rm -r crates/cli crates/session`. The workspace's `members = ["crates/*"]`
+  needs no edit; workspace dependencies only they used may stay.
+- [ ] **Step 2: Check.** Run: `SQLX_OFFLINE=true cargo build --workspace --all-targets`
+  Expected: builds; `Cargo.lock` no longer lists `lending-cli` or `lending-session`.
+- [ ] **Step 3: Commit** `cli: remove the CLI and the session crate with the public flows`
+
+### Task 3: The indexer tracks private offers only
+
+**Files:**
+- Create: `crates/indexer/migrations/20261113120000_drop_public_lending.sql`
+- Delete: the trackers `factories`, `factory_auths`, `factory_creation`, `offer_participants`,
+  `offers` and `offers_creation` in `src/indexer/trackers/`; `src/indexer/asset_registration.rs`;
+  the models `factories`, `factory_auths`, `factory_utxo`, `offer_participants`, `offer_utxo`
+  and `offer` in `src/models/`; `src/api/{borrowers,lenders,factories,offers,assets}`, the public queries in `src/api/query/`
+  and `src/api/db/`, `tests/api_integration.rs`, `tests/asset_metadata_api.rs`
+- Modify: `src/indexer/trackers/{mod,registry}.rs`, `src/indexer/{mod,worker}.rs`,
+  `src/api/{mod,server}.rs`, `src/api/openapi/*`, `src/events/types.rs`, `src/configuration.rs`,
+  `configuration/base.yaml`, `deployment/configs/backend/base.yaml.template`, `tests/common/mod.rs`,
+  the repo's `.sqlx/`
+- Test: `tests/private_offers_indexing.rs`, `src/configuration.rs`
+
+All paths are under `crates/indexer/` unless they start with `deployment/` or `.sqlx`.
+
+- [ ] **Step 1: Write the failing tests.**
+  - `public_lending_tables_are_dropped` (`#[sqlx::test]` in `tests/private_offers_indexing.rs`):
+    `information_schema.tables` has none of `factories`, `factory_utxos`, `factory_auths`,
+    `offers`, `offer_utxos`, `offer_participants`, and has `sync_state`, `private_offers`,
+    `private_offer_utxos`, `directory_entries` and `directory_challenges`.
+  - `settings_load_with_a_stale_asset_registry_section` (unit test in `configuration.rs`): the
+    settings deserialize from `configuration/base.yaml` plus an `asset_registry:` block as the
+    deployed template had it.
+- [ ] **Step 2: Run them to see the table test fail.** Run: `cargo test -p lending-indexer public_lending_tables_are_dropped`
+  Expected: FAIL, the public tables exist. (The config test passes before and after: it guards
+  the removal of `AssetRegistrySettings`.)
+- [ ] **Step 3: The migration.** One `DROP TABLE` of the six public tables, then
+  `DROP TYPE participant_type, utxo_type, offer_status, factory_status`.
+- [ ] **Step 4: Delete the public code.** `TrackerRegistry` keeps `PrivateOffersTracker` only;
+  `IndexerEvent` keeps `BlockIndexed`; the router keeps health, events, private offers and the
+  directory; the OpenAPI doc lists only those; `Settings` loses `asset_registry`, and both config
+  files lose the section. The API modules `borrowers` and `lenders` read only the `offers` table
+  (checked 2026-11-13), so they go whole.
+- [ ] **Step 5: Regenerate the offline query data.** With `DATABASE_URL` set as in
+  `crates/indexer/README.md`: `cargo sqlx migrate run --source crates/indexer/migrations` then
+  `cargo sqlx prepare --workspace -- --all-targets`.
+- [ ] **Step 6: Check.** Run: `cargo test -p lending-indexer && cargo sqlx prepare --workspace --check -- --all-targets && cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  Expected: all pass, the two new tests included.
+- [ ] **Step 7: Commit** `indexer: track private offers only, and drop the public tables`
+
+### Task 4: Remove the public contracts
+
+**Files:**
+- Delete: `crates/contracts/simf/{lending,asset_auth_vault,issuance_factory}.simf`,
+  `crates/contracts/src/programs/{lending,asset_auth_vault,issuance_factory}`,
+  `crates/contracts/tests/{lending,asset_auth_vault,issuance_factory}` and their `.rs` entries
+- Modify: `crates/contracts/src/programs/mod.rs`, `crates/contracts/tests/private_lending/setup.rs`
+
+- [ ] **Step 1:** If an untracked `crates/contracts/tests/lending_security_audit.rs` exists, stop
+  and ask the user before deleting it (absent from the main checkout on 2026-11-13).
+- [ ] **Step 2:** Delete the files above. `private_lending/setup.rs` imports
+  `lending::OfferParameters`: define a struct with the same four fields (`collateral_amount`,
+  `principal_amount`, `loan_expiration_time`, `principal_interest_rate`) in `setup.rs` instead.
+- [ ] **Step 3:** Regenerate `src/artifacts` (gitignored) with `simplex build` as
+  `crates/contracts/README.md` describes, so no stale public artifact remains, and rebuild the
+  wasm (`cd web && pnpm build:wasm`).
+- [ ] **Step 4: Check.** Run: `cargo test -p lending-contracts && SQLX_OFFLINE=true cargo build --workspace --all-targets && cd web && pnpm parity`
+  Expected: all pass; the private lending tests and `private_lending_security_audit.rs` run.
+- [ ] **Step 5: Commit** `contracts: remove the public lending, vault and factory contracts`
+
+### Task 5: The docs describe private lending only
+
+**Files:**
+- Delete: `docs/docs/{borrower,lender,protocol,schemas}`,
+  `docs/docs/contracts/{lending,asset-auth-vault,issuance-factory}.md`
+- Modify: `docs/sidebars.ts`, `docs/docs/intro.md`, `docs/docs/developers/*`, `README.md`,
+  `crates/indexer/README.md`, `deployment/README.md`, `web/README.md` where they describe the
+  public flows, the CLI or the removed endpoints
+
+- [ ] **Step 1:** Delete the pages; the sidebar lists intro, Simplicity, Private loans, the
+  remaining contracts (`asset-auth`, `script-auth`) and Developers. `intro.md` presents the
+  private lending demo and says the public demo is at the tag `public-lending-last`.
+- [ ] **Step 2:** Update the READMEs and developer pages: no CLI, no public flows or endpoints.
+  Leave `docs/security/`, `docs/superpowers/` and `deployment/demo-release.md` (history) as they are.
+- [ ] **Step 3: Check.** Run: `cd docs && pnpm build`, then
+  `git grep -nE "lending\.simf|issuance_factory|asset_auth_vault|crates/cli|lending-cli" -- . ':!docs/security' ':!docs/superpowers' ':!deployment/demo-release.md'`
+  Expected: the build passes with no broken links; the grep finds nothing.
+- [ ] **Step 4: Commit** `docs: describe private lending only`
+
+### Task 6: Fresh receive addresses (spec item 2) (**Review now**: a receiver outside the wallet loses the NFT or the funds sent to it)
+
+**Files:**
+- Modify: `web/src/privateLending/wallet.ts`, `web/src/components/modals/private/*.tsx`,
+  `web/src/providers/wallet/WalletProvider.tsx`, `web/scripts/e2e-private-lending.ts`,
+  `web/scripts/e2e/state.ts`
+- Create: `web/src/providers/wallet/identity.ts`
+
+**Interfaces:**
+- Produces: `walletReceiver(deps: Pick<PrivateFlowDeps, 'wollet'>): Address` (was async, with a
+  `getReceiveAddress` argument), returning `deps.wollet.address(null).address()`, the last unused
+  external address; `walletIdentityScript(wollet: Wollet): string`, the hex script of address 0,
+  the wallet's identity and never a receiver.
+
+- [ ] **Step 1: Write the failing e2e checks.** In `e2e-private-lending.ts`, the three creation
+  stages (`create`, `cancel-create`, `liquidate-create`) take `borrowerNftReceiver` from
+  `walletReceiver({ wollet: borrower.wollet })`, save it in the state (`nftReceivers`), and throw
+  `NFT receiver reused: <address>` if an earlier stage saved the same one; the acceptance, claim,
+  repayment and liquidation stages take their receivers from `walletReceiver` too. The `wallets`
+  stage saves each wallet's `walletIdentityScript`, and every later stage throws
+  `wallet identity changed` if it differs.
+- [ ] **Step 2: Run to see it fail.** Run: `mv web/.e2e-private/state.json web/.e2e-private/state.p2.json 2>/dev/null; cd web && pnpm e2e:private wallets create cancel-create`
+  Expected: `create` fails with `getReceiveAddress is not a function` (`tsx` runs without a type
+  check, and the helper still takes it).
+- [ ] **Step 3: Implement.** `walletReceiver` as in Interfaces; the seven private modals call it
+  with the flow's deps. In `WalletProvider`, the session's `scriptPubkey` comes from
+  `walletIdentityScript`; `receiveAddress`, `getReceiveAddress` and `verifyReceiveAddress`'s
+  fallback use `wollet.address(null)`.
+- [ ] **Step 4: Check.** Run: `cd web && pnpm build && pnpm lint && pnpm parity && pnpm e2e:private wallets create cancel-create liquidate-create`
+  and `git grep -n "address(0)" web/src`
+  Expected: all pass; the grep finds only `identity.ts`.
+- [ ] **Step 5: Commit** `web: private flows receive at fresh addresses`
+
+### Task 7: Verify the phase
+
+- [ ] **Step 1: Rust.** Run: `cargo test --workspace` (with the database `crates/indexer/README.md`
+  describes) and `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
+  Expected: pass.
+- [ ] **Step 2: Every e2e stage from an empty state.** Run:
+  `mv web/.e2e-private/state.json web/.e2e-private/state.p2.json 2>/dev/null; cd web && pnpm e2e:private`
+  with a local testnet indexer on a fresh database (task 3's migrations), as `web/README.md`
+  describes. Expected: every stage `confirmed`, `scan` passes.
+- [ ] **Step 3: The migration on the testnet database.** Copy it
+  (`createdb -T lending-indexer-testnet-v2p1 lending-indexer-v2p2-check`), record
+  `SELECT count(*)` of `private_offers`, `private_offer_utxos`, `directory_entries`,
+  `directory_challenges` and the `sync_state` row, run
+  `sqlx migrate run --source crates/indexer/migrations` against the copy, and record them again.
+  Expected: identical; then drop the copy.
+- [ ] **Step 4: Images and docs.** Run: `docker compose build` (environment per
+  `deployment/README.md`) and `cd docs && pnpm build`. Expected: both build.
+- [ ] **Step 5: Commit** the recorded counts in the commit message:
+  `docs: v2 phase 2 verified` (with any doc fix the checks needed; skip the commit if there is
+  none and put the counts in the phase review instead).
+
+The phase review follows (whole branch, Opus).
 
 ## Phase 3: Lender terms in the directory (spec item 9)
 
@@ -477,6 +665,10 @@ Branch `v2/phase-3-lender-terms`.
 - Indexer: a migration adding the terms and their publication time to `directory_entries`; the
   put endpoint verifies the new signature and requires terms; the list returns them.
 - Web: `privateLending/directory.ts` and `hooks/useDirectory.ts` publish and read terms.
+- **Carried from phase 2's review:** remove the indexer's unused
+  `IndexerSettings.protocol_fee_keeper_asset_id` (unknown keys are ignored, so deployed configs
+  still load), `EsploraClient::network()` (no caller) and the cache tests' identity helper
+  `active_utxo`.
 - **Done when:** core unit tests cover the arithmetic at its edges (zero-day term, principal 0,
   the rounding direction, an overflow at `u64::MAX`), `check_proposal` names every broken term,
   and a replayed or stale-challenge put is refused; `pnpm parity` checks that TS (through the
@@ -501,6 +693,20 @@ Branch `v2/phase-4-two-areas`.
   the repayment, the due date, what happens on default and that the borrower can cancel until
   acceptance. Leave room in the proposal form, the accept review, the repay modal and the loan
   views for phase 6's messages.
+- **Carried from phase 2's review:**
+  - A per-session high-water mark for receive and change indices: `walletReceiver` and the
+    internal change of acceptance and repayment take `max(address(null).index(), last handed out
+    + 1)`, so a flow started before a scan sees the previous one does not reuse its addresses
+    (LWK's `apply_transaction` does not advance `last_unused`), with a guard against index 0 (the
+    identity address) and a bound that keeps unused indices inside LWK's gap limit.
+  - Hardening of the e2e: `creationNftReceiver` compares each receiver with the identity script,
+    and `checkWalletIdentities` fails when the `wallets` stage never ran on the state file.
+  - Cleanup: the orphaned public IndexedDB `simplicity-lending:pending-transactions` (one
+    `deleteDB`), `utils/zod.ts`'s dead exports, the `z-toast` utility, `verifyReceiveAddress` and
+    `getReceiveAddress` (no callers), the wallet button's address taken once at connect, the
+    nginx `/.well-known/liquid-asset-proof-` block (its endpoint is gone), redirects for the old
+    docs URLs (`/docs/borrower/*`, `/docs/lender/*`, `/docs/protocol/*`), and the unwrapped prose
+    in `docs/docs/{developers,contracts}` and `simplicity.md`.
 - **Done when:** `pnpm build` and `pnpm lint` pass; a scripted testnet demo runs: the lender
   publishes terms, the borrower's form refuses a lower APR and less collateral, an e2e-built
   proposal outside the terms shows the badge naming the broken terms, the lender accepts, the
@@ -522,6 +728,10 @@ Branch `v2/phase-5-contract`.
   `crates/contracts/src/programs/private_lending/`; `private-lending-core` (offer parameters,
   pinned outputs, secrets); the wasm; the web Simplicity bindings, the flows (a new
   `flows/partialRepayment.ts`) and the repay UI; the parity fixtures and the e2e stages.
+- **Carried from phase 2:** the header comment of `private_lending.simf` still points at the
+  deleted `lending.simf`; rewrite it with the revision (editing the source changes the program
+  id, so phase 2 left it). Remove the dead features `lending` and `pre_lock` from
+  `crates/contracts/Cargo.toml`.
 - **Done when:** contract tests show, for item 1, that with the expiry fixed a different salt
   changes the CMR revealed at acceptance and repayment (the salt enters the pruned subtree), that
   recomputing that CMR from the public parameters over a range of candidate expiries, with no

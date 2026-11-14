@@ -6,7 +6,6 @@ import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { borrowerNftOutpoint, utxoOutpoint } from '@/privateLending/candidate'
 import { buildPrincipalClaim } from '@/privateLending/flows/claimPrincipal'
 import { selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
-import { useWallet } from '@/providers/wallet/useWallet'
 import { ASSET_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/asset-auth/witness'
 
 import PrivateOfferActionShell, {
@@ -25,7 +24,6 @@ const CLAIM_WEIGHT_UNITS =
 export default function ClaimPrincipalModal(props: PrivateOfferActionModalProps) {
   const { item } = props
   const { terms } = item
-  const { getReceiveAddress } = useWallet()
   const { formatPrincipalAmount } = useFormatAmount()
 
   // `utxo` is the unspent principal. The outpoints come from the indexer, read again now; the
@@ -41,7 +39,7 @@ export default function ClaimPrincipalModal(props: PrivateOfferActionModalProps)
       principalOutpoint: utxoOutpoint(utxo),
       borrowerNftOutpoint: borrowerNftOutpoint(item.txid, candidate),
       feeCoins,
-      receiver: await walletReceiver(deps, getReceiveAddress),
+      receiver: walletReceiver(deps),
     })
   }
 

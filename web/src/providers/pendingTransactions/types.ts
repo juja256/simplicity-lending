@@ -1,42 +1,4 @@
-import type { OfferStatus } from '@/api/indexer/schemas'
-
-export type PendingTxKind =
-  | 'create_borrower_account'
-  | 'create_offer'
-  | 'accept_offer'
-  | 'cancel_offer'
-  | 'claim_principal'
-  | 'repay_offer'
-  | 'claim_interest'
-  | 'liquidate_offer'
-
 export type PendingTxConfirmationStatus = 'processing' | 'confirmed' | 'finalized' | 'failed'
-
-export interface PendingTxRecord {
-  txid: string
-  kind: PendingTxKind
-  walletScriptPubkey: string
-  offerId?: string
-  previousOfferStatus?: OfferStatus
-  expectedOfferStatus?: OfferStatus
-  confirmationStatus: PendingTxConfirmationStatus
-  confirmations: number | null
-  createdAt: number
-  updatedAt: number
-  /** Set once confirmations first reach the finalized threshold. */
-  finalizedAt?: number
-  lastIndexerCheckAt?: number
-  errorMessage?: string
-}
-
-export interface AddPendingTxInput {
-  txid: string
-  kind: PendingTxKind
-  walletScriptPubkey: string
-  offerId?: string
-  previousOfferStatus?: OfferStatus
-  expectedOfferStatus?: OfferStatus
-}
 
 export type PrivateTxKind =
   | 'private_create_offer'
@@ -47,10 +9,7 @@ export type PrivateTxKind =
   | 'private_claim_repayment'
   | 'private_liquidate_offer'
 
-/**
- * A private lending transaction, saved finalized before its first broadcast. Kept apart from
- * `PendingTxRecord` (its own IndexedDB database and state), so public pages never see it.
- */
+/** A private lending transaction, saved finalized before its first broadcast. */
 export interface PrivateTxRecord {
   txid: string
   kind: PrivateTxKind
@@ -78,21 +37,6 @@ export interface SavePrivateTxInput {
 }
 
 export interface PendingTransactionsContextValue {
-  /** Pending tx records scoped to the currently connected wallet. */
-  pendingTxs: PendingTxRecord[]
-  newlyCreatedOfferIds: ReadonlySet<string>
-  highlightedCreatedOfferIds: ReadonlySet<string>
-  isLoading: boolean
-  addPendingTx: (input: AddPendingTxInput) => Promise<void>
-  updatePendingTx: (txid: string, patch: Partial<PendingTxRecord>) => Promise<void>
-  removePendingTx: (txid: string) => Promise<void>
-  /**
-   * Marks a txid as "surfaced": the user closed its transaction modal while still pending, so
-   * the bottom-center toast should pick up tracking it. Tracking continues even if a modal that
-   * stayed open the whole time never calls this.
-   */
-  addSurfaceToast: (txid: string) => void
-  startCreatedOfferHighlight: (offerId: string) => void
   /** Private lending transactions of the connected wallet, saved before their broadcast. */
   privateTxs: PrivateTxRecord[]
   /**

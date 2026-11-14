@@ -43,9 +43,9 @@ interface Unsent {
 }
 
 /**
- * A private transaction in a modal: its details, then on confirm `execute`, with the public
- * stepper. If only the broadcast fails, the signed transaction is saved, and the modal offers to
- * broadcast it again (never to rebuild it) or to discard it.
+ * A private transaction in a modal: its details, then on confirm `execute`, with the stepper of
+ * `OfferActionShell`. If only the broadcast fails, the signed transaction is saved, and the modal
+ * offers to broadcast it again (never to rebuild it) or to discard it.
  */
 export default function PrivateTxShell({
   isOpen,

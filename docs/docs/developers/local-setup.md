@@ -35,9 +35,9 @@ RUN_MODE=api cargo run -p lending-indexer
 RUN_MODE=indexer cargo run -p lending-indexer
 ```
 
-`RUN_MODE` defaults to `api`, so a bare `cargo run -p lending-indexer` serves the API and does no indexing. The worker is what watches Liquid testnet and writes offers into the database. Its Esplora URL, network, and the first height it reads are `esplora` and `indexer.last_indexed_height` in `configuration/base.yaml`.
+`RUN_MODE` defaults to `api`, so a bare `cargo run -p lending-indexer` serves the API and does no indexing. The worker is what watches Liquid testnet and writes private offer candidates into the database. Its Esplora URL, network, and the first height it reads are `esplora` and `indexer.last_indexed_height` in `configuration/base.yaml`.
 
-The API is at `http://localhost:8000`. Swagger UI is at `http://localhost:8000/swagger-ui/`. A request path on this port is the handler path, such as `/offers`.
+The API is at `http://localhost:8000`. Swagger UI is at `http://localhost:8000/swagger-ui/`. A request path on this port is the handler path, such as `/private/candidates`.
 
 Indexer tests use the migrated database:
 
@@ -47,10 +47,9 @@ DATABASE_URL=postgres://app:secret@localhost:5432/lending-indexer cargo test -p 
 
 ## Web app
 
-From `web/`, copy `.env.example` to `.env`. The template sets `VITE_API_URL` to `http://localhost:8000`, which is this API. `VITE_NETWORK` in the template is `liquid`. For the testnet demo, set it to `liquidtestnet` and point `VITE_ESPLORA_BASE_URL` at the testnet explorer. `.env.liquidtestnet` is a starting point for that.
+From `web/`, copy `.env.example` to `.env`. The template sets `VITE_API_URL` to `http://localhost:8000`, which is this API. `VITE_NETWORK` in the template is `liquid`. For the testnet demo, set it to `liquidtestnet` and point `VITE_ESPLORA_BASE_URL` at the testnet explorer. `.env.liquidtestnet` is a starting point for that. Build LWK and the wasm module first, as [Build](./build.md#web-app) describes.
 
 ```bash
-pnpm install
 pnpm dev
 ```
 

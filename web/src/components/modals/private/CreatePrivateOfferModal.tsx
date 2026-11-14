@@ -59,7 +59,7 @@ export default function CreatePrivateOfferModal({
   onClose,
   onCreated,
 }: CreatePrivateOfferModalProps) {
-  const { syncWallet, getLendingKey, getWalletTxOuts, getReceiveAddress } = useWallet()
+  const { syncWallet, getLendingKey, getWalletTxOuts } = useWallet()
   const getDeps = usePrivateFlowDeps()
   const { run } = usePrivateTransaction()
   const { data: tipHeight } = useBlockHeight()
@@ -93,7 +93,7 @@ export default function CreatePrivateOfferModal({
         principalAmount: draft.principalAmount,
         repaymentAmount: draft.repaymentAmount,
         loanExpirationTime: draft.loanExpirationTime,
-        borrowerNftReceiver: await walletReceiver(deps, getReceiveAddress),
+        borrowerNftReceiver: walletReceiver(deps),
       })
     })
   }

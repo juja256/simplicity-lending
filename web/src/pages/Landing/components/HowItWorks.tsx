@@ -53,7 +53,7 @@ export function HowItWorks() {
           ))}
         </div>
         <Reveal delay={0.2}>
-          <Link to={RoutePath.Borrow} className={buttonVariants({ variant: 'primary' })}>
+          <Link to={RoutePath.Private} className={buttonVariants({ variant: 'primary' })}>
             Start a Loan
           </Link>
         </Reveal>

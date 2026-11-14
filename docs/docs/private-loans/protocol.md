@@ -5,10 +5,11 @@ description: Private lending state transitions, local verification, role-token a
 
 # Protocol and privacy
 
-Private lending uses `crates/contracts/simf/private_lending.simf`, alongside the public lending
-contract. The current version supports full repayment only. The UI uses the network's configured
-collateral/principal asset pair and displays explicit principal and repayment amounts.
-Public-loan account setup and fee-split descriptions must not be assumed to apply to this flow.
+Private lending uses `crates/contracts/simf/private_lending.simf`, with the helper programs
+[asset auth](../contracts/asset-auth.md) and [script auth](../contracts/script-auth.md). The
+current version supports full repayment only and charges no protocol fee. The UI uses the
+network's configured collateral/principal asset pair and displays explicit principal and
+repayment amounts.
 
 For the browser workflow, see the [user guide](./guide.md).
 
@@ -35,8 +36,8 @@ spending authority or a real-world identity.
 
 ## State transitions and role tokens
 
-Creation issues borrower and lender role tokens directly; there is no public borrower-account
-prerequisite. These tokens authorize later spends through the associated contracts.
+Creation issues borrower and lender role tokens directly; no account setup comes first. These
+tokens authorize later spends through the associated contracts.
 
 | Transition | Inputs/authorization and result |
 | --- | --- |

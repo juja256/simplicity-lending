@@ -1,7 +1,4 @@
 pub mod asset_auth;
-pub mod asset_auth_vault;
-pub mod issuance_factory;
-pub mod lending;
 pub mod private_lending;
 pub mod program;
 pub mod script_auth;

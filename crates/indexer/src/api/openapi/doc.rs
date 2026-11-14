@@ -3,39 +3,21 @@ use utoipa::OpenApi;
 #[cfg(feature = "swagger-ui")]
 use utoipa_swagger_ui::{Config, SwaggerUi};
 
-use crate::api::assets::handlers as asset_handlers;
-use crate::api::borrowers::dto::BorrowerOverview;
-use crate::api::borrowers::handlers as borrower_handlers;
 use crate::api::directory::dto::{
     DeleteDirectoryEntry, DirectoryChallenge, DirectoryEntry, DirectoryList, PutDirectoryEntry,
 };
 use crate::api::directory::handlers as directory_handlers;
-use crate::api::dto::AssetAmount;
 use crate::api::events::handlers as event_handlers;
-use crate::api::factories::dto::{
-    FactoryAuthUtxoDto, FactoryDetailsResponse, FactoryProgramUtxoDto,
-};
-use crate::api::factories::handlers as factory_handlers;
 use crate::api::health::{self, HealthResponse};
-use crate::api::lenders::dto::LenderOverview;
-use crate::api::lenders::handlers as lender_handlers;
-use crate::api::offers::dto::{
-    OfferListItemShort, OfferListResponse, OfferUtxoDto, OfferUtxoOutpointShort, OffersOverview,
-    ParticipantDto, ParticipantShort,
-};
-use crate::api::offers::handlers as offer_handlers;
-use crate::api::params::{OfferSortBy, SortDir};
 use crate::api::private_offers::dto::{
     OutPointDto, PrivateCandidate, PrivateCandidateDetails, PrivateCandidateList,
     PrivateCreationTx, PrivateUtxoDto,
 };
 use crate::api::private_offers::handlers as private_handlers;
 use crate::events::IndexerEvent;
-use crate::models::{
-    FactoryStatus, OfferStatus, ParticipantType, PrivateOfferStatus, PrivateUtxoType, UtxoType,
-};
+use crate::models::{PrivateOfferStatus, PrivateUtxoType};
 
-use super::schemas::{ErrorBody, ErrorResponse, OfferDetailsResponseSchema};
+use super::schemas::{ErrorBody, ErrorResponse};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -48,10 +30,6 @@ use super::schemas::{ErrorBody, ErrorResponse, OfferDetailsResponseSchema};
         (url = "/api", description = "Public API mount root")
     ),
     paths(
-        offer_handlers::get_overview,
-        offer_handlers::list_offers,
-        offer_handlers::get_ids_by_script,
-        offer_handlers::get_details,
         private_handlers::list_candidates,
         private_handlers::get_candidate,
         private_handlers::get_candidate_tx,
@@ -60,20 +38,11 @@ use super::schemas::{ErrorBody, ErrorResponse, OfferDetailsResponseSchema};
         directory_handlers::get_entry,
         directory_handlers::put_entry,
         directory_handlers::delete_entry,
-        borrower_handlers::get_overview_by_script,
-        borrower_handlers::list_offers_by_script,
-        lender_handlers::get_overview_by_script,
-        lender_handlers::list_offers_by_script,
-        factory_handlers::get_by_script,
-        factory_handlers::get_by_id,
         event_handlers::subscribe_events,
-        asset_handlers::get_domain_proof,
         health::health,
         health::ready,
     ),
     components(schemas(
-        AssetAmount,
-        BorrowerOverview,
         ErrorBody,
         ErrorResponse,
         DeleteDirectoryEntry,
@@ -81,25 +50,9 @@ use super::schemas::{ErrorBody, ErrorResponse, OfferDetailsResponseSchema};
         DirectoryEntry,
         DirectoryList,
         PutDirectoryEntry,
-        FactoryAuthUtxoDto,
-        FactoryDetailsResponse,
-        FactoryProgramUtxoDto,
-        FactoryStatus,
         HealthResponse,
         IndexerEvent,
-        LenderOverview,
-        OfferDetailsResponseSchema,
-        OfferListItemShort,
-        OfferListResponse,
-        OffersOverview,
-        OfferSortBy,
         OutPointDto,
-        OfferStatus,
-        OfferUtxoDto,
-        OfferUtxoOutpointShort,
-        ParticipantDto,
-        ParticipantShort,
-        ParticipantType,
         PrivateCandidate,
         PrivateCandidateDetails,
         PrivateCandidateList,
@@ -107,18 +60,11 @@ use super::schemas::{ErrorBody, ErrorResponse, OfferDetailsResponseSchema};
         PrivateOfferStatus,
         PrivateUtxoDto,
         PrivateUtxoType,
-        SortDir,
-        UtxoType,
     )),
     tags(
-        (name = "offers", description = "Lending offer queries"),
         (name = "private", description = "Private lending candidate scan"),
         (name = "directory", description = "Lender directory with signed writes"),
-        (name = "borrowers", description = "Borrower queries"),
-        (name = "lenders", description = "Lender queries"),
-        (name = "factories", description = "Issuance factory queries"),
         (name = "events", description = "Server-Sent Events for indexer updates"),
-        (name = "assets", description = "ELIP-0100 asset domain proofs"),
         (name = "health", description = "Liveness and readiness checks"),
     )
 )]
@@ -141,26 +87,20 @@ mod tests {
         let spec = ApiDoc::openapi();
         let paths = spec.paths.paths;
 
-        assert!(paths.contains_key("/offers"));
-        assert!(paths.contains_key("/offers/overview"));
-        assert!(paths.contains_key("/offers/by-script"));
-        assert!(paths.contains_key("/offers/{id}"));
         assert!(paths.contains_key("/private/candidates"));
         assert!(paths.contains_key("/private/candidates/{creation_txid}"));
         assert!(paths.contains_key("/private/candidates/{creation_txid}/tx"));
         assert!(paths.contains_key("/private/directory"));
         assert!(paths.contains_key("/private/directory/{pubkey}"));
         assert!(paths.contains_key("/private/directory/challenges"));
-        assert!(paths.contains_key("/borrowers/overview"));
-        assert!(paths.contains_key("/borrowers/offers"));
-        assert!(paths.contains_key("/lenders/overview"));
-        assert!(paths.contains_key("/lenders/offers"));
-        assert!(paths.contains_key("/factories/by-script"));
-        assert!(paths.contains_key("/factories/{id}"));
-        assert!(paths.contains_key("/.well-known/{proof_file}"));
         assert!(paths.contains_key("/health"));
         assert!(paths.contains_key("/ready"));
         assert!(paths.contains_key("/events"));
+        assert_eq!(
+            paths.len(),
+            9,
+            "only the private, event and health paths are listed"
+        );
     }
 
     #[test]
@@ -173,29 +113,7 @@ mod tests {
     fn openapi_spec_serializes_to_json() {
         let json = serde_json::to_string(&ApiDoc::openapi()).expect("serialize openapi");
         assert!(json.contains("Simplicity Lending Indexer"));
-        assert!(json.contains("collateral_amount"));
-        assert!(
-            json.contains("auto-increment") || json.contains(r#""type":"string""#),
-            "offer id should be documented as string in OpenAPI"
-        );
-    }
-
-    #[test]
-    fn borrower_offers_has_flat_query_params() {
-        let spec = ApiDoc::openapi();
-        let path = spec
-            .paths
-            .paths
-            .get("/borrowers/offers")
-            .expect("borrowers offers path");
-        let get = path.get.as_ref().expect("GET operation");
-        let params = get.parameters.as_ref().expect("query parameters");
-
-        let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
-
-        assert!(names.contains(&"script_pubkey".to_string()));
-        assert!(names.contains(&"status".to_string()));
-        assert!(!names.iter().any(|n| n == "filters"));
+        assert!(json.contains("creation_txid"));
     }
 
     #[test]

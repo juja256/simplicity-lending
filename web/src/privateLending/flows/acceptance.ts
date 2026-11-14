@@ -6,7 +6,7 @@
 //            blinded to the borrower's key; 2 lender NFT to the lender, explicit; 3 the principal
 //            change to the wallet, if any; then the policy-asset change and the fee.
 // `buildPset` adds only the policy-asset change, after the given outputs, so the builder pays the
-// principal change itself, at output 3 (as the public acceptance does).
+// principal change itself, at output 3 (as the public acceptance did).
 import type { Address, WalletTxOut } from 'lwk_wasm'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
@@ -151,8 +151,12 @@ export async function buildPrivateAcceptance(
     params.lenderNftReceiver.toString(),
     deps.network,
   ).toUnconfidential()
-  // the wallet's last unused address, confidential: the principal change is blinded to the wallet
-  const changeAddress = deps.wollet.address(null).address()
+  // The principal change goes to the wallet's internal chain, confidential, so it never shares a
+  // script with the receiver (the last unused external address). The policy-asset change takes the
+  // next internal address, so the two changes never share one either.
+  const changeIndex = deps.wollet.change(null).index()
+  const changeAddress = deps.wollet.change(changeIndex).address()
+  const policyChangeAddress = deps.wollet.change(changeIndex + 1).address()
   const changeOutputs: ExpectedOutput[] =
     principalChange > 0n
       ? [
@@ -256,7 +260,7 @@ export async function buildPrivateAcceptance(
           ]
         : []),
     ],
-    changeAddress: deps.wollet.change(null).address(),
+    changeAddress: policyChangeAddress,
   })
 
   // 5. The layout of the unblinded PSET.

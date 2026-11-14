@@ -15,11 +15,11 @@ and explicit test-seed login. No recovery phrase is embedded. Builds reject `VIT
 and mainnet demo mode. The developer Demo/System pages and debug overlays have been removed;
 run `pnpm lint` and `pnpm exec tsc -b` in the terminal for diagnostics.
 
-Private loans are reachable from the main navigation and the dashboard summary. Its counts are
-for the connected wallet's verified private offers; public-market totals remain separate.
-See the [private-loan user guide](../docs/docs/private-loans/guide.md) for wallet setup, the
-borrower/lender workflow and recovery, and the [protocol notes](../docs/docs/private-loans/protocol.md)
-for privacy and verification boundaries.
+The app has private loans only: `/app` opens `/app/private`, and the summary card on that page
+counts the connected wallet's verified private offers. The public market is in the git tag
+`public-lending-last`. See the [private-loan user guide](../docs/docs/private-loans/guide.md)
+for wallet setup, the borrower/lender workflow and recovery, and the
+[protocol notes](../docs/docs/private-loans/protocol.md) for privacy and verification boundaries.
 
 For a local preview against the running indexer, `.env.local` can set
 `API_PROXY_TARGET=http://127.0.0.1:8000` and `API_PROXY_STRIP_PREFIX=true`. The preview server
@@ -185,8 +185,10 @@ Nothing is built, signed or broadcast.
 ### Local testnet indexer
 
 The `scan` stage, and the app on testnet (`VITE_API_URL` in `.env.liquidtestnet`, which the e2e
-script reads too), use a local indexer of Liquid testnet with its own database,
-`lending-indexer-testnet-v2p1` for the current e2e state. Never point the indexer tests at that
+script reads too), use a local indexer of Liquid testnet with its own database. A `scan` rerun
+needs a fresh database for the e2e state it reads, indexed from just below that state's first
+creation (`INDEXER__LAST_INDEXED_HEIGHT`, below); the commands use
+`lending-indexer-testnet-v2p1` as the example name. Never point the indexer tests at that
 database, nor run them while this indexer uses Postgres. From `crates/indexer`, with Postgres on
 `localhost:5432`:
 
@@ -231,8 +233,11 @@ not `.env.local`, and keeps calling the indexer directly.
 
 ### State and resume
 
-`.e2e-private/state.json` (git-ignored) holds one record per transaction: its stage, txid, hex
-and status, `built`, `broadcast` or `confirmed`. The finalized hex is saved as `built` before it is
+`.e2e-private/state.json` (git-ignored) holds three maps. `records` has one record per
+transaction: its stage, txid, hex and status, `built`, `broadcast` or `confirmed`. `nftReceivers`
+has the borrower NFT receiver of each creation, by its record. `walletIdentities` has each
+wallet's identity script, saved by the `wallets` stage. A file that holds the records only, from
+before the other two maps, is still read. The finalized hex is saved as `built` before it is
 broadcast. A re-run never rebuilds a recorded transaction: it rebroadcasts the saved hex ("already
 known" counts as success) and waits for the confirmation. A stage whose records are all
 `confirmed` is skipped, but its on-chain checks run again. The script waits for one confirmation
