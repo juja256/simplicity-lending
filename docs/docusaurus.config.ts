@@ -4,7 +4,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
   title: 'Simplicity Lending',
-  tagline: 'Peer-to-peer lending on Simplicity',
+  tagline: 'Private peer-to-peer lending on Simplicity',
   favicon: 'img/favicon.ico',
 
   future: {
@@ -87,9 +87,8 @@ const config: Config = {
           title: 'Docs',
           items: [
             {label: 'Introduction', to: '/docs/intro'},
-            {label: 'Roles', to: '/docs/protocol/roles'},
-            {label: 'Actions', to: '/docs/protocol/actions'},
-            {label: 'Offer parameters', to: '/docs/protocol/offer-parameters'},
+            {label: 'Private-loan guide', to: '/docs/private-loans/guide'},
+            {label: 'Protocol and privacy', to: '/docs/private-loans/protocol'},
             {label: 'Contracts', to: '/docs/contracts'},
           ],
         },

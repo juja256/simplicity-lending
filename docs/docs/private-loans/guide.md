@@ -11,19 +11,19 @@ This guide describes the current Liquid testnet demo. Use test wallets and test 
 
 ## Connect and find your loans
 
-Open **Private loans** in the app's main navigation or **Open private loans** on the dashboard.
-The route is `/app/private`. Navigation is available before connecting a wallet.
+Open **Private loans** in the app's main navigation. The route is `/app/private`, and `/app` opens
+it too. Navigation is available before connecting a wallet.
 
 Use a Jade wallet configured for Liquid testnet, or choose test-seed login when demo mode is
 enabled. Test-seed login is an explicit wallet choice; the release does not embed a seed. Other
-connectors may work for public loans without supporting private loans.
+wallet connectors can connect but do not support private loans.
 
 For Jade, use a browser with WebSerial support, connect with a data-capable USB cable, select the
 device, and unlock it. The deployed app needs HTTPS; localhost can be used for local testing.
 Approve the required blinding-key export on the device. Review the amount, asset, and any
 warnings on the device for every signing operation.
 
-The dashboard's **Private loans** card shows:
+The **Private loans** card at the top of the page shows:
 
 | Count | Meaning |
 | --- | --- |

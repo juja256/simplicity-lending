@@ -1,42 +1,37 @@
 # Simplicity Lending Indexer and API
 
-This crate serves as a specialized indexer for a Simplicity-based P2P lending protocol. It is designed to discover lending offers, monitor their state transitions, and track participants throughout the entire lifecycle of a loan.
+This crate indexes private lending offers on the Liquid Network and serves them to the web app. It
+finds the transactions that create private offers, follows each offer's outputs through its state
+transitions, and keeps the lender directory. It reads only public chain data: it never holds keys,
+never opens an offer's terms, and never verifies an offer, so clients verify every offer themselves.
 
 ## Features
 
-- [x] Real-time detection of transactions initializing lending offers based on Simplicity covenants.
-- [x] Continuous monitoring of offer transitions (e.g., from `Active` to `Repaid`, `Liquidated`) by analyzing UTXO consumption.
-- [x] Dynamic tracking of `Borrower` and `Lender` participants by monitoring the movement of role-defining NFTs.
-- [x] A robust interface designed for seamless frontend integration with batch processing support.
-- [ ] Aggregated data engine for generating financial metrics (TVL, volume, average interest rates) to power dashboard visualizations.
+- Detection of transactions that create private offers, by their marker output.
+- Tracking of each offer's outputs, which moves the offer from `pending` to `active`, `cancelled`,
+  `repaid` or `liquidated`.
+- An API that serves the offers as candidates for clients to scan, and a lender directory of
+  signed lending keys.
+- A server-sent event stream with one event, `block_indexed`, after each indexed block.
 
 ## Architecture
 
-The indexer consists of two core components: the Indexing Engine (background worker) and a REST API for seamless data retrieval.
+The indexer consists of two processes built from one binary: the indexing worker and a REST API.
 
 ### Indexing Engine & Pipeline
 
-#### Background Worker Responsibilities
-
-The background worker continuously monitors the Liquid Network to ensure the database remains synchronized with the blockchain state. Its primary duties include:
-1. Identifying transactions that initialize new lending offers (`PreLock` covenants).
-2. Tracking UTXOs belonging to active offers to trigger status updates (e.g., transitions from `Active` to `Repaid` or `Liquidated`).
-3. Monitoring the movement of `Borrower` and `Lender` NFTs to maintain up-to-date information on current offer participants.
-
-#### The Standard Indexing Pipeline
-
-For every block height, the engine executes the following steps:
-1. Fetches the block hash for the target height via the Esplora API.
-2. Retrieves all transaction identifiers (TXIDs) associated with that block.
-3. Fetches full transaction data for each TXID.
-4. For every transaction input, the engine performs the following checks in order:
-    - If an input spends an active output belonging to an existing offer, the engine processes a state transition.
-    - If an input spends a participant-related output (NFT), the engine updates the participant registry for the associated offer.
-    - If no existing state matches are found, the transaction is evaluated as a potential offer creation.
+The background worker polls the Liquid Network through Esplora and keeps the database in step with
+the chain. For every block height, it:
+1. Fetches the block hash for the target height.
+2. Retrieves all transaction identifiers (TXIDs) in that block.
+3. Fetches the full transaction for each TXID.
+4. Passes every transaction to the private offer tracker, which processes spends of tracked
+   UTXOs and detects new offers.
+5. Stores the new sync height and emits `block_indexed`, all in one database transaction.
 
 #### Private Offer Detection
 
-After the public trackers, every transaction is also checked for a private offer (`private_offers` tracker). A transaction creates one when:
+Every transaction is checked for a private offer (`private_offers` tracker). A transaction creates one when:
 1. Output 2 is an `OP_RETURN` carrying a marker of the private lending program (its 4-byte program id), and the NFT outputs 0 and 1 have explicit assets (`private_lending_core::find_offer`).
 2. Output 3, the pending offer, has a confidential nonce: the borrower's ephemeral public key.
 
@@ -55,13 +50,6 @@ An offer starts `pending`. Each spend of a tracked UTXO moves it on, and the spe
 | `principal`, `repayment` | any | unchanged | none (the UTXO is marked spent) |
 
 `active` means the debt is outstanding. Repayments are a list of `repayment` UTXOs: one in this contract version, possibly more in a later one. A status change sets `updated_at_height`. These statuses mean something only for offers that verify: the indexer never checks the contract, so for a fake candidate they are meaningless. No SSE event is emitted for private offers, and clients refetch on `block_indexed`.
-
-#### `PreLock` Transaction Detection Rules
-
-To identify transactions creating `PreLock` covenants, the engine applies a strict validation sequence:
-1. Attempts to parse `PreLockArguments` from the transaction. This validates the number of inputs/outputs, the presence of required `OP_RETURN` metadata, and correct parameters encoding.
-2. Uses the extracted `PreLockArguments` to derive the expected `PreLock` covenant address.
-3. Compares the derived address against the `script_pubkey` of the **0-th** output. If they match, the transaction is indexed as a valid new offer.
 
 ### API Service
 
@@ -105,15 +93,16 @@ database:
 esplora:
   base_url: "https://blockstream.info/liquidtestnet/api"
   timeout: 10
+  network: "liquidtestnet"
 indexer:
+  # Still required by the settings, though no tracker reads it.
+  protocol_fee_keeper_asset_id: "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5"
   interval: 10000
   last_indexed_height: 2309541
-  asset_registry:
-    # Issuer domain served in `.well-known` asset domain proofs (optional).
-    domain: "lending.example.com"
-    # Asset registry to submit verified contracts to (optional).
-    registry_url: "https://assets-testnet.blockstream.info"
 ```
+
+An older configuration may still have an `asset_registry` section under `indexer`. The indexer
+ignores it.
 
 > [!TIP]
 > If `sqlx` fails to detect the `DATABASE_URL` environment variable while you are using VS Code with the `rust-analyzer` extension, you may need to restart the extension or the editor itself to refresh the environment context.
@@ -211,7 +200,7 @@ cargo build -p lending-indexer --no-default-features
 ```
 
 > [!TIP]
-> When running the API **directly** on port 8000, use paths without the `/api` prefix (e.g. `http://localhost:8000/offers`). The OpenAPI `servers` entry uses `/api` for deployments where nginx proxies `/api/*` to the backend. Swagger UI on a direct run still lists `/api/...` in "Try it out" unless you select or override the server URL.
+> When running the API **directly** on port 8000, use paths without the `/api` prefix (e.g. `http://localhost:8000/private/candidates`). The OpenAPI `servers` entry uses `/api` for deployments where nginx proxies `/api/*` to the backend. Swagger UI on a direct run still lists `/api/...` in "Try it out" unless you select or override the server URL.
 
 ### Server-Sent Events
 
@@ -219,178 +208,29 @@ cargo build -p lending-indexer --no-default-features
 
 When the indexer commits on-chain updates, it issues Postgres `NOTIFY` on channel `lending_indexer_events` with a JSON `IndexerEvent` payload. The API process listens and fans events out to all SSE subscribers.
 
-Event types:
+There is one event type:
 
 | SSE `event:` | When emitted | Suggested client action |
 | :--- | :--- | :--- |
-| `block_indexed` | After each indexed block | Refetch lists using `not_expired`, overviews |
-| `factory_created` | New issuance factory indexed | Refetch `GET /factories/{id}` or `/factories/by-script` |
-| `offer_created` | New offer indexed (`pending`) | Refetch `GET /borrowers/offers` when `borrower_script_pubkey` matches; or `GET /offers/{id}` |
-| `offer_status_updated` | Offer status transition | Refetch offer details and role-specific lists |
+| `block_indexed` | After each indexed block | Refetch private candidates and the directory |
 
-Examples:
+Example:
 
 ```
 event: block_indexed
 data: {"type":"block_indexed","height":2500001}
-
-event: factory_created
-data: {"type":"factory_created","id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","height":2500001,"factory_auth_script_pubkey":"52ac…"}
-
-event: offer_created
-data: {"type":"offer_created","id":"42","issuance_factory_id":"…","height":2500001,"created_at_txid":"aabb…","borrower_script_pubkey":"52ac…"}
-
-event: offer_status_updated
-data: {"type":"offer_status_updated","id":"42","status":"active","height":2500005}
 ```
 
 Clients should treat events as signals to refetch REST resources rather than as full state snapshots. Keep-alive comments are sent periodically so proxies do not close idle connections. If an nginx (or similar) reverse proxy sits in front of the API, disable response buffering for this path.
 
 API and indexer may run as separate processes (`RUN_MODE=api` / `RUN_MODE=indexer`); events cross the process boundary via Postgres LISTEN/NOTIFY.
 
-### Identifiers
+### Health Endpoints
 
-- **Offer `id`**: internal auto-increment integer (`BIGINT`), serialized in JSON responses as a **decimal string** (e.g. `"1"`). Assigned by PostgreSQL on insert. Used in nested `offer_id` fields and `GET /offers/by-script` responses. Not present on-chain. The path parameter in `GET /offers/{id}` is a numeric ID (e.g. `/offers/42`).
-- **`issuance_factory_id`**: UUID of the issuance factory that created the offer.
-- **`created_at_txid`**: on-chain unique key (hex) of the offer creation transaction.
-
-Example short offer item:
-
-```json
-{
-  "id": "1",
-  "issuance_factory_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "status": "pending",
-  "collateral_asset": "010101…",
-  "principal_asset": "020202…",
-  "collateral_amount": "1000",
-  "principal_amount": "500",
-  "interest_rate": 120,
-  "loan_expiration_height": 1234567,
-  "updated_at_height": 42,
-  "created_at_height": 42,
-  "created_at_txid": "aabbcc…",
-  "participants": [],
-  "borrower_principal_utxo": null
-}
-```
-
-`GET /offers/by-script` returns a JSON array of decimal strings, e.g. `["1", "2", "5"]`.
-
-### Filtering Parameters (Query Params)
-
-The following parameters are available for `GET /offers`, `GET /borrowers/offers`, and `GET /lenders/offers`:
-
-- `status`: Filter by one or more offer states (`pending`, `active`, `repaid`, `liquidated`, `cancelled`, `claimed`). Use a comma-separated list, e.g. `status=pending,active`.
-- `factory_id`: Filter by issuance factory UUID.
-- `collateral_asset`: Hex identifier of the collateral asset (same byte order as in API responses). Filters by `collateral_asset_id` when set alone.
-- `principal_asset`: Hex identifier of the principal asset (same byte order as in API responses). Filters by `principal_asset_id` when set alone. When both `collateral_asset` and `principal_asset` are set, offers must match the asset pair (collateral **and** principal).
-- `exclude_participant_script`: Hex script pubkey. Excludes offers where this script is the latest participant for the given role (e.g. hide a user's own pending offers from the lender marketplace list).
-- `exclude_participant_role`: `borrower` or `lender` (default: `borrower`). Used together with `exclude_participant_script`; ignored when the script parameter is omitted.
-- `not_expired`: When `true`, only returns offers with `loan_expiration_height >= last_indexed_height` from the indexer sync state (i.e. not yet expired at the indexer's current chain height).
-- `limit`: Maximum number of records to return (default: 50, max: 100).
-- `offset`: Pagination offset (default: 0).
-- `sort_by`: `updated_at_height`, `created_at_height`, `collateral_amount`, `principal_amount`, `interest_rate`, `loan_expiration_height` (default: `updated_at_height`).
-- `sort_dir`: `asc` or `desc` (default: `desc`).
-
-### Response Shapes
-
-**Short offer** (`OfferListItemShort`) — used in `GET /offers`, `GET /borrowers/offers`, and `GET /lenders/offers`:
-
-- `id` (decimal string, auto-increment offer ID), `issuance_factory_id` (UUID), `status`
-- `collateral_asset`, `principal_asset` (hex)
-- `collateral_amount`, `principal_amount` (decimal strings, satoshi)
-- `interest_rate` (basis points, e.g. 1000 = 10%)
-- `loan_expiration_height` (block height)
-- `updated_at_height` (block height of the latest offer status update)
-- `created_at_height`, `created_at_txid` (hex)
-- `participants`: latest participant per role (`borrower`, `lender`) — script pubkey only
-- `borrower_principal_utxo`: unspent `borrower_principal` UTXO outpoint (`txid`, `vout`), or omitted when none
-
-**Paginated offer list** (`GET /offers`, `GET /borrowers/offers`, `GET /lenders/offers`):
-
-```json
-{
-  "items": [ /* OfferListItemShort */ ],
-  "total": 42,
-  "limit": 50,
-  "offset": 0
-}
-```
-
-**Offer details** (`GET /offers/{id}`) — `{id}` in the path is a numeric offer ID (e.g. `/offers/42`); the response `id` and nested `offer_id` fields are decimal strings. Full offer fields (short + NFT asset ids) plus:
-
-- `borrower_principal_utxo`: unspent `borrower_principal` UTXO outpoint (`txid`, `vout`), or omitted when none
-- `participants`: latest participant UTXO per role (`borrower`, `lender`); each entry includes `offer_id` (decimal string)
-- `utxos`: current unspent offer UTXOs only (`spent_txid IS NULL`); each entry includes `offer_id` (decimal string). Active offers may include both `active_offer` (Lending covenant) and `borrower_principal` (borrower principal AssetAuth locked until repayment).
-
-**Offers overview** (`GET /offers/overview`):
-
-```json
-{
-  "collateral_locked": [{ "asset": "…", "amount": "1000" }],
-  "active_loan_principal": [{ "asset": "…", "amount": "500" }],
-  "active_loans_count": 1
-}
-```
-
-Aggregates **active** offers for `active_loan_principal` and `active_loans_count`. `collateral_locked` includes **pending** and **active** offers. Amounts are grouped by asset; each `amount` is a decimal satoshi string.
-
-**Borrower overview** (`GET /borrowers/overview`):
-
-```json
-{
-  "collateral_locked": [{ "asset": "…", "amount": "1000" }],
-  "borrowings": [{ "asset": "…", "amount": "500" }],
-  "active_loans": 1,
-  "pending_offers": 2
-}
-```
-
-Overview sums (`collateral_locked`, `borrowings`) are per asset across the borrower's open offers (`pending` and `active`); each `amount` is a decimal satoshi string. Counts (`active_loans`, `pending_offers`) are totals by status. Overview is not affected by offer-list filters on `GET /borrowers/offers`.
-
-**Lender overview** (`GET /lenders/overview`):
-
-```json
-{
-  "supplied_loans": [{ "asset": "…", "amount": "500" }],
-  "interest_outstanding": [{ "asset": "…", "amount": "6" }],
-  "active_loans": 1,
-  "to_be_claimed": 1
-}
-```
-
-`supplied_loans` and `interest_outstanding` aggregate **active** offers only, grouped by principal asset. Interest uses the full fee formula `principal_amount * interest_rate / 10000` (basis points). `to_be_claimed` counts offers in `repaid` status. Overview is not affected by offer-list filters on `GET /lenders/offers`.
-
-### Borrowers Endpoints
-
-| Method | Endpoint | Description | Params / Body |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/borrowers/overview` | Borrower overview totals | `script_pubkey` (query param, hex) |
-| `GET` | `/borrowers/offers` | Paginated short offer list for the borrower | `script_pubkey` (query param, hex); offer list filters (see above) |
-
-### Lenders Endpoints
-
-| Method | Endpoint | Description | Params / Body |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/lenders/overview` | Lender overview totals | `script_pubkey` (query param, hex) |
-| `GET` | `/lenders/offers` | Paginated short offer list for the lender | `script_pubkey` (query param, hex); offer list filters (see above) |
-
-### Factories Endpoints
-
-| Method | Endpoint | Description | Params / Body |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/factories/by-script` | Get active factories owned by a wallet `script_pubkey`, including current auth and program UTXOs | `script_pubkey` (query param, hex) |
-| `GET` | `/factories/{id}` | Get factory details by UUID, including latest unspent auth/program UTXOs when present | — |
-
-### Offers Endpoints
-
-| Method | Endpoint | Description | Params / Body |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/offers/overview` | Protocol-wide active loan totals | — |
-| `GET` | `/offers` | Paginated short offer list | offer list filters (see above) |
-| `GET` | `/offers/by-script` | Offer IDs (decimal strings) where `script_pubkey` matches an unspent participant UTXO (borrower or lender); response body is `["1", "2", …]` | `script_pubkey` (query param, hex) |
-| `GET` | `/offers/{id}` | Full offer details with latest participant UTXOs and unspent offer UTXOs; `{id}` is the numeric offer ID in the path | — |
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/health` | `{ "status": "ok" }` while the API process is alive. |
+| `GET` | `/ready` | `{ "status": "ok" }` when the API can reach its database, otherwise `503` with `{ "status": "unavailable" }`. |
 
 ### Private lending
 

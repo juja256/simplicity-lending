@@ -14,29 +14,29 @@ The [language documentation](https://docs.simplicity-lang.org/) is where syntax,
 
 On Liquid, a Simplicity contract is the spending condition of a single output. It does not keep running in the background. It executes at the moment a transaction tries to spend that output, it sees that transaction as a whole, and it either accepts the spend or the transaction is rejected.
 
-The wallet is what builds the transaction. The contract only checks it. This is what it means, in the introduction, that the contract decides how a loan ends. Repayment and liquidation are two different transactions a wallet can propose, and once the deadline block is reached both of them satisfy the contract. The position goes to whichever transaction confirms first.
+The wallet is what builds the transaction. The contract only checks it, and that check is what decides how a loan ends. Repayment and liquidation are two different transactions a wallet can propose, and once the expiry height is reached both of them satisfy the contract. The position goes to whichever transaction confirms first.
 
 ## Terms are part of the address
 
 A SimplicityHL program takes two kinds of input, and the difference between them is why an offer's terms cannot change after it is published.
 
-**Parameters**, written `param::`, are fixed when the contract is created and become part of the resulting address. For a lending offer they include the collateral amount, the principal, the interest rate, the deadline as a block height, and the asset IDs involved. Changing any of them produces a different address, so publishing an offer with different terms means publishing a different contract.
+**Parameters**, written `param::`, are fixed when the contract is created and become part of the resulting address. For a private lending offer they include the commitments of the collateral, the principal and the repayment, the expiry as a block height, the asset IDs of the two role tokens, and the scripts the principal and the repayment must be paid to. Changing any of them produces a different address, so creating an offer with different terms means creating a different contract. The commitments pin the confidential outputs without revealing their assets and amounts. [Protocol and privacy](./private-loans/protocol.md) describes them.
 
-**Witness data**, written `witness::`, is provided at the moment the output is spent. In the lending contract it chooses which action the transaction is attempting — funding the offer, cancelling it, repaying part of the debt, repaying all of it, or liquidating — and it carries the figures that action needs, such as the debt still outstanding.
+**Witness data**, written `witness::`, is provided at the moment the output is spent. In the private lending contract it chooses which action the transaction is attempting: accepting the offer, cancelling it, repaying it in full, or liquidating it. A branch for partial repayment is reserved for a later version and always fails.
 
 ## What a contract can see
 
-A contract does not look up an account balance or a price. It inspects the transaction in front of it: the asset and the amount on each input and output, the script guarding an output, and the block height the transaction is valid at. Everything this documentation describes a contract as "checking" is one of those inspections. Requiring the borrower NFT on a given input means comparing that input's asset and amount with the values stored in the contract. A deadline means comparing the transaction's block height with the height stored as a parameter.
+A contract does not look up an account balance or a price. It inspects the transaction in front of it: the asset and the amount on each input and output, or their commitments when they are confidential, the script guarding an output, and the block height the transaction is valid at. Everything this documentation describes a contract as "checking" is one of those inspections. Requiring the borrower NFT on a given input means comparing that input's asset and amount with the values stored in the contract. Pinning a confidential output means comparing the hash of its asset and amount commitments with the hash stored as a parameter. An expiry means comparing the transaction's block height with the height stored as a parameter.
 
 ## Several contracts in one transaction
 
-The protocol is five contracts rather than one, and each is the spending condition of its own output. A lending transaction spends several of those outputs at once, and each contract checks only the input it guards.
+The protocol is three contracts rather than one, and each is the spending condition of its own output. A lending transaction spends several of those outputs at once, and each contract checks only the input it guards.
 
-[Lending](./contracts/lending.md) is the offer. The [issuance factory](./contracts/issuance-factory.md) creates the role tokens for an account. [Script auth](./contracts/script-auth.md) holds a token until one specific contract spends it. [Asset auth](./contracts/asset-auth.md) and the [asset auth vault](./contracts/asset-auth-vault.md) control where a particular asset is allowed to move. The [Contracts](./contracts/lending.md) section describes each of them.
+The private lending contract is the offer, described under [Private loans](./private-loans/protocol.md). [Script auth](./contracts/script-auth.md) holds the lender's role token until the offer is accepted or cancelled. [Asset auth](./contracts/asset-auth.md) holds the principal and the repayment until the holder of the right role token claims them. The [Contracts](./contracts/asset-auth.md) section describes the two helpers.
 
-:::warning[Send explicit amounts only]
+:::warning[Keep role tokens explicit]
 
-Liquid can hide the asset and the amount of an output. These contracts read both in the open, and a confidential value fails the check. An output like that, paid to one of these contracts, can never be spent, so the funds in it stay where they are. Only send these contracts outputs whose asset and amount are visible.
+Liquid can hide the asset and the amount of an output. The contracts read the role tokens' asset and amount in the open, and a confidential value fails the check. A role token presented from a confidential output cannot authorize a spend.
 
 :::
 
