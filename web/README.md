@@ -120,7 +120,7 @@ pnpm build:wasm
 
 This compiles `crates/private-lending-wasm` into `src/wasm/private-lending/` (git-ignored). Build
 LWK and run `pnpm install` first (see Install). Run it again whenever the Rust crates change:
-`pnpm dev`, `pnpm build` and `pnpm lint` need the generated package.
+`pnpm dev`, `pnpm build`, `pnpm lint` and `pnpm test` need the generated package.
 
 ## Check browser addresses against Rust
 
@@ -165,9 +165,13 @@ With no stage named, every stage below runs in this order.
 - `wallets`: prints each wallet's address, confirmed balances and lending-key fingerprint. A
   wallet with too few confirmed tL-BTC coins is split into 6 × 15 000 tL-sats (borrower) or
   3 × 5 000 (lender).
-- `create`: the borrower creates an offer to the lender that expires 1 440 blocks after the tip.
-  It builds twice from the same coins and checks that the NFTs and the output 3 nonce differ, runs
-  its self-check and broadcasts; the lender then opens and verifies the offer.
+- `create`: the borrower creates an offer to the lender of a 1-day term, as the borrower's form
+  sets it: it expires 1 440 + 60 blocks after the tip (`proposalExpiry`). It builds twice from the
+  same coins and checks that the NFTs and the output 3 nonce differ, runs its self-check and
+  broadcasts; the lender then opens and verifies the offer. Counted by the term rule
+  (`termBlocksOf`) from the block the creation confirmed in, the offer's term must be 1 day and
+  its proposal within the `directory` stage's terms: a creation that confirms more than 60 blocks
+  after it was built, or a `create` record built before the term rule, fails the stage.
 - `accept`: the lender accepts the `create` offer: the active offer, the principal locked to the
   borrower NFT, and the lender NFT to the lender.
 - `claim-principal`: the borrower claims the principal with its borrower NFT.
@@ -337,6 +341,16 @@ Notes:
 ```bash
 pnpm lint
 ```
+
+## Tests
+
+```bash
+pnpm test
+```
+
+Vitest runs the pure rules (`src/**/*.test.ts`) in Node, with the private lending wasm loaded
+from its build (`src/test/wasm.ts`): the term rule and the checks of a proposal against a
+lender's terms. Checks that need the chain are the e2e stages above.
 
 ## Docker
 
