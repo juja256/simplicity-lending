@@ -39,26 +39,11 @@ pub struct EsploraSettings {
     pub network: String,
 }
 
-/// ELIP-0100 asset metadata registration for factory assets issued by the lending flow.
-/// Disabled while `domain` is unset.
-#[derive(serde::Deserialize, Clone, Default)]
-pub struct AssetRegistrySettings {
-    /// Issuer domain committed in asset contracts (the deployment's public origin.
-    /// The `.well-known` proof route echoes the request host).
-    #[serde(default)]
-    pub domain: Option<String>,
-    /// Asset registry base URL, e.g. `https://assets-testnet.blockstream.info`.
-    #[serde(default)]
-    pub registry_url: Option<String>,
-}
-
 #[derive(serde::Deserialize, Clone)]
 pub struct IndexerSettings {
     pub protocol_fee_keeper_asset_id: AssetId,
     pub interval: u64,
     pub last_indexed_height: u64,
-    #[serde(default)]
-    pub asset_registry: AssetRegistrySettings,
 }
 
 pub fn get_configuration() -> Result<Settings, config::ConfigError> {
@@ -150,7 +135,7 @@ impl From<Network> for SimplicityNetwork {
 
 #[cfg(test)]
 mod tests {
-    use super::{DatabaseSettings, Environment, Network};
+    use super::{DatabaseSettings, Environment, Network, Settings};
     use simplex::provider::SimplicityNetwork;
 
     #[test]
@@ -217,6 +202,38 @@ mod tests {
         assert!(result.is_err());
         let err = result.err().unwrap_or_default();
         assert!(err.contains("not a supported network"));
+    }
+
+    /// A deployed config written from the old template still has an `asset_registry` section,
+    /// which the indexer no longer reads. It must still load.
+    #[test]
+    fn settings_load_with_a_stale_asset_registry_section() {
+        let stale_section = r#"
+indexer:
+  asset_registry:
+    domain: "lending.example.com"
+    registry_url: "https://assets-testnet.blockstream.info"
+"#;
+        let settings = config::Config::builder()
+            .add_source(config::File::from_str(
+                include_str!("../configuration/base.yaml"),
+                config::FileFormat::Yaml,
+            ))
+            .add_source(config::File::from_str(
+                include_str!("../configuration/local.yaml"),
+                config::FileFormat::Yaml,
+            ))
+            .add_source(config::File::from_str(
+                stale_section,
+                config::FileFormat::Yaml,
+            ))
+            .build()
+            .expect("config builds")
+            .try_deserialize::<Settings>()
+            .expect("settings deserialize");
+
+        assert_eq!(settings.indexer.interval, 10_000);
+        assert_eq!(settings.application.host, "127.0.0.1");
     }
 
     #[test]

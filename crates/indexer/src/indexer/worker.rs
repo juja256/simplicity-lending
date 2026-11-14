@@ -6,7 +6,7 @@ use tokio::time::{Interval, interval};
 use crate::configuration::IndexerSettings;
 use crate::esplora_client::EsploraClient;
 use crate::indexer::trackers::TrackerRegistry;
-use crate::indexer::{AssetRegistration, BlockProcessor, get_last_indexed_height};
+use crate::indexer::{BlockProcessor, get_last_indexed_height};
 
 pub struct Worker {
     client: EsploraClient,
@@ -25,13 +25,7 @@ impl Worker {
             .await
             .expect("Failed to get last indexed height");
 
-        let tracker_registry = TrackerRegistry::load(
-            &db_pool,
-            settings.protocol_fee_keeper_asset_id,
-            client.network(),
-            AssetRegistration::from_settings(&settings.asset_registry),
-        )
-        .await?;
+        let tracker_registry = TrackerRegistry::load(&db_pool).await?;
 
         let interval = interval(Duration::from_millis(settings.interval));
 
