@@ -219,8 +219,8 @@ professional tool. Choices marked *(proposed)* were not discussed and need confi
       directory name, key fingerprint and connected signer. Sections:
       - Proposals: a summary strip (proposals waiting, active loans, amount lent, collateral held,
         loans due within seven days and overdue) and a table of pending proposals (received,
-        borrower fingerprint, principal, collateral, ratio at the reference price, APR, term, and
-        a "within terms" or "outside terms" badge naming the broken term). Review opens the
+        borrower fingerprint, principal, collateral, principal per unit of collateral, APR, term,
+        and a "within terms" or "outside terms" badge naming the broken term). Review opens the
         proposal with its terms, its message (item 6) and the acceptance, which the lender signs;
         the app keeps hiding acceptance after expiry (item 4).
       - Loan book: active, repaid and overdue loans, each with the action that applies (claim the
@@ -230,8 +230,9 @@ professional tool. Choices marked *(proposed)* were not discussed and need confi
     - The borrower app is a step-by-step flow that also works at phone width *(proposed)*:
       1. Choose a lender: the borrower picks an asset pair, then a lender from the directory,
          each shown with its name, key fingerprint, terms and when they were published.
-      2. Proposal: the form opens at the lender's minimums (collateral from the reference price
-         and ratio, the APR floor), with the principal and term limited to the lender's ranges,
+      2. Proposal: the form opens at the lender's minimums (the least collateral computed from the
+         maximum principal per unit of collateral, rounded up, as decided 2026-11-14; the APR
+         floor), with the principal and term limited to the lender's ranges,
          and an optional private message (item 6). The borrower can offer more collateral or a
          higher APR, never less. A summary says what they repay and by when, what happens if
          they do not, and that they can cancel until the lender accepts. "Lock collateral and

@@ -1,7 +1,8 @@
 // The asset pair the app lends in, read from the build configuration. Covenants are
 // asset-agnostic: this is the one place that says which asset is the collateral and which the
 // principal. Each network has a default pair. The six `VITE_*_ASSET_*` settings replace an asset
-// of it, three at a time (id, decimals and symbol together), and the two assets must differ.
+// of it, three at a time (id, decimals and symbol together), and the two assets must differ. An
+// empty or whitespace-only setting counts as unset, as Docker build args pass an unset one.
 //
 // This module is pure (no `import.meta.env`, no React) so Node scripts can import it;
 // `network-config.ts` calls it with the settings from `import.meta.env` and adds the icons.
@@ -33,7 +34,7 @@ export const PAIR_SETTINGS = [
 
 export type PairSetting = (typeof PAIR_SETTINGS)[number]
 
-/** The pair settings as the build sees them; an undefined one is unset. */
+/** The pair settings as the build sees them; an undefined, empty or blank one is unset. */
 export type PairEnv = { readonly [Setting in PairSetting]?: string }
 
 const MAX_DECIMALS = 18
@@ -84,9 +85,9 @@ const DEFAULTS: Record<NetworkName, NetworkConfig> = {
 }
 
 /**
- * The network's config with the pair settings in `env` applied. An unset setting keeps the
- * network's default; a malformed one throws an error that names it, so a bad build fails at
- * startup instead of running with a wrong id or `NaN` decimals.
+ * The network's config with the pair settings in `env` applied. An unset setting (undefined,
+ * empty or blank) keeps the network's default; a malformed one throws an error that names it, so a
+ * bad build fails at startup instead of running with a wrong id or `NaN` decimals.
  */
 export function resolveNetworkConfig(network: NetworkName, env: PairEnv): NetworkConfig {
   const defaults = DEFAULTS[network]
@@ -104,8 +105,9 @@ export function resolveNetworkConfig(network: NetworkName, env: PairEnv): Networ
 }
 
 // An asset's three settings go together: all unset keeps the default asset, and setting any of
-// them (even to an empty string) needs the other two. A new id with the default decimals would
-// misread every amount of that asset.
+// them needs the other two. An empty or blank value counts as unset, so a Docker build arg left
+// empty keeps the default. A new id with the default decimals would misread every amount of that
+// asset.
 function resolveAsset(
   defaults: PairAsset,
   role: 'COLLATERAL' | 'PRINCIPAL',
@@ -116,12 +118,14 @@ function resolveAsset(
     decimals: `VITE_${role}_ASSET_DECIMALS`,
     symbol: `VITE_${role}_ASSET_SYMBOL`,
   } as const
-  const id = env[names.id]
-  const decimals = env[names.decimals]
-  const symbol = env[names.symbol]
+  const id = setValue(env, names.id)
+  const decimals = setValue(env, names.decimals)
+  const symbol = setValue(env, names.symbol)
   if (id === undefined && decimals === undefined && symbol === undefined) return { ...defaults }
 
-  const set = [names.id, names.decimals, names.symbol].find(name => env[name] !== undefined)
+  const set = [names.id, names.decimals, names.symbol].find(
+    name => setValue(env, name) !== undefined,
+  )
   const unset = (name: PairSetting) =>
     new Error(
       `Invalid build setting ${name}: unset while ${set} is set; an asset's id, decimals and ` +
@@ -133,8 +137,14 @@ function resolveAsset(
   return {
     id: parseAssetId(names.id, id),
     decimals: parseDecimals(names.decimals, decimals),
-    symbol: parseSymbol(names.symbol, symbol),
+    symbol: parseSymbol(symbol),
   }
+}
+
+// A setting's value, or undefined when it is unset: undefined, empty or whitespace only.
+function setValue(env: PairEnv, setting: PairSetting): string | undefined {
+  const raw = env[setting]
+  return raw?.trim() ? raw : undefined
 }
 
 function parseAssetId(setting: PairSetting, raw: string): string {
@@ -147,7 +157,7 @@ function parseAssetId(setting: PairSetting, raw: string): string {
 
 function parseDecimals(setting: PairSetting, raw: string): number {
   const value = raw.trim()
-  // Digits only, so `1.5`, `-1`, `1e1`, `0x8` and the empty string are all refused.
+  // Digits only, so `1.5`, `-1`, `1e1` and `0x8` are all refused.
   const decimals = /^\d{1,2}$/.test(value) ? Number(value) : NaN
   if (!Number.isInteger(decimals) || decimals > MAX_DECIMALS) {
     throw invalid(setting, raw, `must be an integer from 0 to ${MAX_DECIMALS}`)
@@ -155,10 +165,9 @@ function parseDecimals(setting: PairSetting, raw: string): number {
   return decimals
 }
 
-function parseSymbol(setting: PairSetting, raw: string): string {
-  const value = raw.trim()
-  if (!value) throw invalid(setting, raw, 'must not be empty')
-  return value
+// A set value is not blank (`setValue`), so the trimmed symbol is never empty.
+function parseSymbol(raw: string): string {
+  return raw.trim()
 }
 
 function invalid(setting: PairSetting, raw: string, rule: string): Error {

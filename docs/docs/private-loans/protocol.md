@@ -26,6 +26,7 @@ public candidates and transaction data, rather than plaintext loan terms.
 | State transitions, spends, and role-token movements | Publicly observable. |
 | Expiry height | Revealed with the program at its first spend. |
 | Directory lending key and display name | Public when registered. |
+| Directory terms (minimum APR, maximum principal per collateral unit, term and principal ranges) and their publication time | Public when published. |
 
 This does not promise transaction anonymity, unlinkability against every observer, or protection
 against disclosure by a counterparty. The lending key is derived from the wallet's master blinding

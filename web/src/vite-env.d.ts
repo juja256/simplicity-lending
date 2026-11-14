@@ -4,7 +4,8 @@ interface ImportMetaEnv {
   readonly VITE_API_URL?: string
   readonly VITE_ESPLORA_BASE_URL?: string
   readonly VITE_NETWORK?: 'liquid' | 'liquidtestnet' | 'regtest'
-  // The asset pair, an asset's three together (`resolve-network-config.ts`).
+  // The asset pair, an asset's three together; an empty value is unset
+  // (`resolve-network-config.ts`).
   readonly VITE_COLLATERAL_ASSET_ID?: string
   readonly VITE_COLLATERAL_ASSET_DECIMALS?: string
   readonly VITE_COLLATERAL_ASSET_SYMBOL?: string
