@@ -185,8 +185,10 @@ Nothing is built, signed or broadcast.
 ### Local testnet indexer
 
 The `scan` stage, and the app on testnet (`VITE_API_URL` in `.env.liquidtestnet`, which the e2e
-script reads too), use a local indexer of Liquid testnet with its own database,
-`lending-indexer-testnet-v2p1` for the current e2e state. Never point the indexer tests at that
+script reads too), use a local indexer of Liquid testnet with its own database. A `scan` rerun
+needs a fresh database for the e2e state it reads, indexed from just below that state's first
+creation (`INDEXER__LAST_INDEXED_HEIGHT`, below); the commands use
+`lending-indexer-testnet-v2p1` as the example name. Never point the indexer tests at that
 database, nor run them while this indexer uses Postgres. From `crates/indexer`, with Postgres on
 `localhost:5432`:
 

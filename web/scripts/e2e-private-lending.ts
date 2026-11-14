@@ -359,8 +359,24 @@ function describeOutputs(pset: lwk.Pset, nfts: { borrowerNft: string; lenderNft:
             ? 'unblinded'
             : `nonce ${output.ecdhPubkey.slice(0, 10)}…, blind proofs ` +
               `${output.hasBlindValueProof && output.hasBlindAssetProof ? 'yes' : 'no'}`)
-    out(`  ${index} ${kind.padEnd(9)} ${output.amount} ${asset} (${blinding})`)
+    const at = kind === 'script' ? ` at ${output.script}` : ''
+    out(`  ${index} ${kind.padEnd(9)} ${output.amount} ${asset}${at} (${blinding})`)
   })
+}
+
+/**
+ * Throws if two outputs of `pset` other than the fee share a script: a wallet output (a receiver,
+ * the principal change, the policy-asset change) must never reuse another's script.
+ */
+function assertDistinctOutputScripts(pset: lwk.Pset, what: string): void {
+  const seen = new Set<string>()
+  for (const output of inspectPset(wasm, pset.toString()).outputs) {
+    if (output.script === '') continue
+    if (seen.has(output.script)) {
+      throw new Error(`${what}: two outputs share the script ${output.script}`)
+    }
+    seen.add(output.script)
+  }
 }
 
 /**
@@ -769,6 +785,7 @@ async function buildSignedAcceptance(
     borrowerNft: offer.opened.borrowerNft(),
     lenderNft: offer.opened.lenderNft(),
   })
+  assertDistinctOutputScripts(built.pset, 'the acceptance')
   assertAcceptanceOutputs(
     built.pset,
     offer,
@@ -1081,6 +1098,7 @@ async function buildSignedRepayment(
     borrowerNft: offer.opened.borrowerNft(),
     lenderNft: offer.opened.lenderNft(),
   })
+  assertDistinctOutputScripts(built.pset, 'the repayment')
   assertRepaymentOutputs(built.pset, offer, collateralReceiver)
   const { finalizedTx, summary } = built.finalize(borrower.signer.sign(built.pset))
   assertFinalizedWeights(finalizedTx, REPAYMENT_WEIGHTS)
