@@ -41,6 +41,27 @@ Copy `.env.example` to `.env` and adjust as needed.
 - `VITE_ESPLORA_BASE_URL` - Base URL for Esplora.
 - `VITE_NETWORK` - Network name (`liquid`, `liquidtestnet`, `regtest`).
 
+### Asset pair
+
+The app lends one asset pair, read from six build settings. Each unset setting keeps the
+network's default, so a build that sets none of them lends the pair below.
+
+| Setting                          | liquid        | liquidtestnet | regtest       |
+| -------------------------------- | ------------- | ------------- | ------------- |
+| `VITE_COLLATERAL_ASSET_ID`       | `6f0279…526d` | `144c65…9a49` | `5ac9f6…b225` |
+| `VITE_COLLATERAL_ASSET_DECIMALS` | `8`           | `8`           | `8`           |
+| `VITE_COLLATERAL_ASSET_SYMBOL`   | `LBTC`        | `tL-BTC`      | `LBTC`        |
+| `VITE_PRINCIPAL_ASSET_ID`        | `ce091c…7bd2` | `38fca2…50a5` | `25b176…0064` |
+| `VITE_PRINCIPAL_ASSET_DECIMALS`  | `8`           | `3`           | `2`           |
+| `VITE_PRINCIPAL_ASSET_SYMBOL`    | `USDT`        | `TEST`        | `USDT`        |
+
+The full ids are in `src/constants/resolve-network-config.ts`. An id is 64 hex characters,
+decimals an integer from 0 to 18 and a symbol a non-empty string; a malformed setting stops the
+app at startup with an error naming it. Set the three settings of an asset together: a new id with
+the default decimals would misread its amounts. The icon follows the symbol (`LBTC`, `tL-BTC`,
+`USDT`, `TEST`), and any other symbol gets a generic coin icon. `pnpm check:config` checks the
+defaults, the overrides and the refusals.
+
 ## Stack
 
 - Vite + React + TypeScript

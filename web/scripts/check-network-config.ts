@@ -1,0 +1,177 @@
+// Checks how the build configuration picks the asset pair. Run it with `pnpm check:config`.
+// With no pair setting, each network keeps the assets it had before the pair became configurable.
+// Each setting overrides only its own field, and a malformed one throws with the setting's name,
+// so the app never starts with a wrong id or `NaN` decimals.
+import assert from 'node:assert/strict'
+
+import {
+  type NetworkConfig,
+  type PairEnv,
+  type PairSetting,
+  resolveNetworkConfig,
+} from '@/constants/resolve-network-config'
+
+const TESTNET: NetworkConfig = {
+  collateralAsset: {
+    id: '144c654344aa716d6f3abcc1ca90e5641e4e2a7f633bc09fe3baf64585819a49',
+    decimals: 8,
+    symbol: 'tL-BTC',
+  },
+  principalAsset: {
+    id: '38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5',
+    decimals: 3,
+    symbol: 'TEST',
+  },
+  policyAssetSatsUnit: 'tLsats',
+}
+
+const LIQUID: NetworkConfig = {
+  collateralAsset: {
+    id: '6f0279e9ed041c3d710a9f57d0c02928416460c4b722ae3457a11eec381c526d',
+    decimals: 8,
+    symbol: 'LBTC',
+  },
+  principalAsset: {
+    id: 'ce091c998b83c78bb71a632313ba3760f1763d9cfcffae02258ffa9865a37bd2',
+    decimals: 8,
+    symbol: 'USDT',
+  },
+  policyAssetSatsUnit: 'Lsats',
+}
+
+const REGTEST: NetworkConfig = {
+  collateralAsset: {
+    id: '5ac9f65c0efcc4775e0baec4ec03abdde22473cd3cf33c0419ca290e0751b225',
+    decimals: 8,
+    symbol: 'LBTC',
+  },
+  principalAsset: {
+    id: '25b17682b0e4f7b0711de7e8ee2e33cd01d65680eed82cce1af84cfbdde30064',
+    decimals: 2,
+    symbol: 'USDT',
+  },
+  policyAssetSatsUnit: 'Lsats',
+}
+
+const OTHER_ID = 'ab'.repeat(32)
+
+let checks = 0
+function check(name: string, run: () => void): void {
+  try {
+    run()
+    checks += 1
+  } catch (error) {
+    console.error(`network config: ${name} failed`)
+    throw error
+  }
+}
+
+check('defaults', () => {
+  assert.deepEqual(resolveNetworkConfig('liquidtestnet', {}), TESTNET)
+  assert.deepEqual(resolveNetworkConfig('liquid', {}), LIQUID)
+  assert.deepEqual(resolveNetworkConfig('regtest', {}), REGTEST)
+  // A setting present but undefined is unset, as `import.meta.env` reports it.
+  assert.deepEqual(
+    resolveNetworkConfig('liquidtestnet', {
+      VITE_COLLATERAL_ASSET_ID: undefined,
+      VITE_PRINCIPAL_ASSET_DECIMALS: undefined,
+    }),
+    TESTNET,
+  )
+})
+
+// Each override changes its own field and nothing else.
+const overrides: { setting: PairSetting; value: string; expect: (c: NetworkConfig) => void }[] = [
+  {
+    setting: 'VITE_COLLATERAL_ASSET_ID',
+    value: OTHER_ID,
+    expect: c => (c.collateralAsset.id = OTHER_ID),
+  },
+  {
+    setting: 'VITE_COLLATERAL_ASSET_DECIMALS',
+    value: '0',
+    expect: c => (c.collateralAsset.decimals = 0),
+  },
+  {
+    setting: 'VITE_COLLATERAL_ASSET_SYMBOL',
+    value: 'L-BTC',
+    expect: c => (c.collateralAsset.symbol = 'L-BTC'),
+  },
+  {
+    setting: 'VITE_PRINCIPAL_ASSET_ID',
+    value: OTHER_ID,
+    expect: c => (c.principalAsset.id = OTHER_ID),
+  },
+  {
+    setting: 'VITE_PRINCIPAL_ASSET_DECIMALS',
+    value: '18',
+    expect: c => (c.principalAsset.decimals = 18),
+  },
+  {
+    setting: 'VITE_PRINCIPAL_ASSET_SYMBOL',
+    value: 'USDt',
+    expect: c => (c.principalAsset.symbol = 'USDt'),
+  },
+]
+
+for (const { setting, value, expect } of overrides) {
+  check(`override ${setting}`, () => {
+    const expected = structuredClone(TESTNET)
+    expect(expected)
+    assert.deepEqual(resolveNetworkConfig('liquidtestnet', { [setting]: value }), expected)
+  })
+}
+
+check('all six overrides together, on another network', () => {
+  const env: PairEnv = {
+    VITE_COLLATERAL_ASSET_ID: OTHER_ID,
+    VITE_COLLATERAL_ASSET_DECIMALS: '8',
+    VITE_COLLATERAL_ASSET_SYMBOL: 'tL-BTC',
+    VITE_PRINCIPAL_ASSET_ID: 'cd'.repeat(32),
+    VITE_PRINCIPAL_ASSET_DECIMALS: '6',
+    VITE_PRINCIPAL_ASSET_SYMBOL: 'TEST',
+  }
+  assert.deepEqual(resolveNetworkConfig('regtest', env), {
+    collateralAsset: { id: OTHER_ID, decimals: 8, symbol: 'tL-BTC' },
+    principalAsset: { id: 'cd'.repeat(32), decimals: 6, symbol: 'TEST' },
+    policyAssetSatsUnit: 'Lsats',
+  })
+})
+
+check('ids are lowercased and values trimmed', () => {
+  const config = resolveNetworkConfig('liquidtestnet', {
+    VITE_PRINCIPAL_ASSET_ID: ` ${'AB'.repeat(32)} `,
+    VITE_PRINCIPAL_ASSET_DECIMALS: ' 6 ',
+    VITE_PRINCIPAL_ASSET_SYMBOL: ' USDt ',
+  })
+  assert.deepEqual(config.principalAsset, { id: OTHER_ID, decimals: 6, symbol: 'USDt' })
+})
+
+// Each malformed value throws, and the message names the setting.
+const malformed: { setting: PairSetting; values: string[] }[] = [
+  {
+    setting: 'VITE_COLLATERAL_ASSET_ID',
+    values: ['', 'abc', 'ab'.repeat(31), 'ab'.repeat(33), 'g'.repeat(64), `0x${'ab'.repeat(31)}`],
+  },
+  {
+    setting: 'VITE_COLLATERAL_ASSET_DECIMALS',
+    values: ['', ' ', '-1', '19', '1.5', '8.0', 'eight', '1e1', '0x8', 'NaN', 'Infinity'],
+  },
+  { setting: 'VITE_COLLATERAL_ASSET_SYMBOL', values: ['', '   '] },
+  { setting: 'VITE_PRINCIPAL_ASSET_ID', values: ['', 'xyz', 'ab'.repeat(33)] },
+  { setting: 'VITE_PRINCIPAL_ASSET_DECIMALS', values: ['', '-0', '100', '3.', 'three'] },
+  { setting: 'VITE_PRINCIPAL_ASSET_SYMBOL', values: ['', '\t'] },
+]
+
+for (const { setting, values } of malformed) {
+  for (const value of values) {
+    check(`malformed ${setting}=${JSON.stringify(value)}`, () => {
+      assert.throws(
+        () => resolveNetworkConfig('liquidtestnet', { [setting]: value }),
+        (error: unknown) => error instanceof Error && error.message.includes(setting),
+      )
+    })
+  }
+}
+
+process.stdout.write(`network config: ok (${checks} checks)\n`)
