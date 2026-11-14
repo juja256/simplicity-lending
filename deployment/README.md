@@ -80,6 +80,7 @@ Set these values in `deployment/configs/compose.env`:
 - `VITE_WATERFALLS_RECIPIENT`: optional pin of the Waterfalls server's age recipient; leave unset to fetch it from `<VITE_WATERFALLS_URL>/v1/server_recipient` at startup
 - `VITE_DEMO_MODE`: `true` for the Liquid testnet demo with explicit test-seed login; rejected on mainnet. Embedded debug mnemonics are no longer supported.
 - `VITE_SIDESWAP_WS_URL`: optional experimental SideSwap wallet connect server URL; leave unset to disable that connect option
+- `VITE_COLLATERAL_ASSET_ID`, `VITE_COLLATERAL_ASSET_DECIMALS`, `VITE_COLLATERAL_ASSET_SYMBOL`, `VITE_PRINCIPAL_ASSET_ID`, `VITE_PRINCIPAL_ASSET_DECIMALS`, `VITE_PRINCIPAL_ASSET_SYMBOL`: optional asset pair; leave all six unset or empty for the network's default pair (tL-BTC collateral, TEST principal on Liquid testnet). An asset's three settings go together, the two ids must differ, and a partial or malformed set stops the web app at startup (see [the web README](../web/README.md#asset-pair))
 - `INDEXER_ESPLORA_BASE_URL`: the Esplora API used by the backend indexer
 - `WEB_ESPLORA_API_UPSTREAM`: the Esplora API proxied by nginx, for example `https://blockstream.info/liquidtestnet/api`
 - `INDEXER_POLL_INTERVAL_MS`: background polling interval

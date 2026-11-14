@@ -2,11 +2,13 @@
 // With no pair setting, each network keeps the assets it had before the pair became configurable.
 // The settings replace an asset three at a time (id, decimals and symbol), the two assets must
 // differ, and a missing or malformed setting throws with its name, so the app never starts with a
-// wrong id or `NaN` decimals.
+// wrong id or `NaN` decimals. An empty or blank setting counts as unset, as a Docker build passes
+// an unset build arg.
 import assert from 'node:assert/strict'
 
 import {
   type NetworkConfig,
+  PAIR_SETTINGS,
   type PairEnv,
   type PairSetting,
   resolveNetworkConfig,
@@ -81,6 +83,19 @@ check('defaults', () => {
   )
 })
 
+check('empty and blank settings are unset', () => {
+  const blank = Object.fromEntries(PAIR_SETTINGS.map(setting => [setting, ''])) as PairEnv
+  assert.deepEqual(resolveNetworkConfig('liquidtestnet', blank), TESTNET)
+  assert.deepEqual(
+    resolveNetworkConfig('liquid', {
+      VITE_COLLATERAL_ASSET_ID: ' ',
+      VITE_COLLATERAL_ASSET_DECIMALS: '\t',
+      VITE_PRINCIPAL_ASSET_SYMBOL: '',
+    }),
+    LIQUID,
+  )
+})
+
 // A full replacement of each asset: its id, decimals and symbol together.
 const COLLATERAL_ENV: PairEnv = {
   VITE_COLLATERAL_ASSET_ID: OTHER_ID,
@@ -131,19 +146,22 @@ function throwsNaming(env: PairEnv, prefix: string): void {
   )
 }
 
-// An asset's settings go together: with one of the three left out, the error names it.
+// An asset's settings go together: with one of the three left out, or left empty or blank, the
+// error names it.
 for (const full of [COLLATERAL_ENV, PRINCIPAL_ENV]) {
   for (const missing of Object.keys(full) as PairSetting[]) {
-    check(`${missing} unset while the other two are set`, () => {
-      const env = { ...full, [missing]: undefined }
-      throwsNaming(env, `Invalid build setting ${missing}: unset while `)
-    })
+    for (const value of [undefined, '', '  ']) {
+      check(`${missing}=${JSON.stringify(value)} while the other two are set`, () => {
+        const env = { ...full, [missing]: value }
+        throwsNaming(env, `Invalid build setting ${missing}: unset while `)
+      })
+    }
   }
 }
 
-check('an empty setting counts as set, so the other two are needed', () => {
+check('one non-empty setting needs the other two, even when they are empty', () => {
   throwsNaming(
-    { VITE_PRINCIPAL_ASSET_SYMBOL: '' },
+    { VITE_PRINCIPAL_ASSET_ID: '', VITE_PRINCIPAL_ASSET_SYMBOL: 'USDt' },
     'Invalid build setting VITE_PRINCIPAL_ASSET_ID: unset while VITE_PRINCIPAL_ASSET_SYMBOL is set',
   )
 })
@@ -164,16 +182,14 @@ check('the same id for both assets is refused', () => {
 const malformed: { setting: PairSetting; values: string[] }[] = [
   {
     setting: 'VITE_COLLATERAL_ASSET_ID',
-    values: ['', 'abc', 'ab'.repeat(31), 'ab'.repeat(33), 'g'.repeat(64), `0x${'ab'.repeat(31)}`],
+    values: ['abc', 'ab'.repeat(31), 'ab'.repeat(33), 'g'.repeat(64), `0x${'ab'.repeat(31)}`],
   },
   {
     setting: 'VITE_COLLATERAL_ASSET_DECIMALS',
-    values: ['', ' ', '-1', '19', '1.5', '8.0', 'eight', '1e1', '0x8', 'NaN', 'Infinity'],
+    values: ['-1', '19', '1.5', '8.0', 'eight', '1e1', '0x8', 'NaN', 'Infinity', '8 8'],
   },
-  { setting: 'VITE_COLLATERAL_ASSET_SYMBOL', values: ['', '   '] },
-  { setting: 'VITE_PRINCIPAL_ASSET_ID', values: ['', 'xyz', 'ab'.repeat(33)] },
-  { setting: 'VITE_PRINCIPAL_ASSET_DECIMALS', values: ['', '-0', '100', '3.', 'three'] },
-  { setting: 'VITE_PRINCIPAL_ASSET_SYMBOL', values: ['', '\t'] },
+  { setting: 'VITE_PRINCIPAL_ASSET_ID', values: ['xyz', 'ab'.repeat(33)] },
+  { setting: 'VITE_PRINCIPAL_ASSET_DECIMALS', values: ['-0', '100', '3.', 'three'] },
 ]
 
 for (const { setting, values } of malformed) {

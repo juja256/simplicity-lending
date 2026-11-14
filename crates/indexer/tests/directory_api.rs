@@ -104,11 +104,14 @@ fn put_body(key: &LendingKey, challenge: &[u8; 32], name: &str) -> Value {
     put_body_with_terms(key, challenge, name, &sample_terms())
 }
 
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after 1970")
-        .as_secs() as i64
+/// The database's clock in whole seconds. The API stamps times with Postgres `now()`, whose clock
+/// (in a Docker VM) can drift from the host's, so tests compare database times with this.
+async fn db_now(pool: &sqlx::PgPool) -> anyhow::Result<i64> {
+    Ok(
+        sqlx::query_scalar::<_, i64>("SELECT FLOOR(EXTRACT(EPOCH FROM now()))::BIGINT")
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 fn delete_body(key: &LendingKey, challenge: &[u8; 32]) -> Value {
@@ -141,6 +144,7 @@ const CHALLENGE_MESSAGE: &str = "unknown, used or expired challenge";
 #[serial]
 async fn directory_entry_round_trip() -> anyhow::Result<()> {
     let pool = test_pool().await?;
+    let clock = pool.clone();
     let (base, _server) = start_api(pool).await?;
     let http = reqwest::Client::new();
     let key = lending_key(5);
@@ -153,7 +157,7 @@ async fn directory_entry_round_trip() -> anyhow::Result<()> {
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let issued = response_json(response).await?;
-    let now = unix_now();
+    let now = db_now(&clock).await?;
     let remaining = issued["expires_at"].as_i64().unwrap() - now;
     assert!((291..=300).contains(&remaining), "remaining {remaining}");
     let c: [u8; 32] = hex::decode(issued["challenge"].as_str().unwrap())?
@@ -172,11 +176,9 @@ async fn directory_entry_round_trip() -> anyhow::Result<()> {
     assert_eq!(created["display_name"], "Acme Bank");
     assert_eq!(created["pubkey"], pk);
     assert_eq!(created["terms"], terms_json(&sample_terms()));
-    let published = created["terms_published_at"].as_i64().unwrap();
-    assert!(
-        (now - 5..=now + 5).contains(&published),
-        "published {published}"
-    );
+    // A first put creates the entry and publishes its terms in one statement, at one `now()`.
+    assert!(created["terms_published_at"].as_i64().is_some());
+    assert_eq!(created["terms_published_at"], created["created_at"]);
 
     let list = response_json(http.get(format!("{base}/private/directory")).send().await?).await?;
     assert_eq!(list["items"], json!([created.clone()]));
