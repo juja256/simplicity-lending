@@ -62,10 +62,6 @@ impl EsploraClient {
         EsploraProvider::new(self.base_url.clone(), self.network)
     }
 
-    pub fn network(&self) -> SimplicityNetwork {
-        self.network
-    }
-
     pub async fn get_latest_block_hash(&self) -> Result<String, EsploraClientError> {
         let url = format!("{}/blocks/tip/hash", self.base_url);
 

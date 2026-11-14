@@ -95,14 +95,12 @@ esplora:
   timeout: 10
   network: "liquidtestnet"
 indexer:
-  # Still required by the settings, though no tracker reads it.
-  protocol_fee_keeper_asset_id: "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5"
   interval: 10000
   last_indexed_height: 2309541
 ```
 
-An older configuration may still have an `asset_registry` section under `indexer`. The indexer
-ignores it.
+An older configuration may still have an `asset_registry` section or a
+`protocol_fee_keeper_asset_id` under `indexer`. The indexer ignores both.
 
 > [!TIP]
 > If `sqlx` fails to detect the `DATABASE_URL` environment variable while you are using VS Code with the `rust-analyzer` extension, you may need to restart the extension or the editor itself to refresh the environment context.
@@ -272,22 +270,43 @@ Sync recipe:
 
 ### Lender directory
 
-The directory is a public list of x-only lending keys with display names. An entry proves control of the key, not identity: anyone can pick any name, so clients must not treat a name as verified.
+The directory is a public list of x-only lending keys with display names and the terms each lender accepts. An entry proves control of the key, not identity: anyone can pick any name, so clients must not treat a name as verified.
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `POST` | `/private/directory/challenges` | Issues a challenge: `{ challenge, expires_at }`. |
-| `GET` | `/private/directory` | Entries ordered by `(display_name, pubkey)`. `limit` (default 50, max 100; a larger value returns `400`), `offset` (default 0). Returns `{ items, total, limit, offset }`. |
-| `GET` | `/private/directory/{pubkey}` | One entry, or `404`. |
-| `PUT` | `/private/directory/{pubkey}` | Creates or renames the entry. Body: `{ display_name, challenge, signature }`. Returns the entry. |
+| `GET` | `/private/directory` | Entries with terms, ordered by `(display_name, pubkey)`. `limit` (default 50, max 100; a larger value returns `400`), `offset` (default 0). Returns `{ items, total, limit, offset }`, where `total` counts entries with terms. |
+| `GET` | `/private/directory/{pubkey}` | One entry, with or without terms, or `404`. |
+| `PUT` | `/private/directory/{pubkey}` | Creates or replaces the entry's name and terms. Body: `{ display_name, challenge, terms, signature }`; `terms` is required. Returns the entry. |
 | `DELETE` | `/private/directory/{pubkey}` | Removes the entry. Body: `{ challenge, signature }`. Returns `204`, or `404` if there is no entry. |
 
-Entries are `{ pubkey, display_name, created_at, updated_at }`, with unix-second timestamps. `pubkey`, `challenge` and `signature` are plain hex: 32, 32 and 64 bytes.
+Entries are `{ pubkey, display_name, terms, terms_published_at, created_at, updated_at }`, with unix-second timestamps. `pubkey`, `challenge` and `signature` are plain hex: 32, 32 and 64 bytes. `terms_published_at` is the time of the last put.
+
+Terms are `{ "pairs": [ ... ] }`, 1 to 8 pairs, no two with the same principal and collateral assets. Each pair has exactly these fields:
+
+```json
+{
+  "principal_asset": "<64 hex characters, display order>",
+  "collateral_asset": "<64 hex characters, display order>",
+  "min_apr_bps": 500,
+  "max_principal_per_collateral": "5000000000",
+  "min_term_days": 1,
+  "max_term_days": 30,
+  "min_principal": "1000",
+  "max_principal": "10000000"
+}
+```
+
+`u64` amounts are strings of decimal digits and `u32` fields are JSON numbers. `max_principal_per_collateral` is the most principal base units per 10^8 collateral base units. The assets differ, `max_principal_per_collateral` and `min_principal` are at least 1, `min_principal <= max_principal`, and `1 <= min_term_days <= max_term_days <= 3650`. The indexer stores the terms' encoding and serves them decoded.
+
+An entry written before the directory carried terms has `terms` and `terms_published_at` set to `null`. It is left out of the list but still served by its key, and a put with terms lists it again. Stored terms that fail to decode are logged and served as `null`.
 
 Writes are signed over a server challenge:
 
 - A challenge is 32 random bytes, valid for 300 seconds and consumed by one successful write. A rejected signature does not consume it.
-- The signed message is `tagged_hash("simplicity-lending/directory/v2", action || pubkey || challenge || name_length || display_name || terms)`. `action` is one byte: `1` for put, `2` for delete. `pubkey` is the 32-byte x-only key, `challenge` is 32 bytes, `name_length` is the name's length in bytes as a big-endian `u16`, `display_name` is its UTF-8 bytes (empty for delete), and `terms` is the lender terms' encoding (empty for delete). Puts do not carry terms yet, so a put is signed over empty terms for now. Version 1 signatures are not accepted. The signature is BIP340.
+- The signed message is `tagged_hash("simplicity-lending/directory/v2", action || pubkey || challenge || name_length || display_name || terms)`. `action` is one byte: `1` for put, `2` for delete. `pubkey` is the 32-byte x-only key, `challenge` is 32 bytes, `name_length` is the name's length in bytes as a big-endian `u16`, `display_name` is its UTF-8 bytes (empty for delete), and `terms` is the lender terms' encoding (empty for delete). A put is signed over its name and its terms, so neither can change without the other. Version 1 signatures are not accepted. The signature is BIP340.
 - Display names are 1 to 64 characters, with no leading or trailing whitespace and no control characters.
 
-Errors: `400` for a malformed pubkey, challenge, signature or name; `401` with `invalid signature`, or with `unknown, used or expired challenge`.
+A delete body carries no name and no terms; a `terms` field on a delete is refused.
+
+Errors: `400` for a body that is not JSON, or a malformed pubkey, challenge, signature or name; `422` (`unprocessable_entity`) for missing, malformed or invalid terms or any missing or unknown field, with a message naming the field (such as `terms.pairs[0].min_principal`) or the rule broken; `401` with `invalid signature`, or with `unknown, used or expired challenge`. A refused request does not consume its challenge.
