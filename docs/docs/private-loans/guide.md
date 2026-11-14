@@ -38,8 +38,12 @@ failed scans are shown explicitly; an error is not a zero balance or proof that 
 ## Exchange lending keys
 
 The private page shows **Your lending key** and its fingerprint. The lender can copy the key
-and share it directly, or register a display name in the lender directory. Registration is
-optional: the borrower can paste a key instead.
+and share it directly, or publish a display name and terms in the lender directory. The terms are
+for the pair the app is built for (tL-BTC collateral and TEST principal on testnet): the minimum
+APR, the maximum principal per 1 unit of collateral, the term range in days, and the principal
+range. The name and terms are public, and the app signs them together with the lending key. The
+directory lists only lenders that have published terms, each with when the terms were published.
+Publishing is optional: the borrower can paste a key instead.
 
 Compare the fingerprint through a trusted channel before using a key. Anyone can choose a
 directory name, so a familiar name alone does not authenticate its owner. The lending key is

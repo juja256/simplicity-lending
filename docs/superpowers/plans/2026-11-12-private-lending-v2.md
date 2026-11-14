@@ -648,32 +648,268 @@ The phase review follows (whole branch, Opus).
 
 ## Phase 3: Lender terms in the directory (spec item 9)
 
-Branch `v2/phase-3-lender-terms`.
+Branch `v2/phase-3-lender-terms`, from `v2/main` after phase 2 is merged into it.
 
-- **Decide at phase start** (bring to the user if unsure): the reference price as an integer,
-  proposed as principal base units per 10^8 collateral base units, using the assets' registry
-  precision; and whether a lender may publish several asset pairs in the demo UI (the data allows
-  a list either way).
-- `private-lending-core`: a new module `lender_terms.rs` with `LenderTerms` (principal and
-  collateral asset, minimum APR in bps, reference price, minimum collateral ratio in bps, term
-  range in days, principal range), its versioned encoding, and the arithmetic of item 9: APR from
-  principal, repayment and `days = (expiry height − creation height) / 1440`; the collateral
-  ratio at the reference price; the minimum collateral and minimum repayment for given terms,
-  both rounded up; and `check_proposal`, which returns each term a proposal breaks.
-  `directory.rs` signs the name and the terms together under a new message version.
-- `private-lending-wasm`: bindings for all of the above.
-- Indexer: a migration adding the terms and their publication time to `directory_entries`; the
-  put endpoint verifies the new signature and requires terms; the list returns them.
-- Web: `privateLending/directory.ts` and `hooks/useDirectory.ts` publish and read terms.
-- **Carried from phase 2's review:** remove the indexer's unused
-  `IndexerSettings.protocol_fee_keeper_asset_id` (unknown keys are ignored, so deployed configs
-  still load), `EsploraClient::network()` (no caller) and the cache tests' identity helper
-  `active_utxo`.
-- **Done when:** core unit tests cover the arithmetic at its edges (zero-day term, principal 0,
-  the rounding direction, an overflow at `u64::MAX`), `check_proposal` names every broken term,
-  and a replayed or stale-challenge put is refused; `pnpm parity` checks that TS (through the
-  wasm) and Rust agree on the APR and ratio of the parity fixtures; a new e2e stage `directory`
-  publishes the lender's terms and reads them back as the borrower.
+Decided at phase start (2026-11-14, with the user):
+- No reference price and no collateral ratio: one term, the maximum principal per unit of
+  collateral, stored as `max_principal_per_collateral`, principal base units per 10^8 collateral
+  base units (`COLLATERAL_SCALE`). The lender sets it by hand; there is no oracle.
+- One asset pair in the demo (tL-BTC collateral, TEST principal on testnet), read from the web
+  app's build configuration instead of code. The encoding holds a list of 1 to 8 pairs, so more
+  pairs need no new version; the indexer stores whatever pair a lender publishes.
+- The APR check compares repayments, not rounded APRs: a proposal is below the minimum APR when
+  its repayment is below `min_repayment`, rounded up. Terms are in blocks underneath: a day is
+  1440 blocks, a year 525,600.
+
+Tasks 1 to 3 are Rust and wasm, 4 the indexer, 5 and 6 the web, 7 the phase's checks. The
+`private_lending` contract and the offer terms (`terms.rs`) do not change.
+
+### Phase 3 review focus
+
+1. A proposal exactly at a minimum (the least collateral, the least repayment, the shortest or
+   longest term): it is within the terms, not flagged. Task 1's tests pin each boundary.
+2. Amounts near `u64::MAX` in a proposal built outside the app: the arithmetic returns `None`
+   or a breach, never wraps or panics. Task 1 tests it; task 3 checks the wasm returns an error.
+3. A lender who registered before this phase (an entry without terms): hidden from the list,
+   still readable by its key, and able to publish terms with a fresh put. Task 4 tests it.
+4. A name or terms changed after signing (one byte of either): the put is refused. Task 2's
+   known-answer test and task 4's tamper test pin it.
+5. A build with the pair settings missing or malformed: the app falls back to the network's
+   defaults, or fails at startup with a message naming the setting, never runs with `NaN`
+   decimals. Task 5 checks it.
+
+### Task 1: `lender_terms` in the core
+
+**Files:**
+- Create: `crates/private-lending-core/src/lender_terms.rs`
+- Modify: `crates/private-lending-core/src/lib.rs` (module and re-exports)
+- Create: `web/scripts/fixtures/lender-terms-parity.json` (written by the test below)
+
+**Interfaces (produces):**
+- Constants `LENDER_TERMS_VERSION: u8 = 1`, `MAX_PAIRS: usize = 8`, `BLOCKS_PER_DAY: u32 = 1440`,
+  `BLOCKS_PER_YEAR: u64 = 525_600`, `COLLATERAL_SCALE: u64 = 100_000_000`.
+- `struct PairTerms { principal_asset: AssetId, collateral_asset: AssetId, min_apr_bps: u32,
+  max_principal_per_collateral: u64, min_term_days: u32, max_term_days: u32, min_principal: u64,
+  max_principal: u64 }` and `struct LenderTerms { pairs: Vec<PairTerms> }`.
+- `LenderTerms::encode(&self) -> Vec<u8>` and `LenderTerms::decode(&[u8]) -> Result<LenderTerms,
+  LenderTermsError>`: big-endian, version (1) ‖ pair count (1) ‖ per pair, in the struct's field
+  order, 32 + 32 + 4 + 8 + 4 + 4 + 8 + 8 = 100 bytes; asset ids in their internal byte order, as
+  in `terms.rs`. `decode` rejects an unknown version, a wrong length, 0 or more than 8 pairs, two
+  pairs with the same asset pair, and any pair `validate` rejects.
+- `PairTerms::validate(&self) -> Result<(), LenderTermsError>`: the assets differ;
+  `max_principal_per_collateral ≥ 1`; `1 ≤ min_principal ≤ max_principal`;
+  `1 ≤ min_term_days ≤ max_term_days ≤ 3650`.
+- `min_repayment(principal: u64, min_apr_bps: u32, term_blocks: u32) -> Option<u64>`:
+  `principal + ceil(principal · min_apr_bps · term_blocks / (10_000 · BLOCKS_PER_YEAR))`, in
+  `u128`, `None` above `u64::MAX`.
+- `min_collateral(principal: u64, max_principal_per_collateral: u64) -> Option<u64>`:
+  `ceil(principal · COLLATERAL_SCALE / max_principal_per_collateral)`, `None` for a zero divisor
+  or above `u64::MAX`.
+- `apr_bps(principal: u64, repayment: u64, term_blocks: u32) -> Option<u64>`:
+  `floor((repayment − principal) · 10_000 · BLOCKS_PER_YEAR / (principal · term_blocks))`,
+  `None` if principal or term is 0 or the repayment is below the principal. For display only.
+- `principal_per_collateral(principal: u64, collateral: u64) -> Option<u64>`:
+  `floor(principal · COLLATERAL_SCALE / collateral)`, `None` for zero collateral or overflow. For
+  display only.
+- `struct Proposal { principal_asset: AssetId, collateral_asset: AssetId, principal_amount: u64,
+  collateral_amount: u64, repayment_amount: u64, term_blocks: u32 }`; `term_blocks` is the expiry
+  height minus the creation height (the tip for an unconfirmed creation), computed by the caller.
+- `enum TermBreach { UnsupportedPair, PrincipalBelowRange, PrincipalAboveRange, TermBelowRange,
+  TermAboveRange, AprBelowMinimum, CollateralBelowMinimum }`.
+- `LenderTerms::check_proposal(&self, proposal: &Proposal) -> Vec<TermBreach>`: `[UnsupportedPair]`
+  when no pair matches the assets; otherwise every breach of the matching pair, in the enum's
+  order. A term is in range when `min_term_days · 1440 ≤ term_blocks ≤ max_term_days · 1440`. If
+  `min_repayment` or `min_collateral` is `None`, the proposal breaks that term.
+
+- [ ] **Step 1: Write the failing tests** in `lender_terms.rs`:
+  `encode_decode_round_trip` (one and eight pairs); `decode_rejects_bad_input` (version 2, a
+  truncated pair, a trailing byte, 0 and 9 pairs, a duplicate pair, each `validate` failure);
+  `encoding_known_answer` (the hex of one fixed pair, frozen); `min_repayment_rounds_up` (principal
+  1, 1 bps, 1 block gives 2; an exact case gives no extra unit); `min_collateral_rounds_up`;
+  `arithmetic_at_the_edges` (principal 0, term 0, repayment below principal, `u64::MAX` principal
+  in each function gives `None`, no panic); `check_proposal_names_every_breach` (one proposal
+  breaking all six pair terms returns all six in order; a different asset pair returns
+  `[UnsupportedPair]`); `check_proposal_accepts_the_boundaries` (principal at min and max, term
+  at exactly `min_term_days · 1440` and `max_term_days · 1440` blocks, repayment at exactly
+  `min_repayment`, collateral at exactly `min_collateral`: no breach; one unit less of
+  repayment or collateral: that breach only); `parity_vectors` (writes
+  `web/scripts/fixtures/lender-terms-parity.json` when `WRITE_LENDER_TERMS_FIXTURE=1`, else
+  compares with it): about ten vectors of inputs with the outputs of `min_repayment`,
+  `min_collateral`, `apr_bps`, `principal_per_collateral` and `check_proposal`, amounts as
+  decimal strings, breaches as their names.
+- [ ] **Step 2: Run them to see them fail.** Run: `cargo test -p private-lending-core lender_terms`
+  Expected: compile errors, the module does not exist.
+- [ ] **Step 3: Implement** the interfaces above, then write the fixture with
+  `WRITE_LENDER_TERMS_FIXTURE=1 cargo test -p private-lending-core parity_vectors`.
+- [ ] **Step 4: Check.** Run: `cargo test -p private-lending-core && cargo clippy -p private-lending-core --all-targets -- -D warnings`
+  Expected: pass.
+- [ ] **Step 5: Commit** `core: lender terms, their encoding and the proposal check`
+
+### Task 2: The directory signs the name and the terms (version 2)
+
+**Files:** Modify `crates/private-lending-core/src/directory.rs`.
+
+**Interfaces:**
+- Consumes: `LenderTerms::encode` (task 1).
+- Produces: `DIRECTORY_TAG = "simplicity-lending/directory/v2"`; `directory_message(action,
+  pubkey, challenge, display_name: &str, terms: Option<&LenderTerms>) -> [u8; 32]` over `action ‖
+  pubkey ‖ challenge ‖ name length (u16 BE) ‖ name (UTF-8) ‖ encoded terms (empty when None)`;
+  `sign_directory_action` and `verify_directory_action` take the same extra `terms` argument. A
+  put signs `Some(terms)`; a delete signs an empty name and `None`. Version 1 is no longer
+  accepted.
+
+- [ ] **Step 1: Write the failing tests:** the existing signature test with terms (a changed
+  terms byte, a changed name, the v1 message for the same inputs: each fails to verify); a new
+  frozen `directory_message_known_answer` for a put with one fixed pair and for a delete.
+- [ ] **Step 2: Run to see them fail.** Run: `cargo test -p private-lending-core directory`
+  Expected: compile errors on the new argument.
+- [ ] **Step 3: Implement.** Update the callers in `crates/private-lending-wasm/src/directory.rs`
+  and `crates/indexer/src/api/directory/handlers.rs` to pass `None` for now, so the workspace
+  builds; tasks 3 and 4 wire the terms.
+- [ ] **Step 4: Check.** Run: `cargo test -p private-lending-core && SQLX_OFFLINE=true cargo build --workspace --all-targets`
+  Expected: pass.
+- [ ] **Step 5: Commit** `core: the directory signs the name and the terms together (v2)`
+
+### Task 3: Wasm bindings and the parity check
+
+**Files:** Modify `crates/private-lending-wasm/src/directory.rs`, create
+`crates/private-lending-wasm/src/lender_terms.rs`, modify `crates/private-lending-wasm/src/lib.rs`,
+`web/scripts/check-private-lending-parity.ts`; rebuild `web/src/wasm/private-lending/`.
+
+**Interfaces (produces, for tasks 6 and 7):** following the crate's JSON convention
+(`serde_json`, amounts as decimal strings, asset ids as display hex):
+- `encodeLenderTerms(termsJson: string): string` (hex) and `decodeLenderTerms(hex: string):
+  string` (JSON); a bad input is a `bad-input:` error naming the field.
+- `checkProposal(termsJson: string, proposalJson: string): string[]`, the breach names.
+- `minRepayment(principal: bigint, minAprBps: number, termBlocks: number): bigint`,
+  `minCollateral(principal: bigint, maxPrincipalPerCollateral: bigint): bigint`, `aprBps(principal:
+  bigint, repayment: bigint, termBlocks: number): bigint`,
+  `principalPerCollateral(principal: bigint, collateral: bigint): bigint`; a `None` from the core
+  is a `bad-input:` error.
+- `signDirectoryAction(key, action, challengeHex, displayName, termsJson: string | undefined)`:
+  terms required for put, refused for delete.
+
+- [ ] **Step 1: Write the failing tests:** wasm unit tests for the round trip, a `u64::MAX`
+  principal giving `bad-input:`, and a put signature verifying against the core with the same
+  terms; in the parity script, a section that runs every vector of
+  `web/scripts/fixtures/lender-terms-parity.json` through the wasm and compares.
+- [ ] **Step 2: Run to see them fail.** Run: `cargo test -p private-lending-wasm` and
+  `cd web && pnpm parity` Expected: the new tests and the parity section fail.
+- [ ] **Step 3: Implement**, then `cd web && pnpm build:wasm`.
+- [ ] **Step 4: Check.** Run: `cargo test -p private-lending-wasm && cd web && pnpm parity && pnpm build`
+  Expected: pass, the parity output names the lender-terms vectors.
+- [ ] **Step 5: Commit** `wasm: lender terms, the proposal check and the v2 directory signature`
+
+### Task 4: The indexer stores and serves the terms
+
+**Files:**
+- Create: `crates/indexer/migrations/20261114120000_directory_terms.sql`
+- Modify: `crates/indexer/src/api/directory/{db,dto,handlers}.rs`,
+  `crates/indexer/src/api/openapi/*`, `crates/indexer/tests/directory_api.rs`, the root `.sqlx/`
+- Modify (carried from phase 2): `crates/indexer/src/configuration.rs`,
+  `crates/indexer/configuration/base.yaml`, `deployment/configs/backend/base.yaml.template` (drop
+  `protocol_fee_keeper_asset_id`), `crates/indexer/src/esplora_client.rs` (drop `network()`),
+  `crates/indexer/src/indexer/cache.rs` (drop the `active_utxo` helper in its tests)
+
+**Interfaces:**
+- Migration: `ALTER TABLE directory_entries ADD COLUMN terms BYTEA, ADD COLUMN
+  terms_published_at timestamptz;` (null for entries from before this phase).
+- `PutDirectoryEntry` gains `terms: LenderTermsDto` (required); `DirectoryEntry` gains `terms:
+  Option<LenderTermsDto>` and `terms_published_at: Option<i64>`. `LenderTermsDto { pairs:
+  Vec<PairTermsDto> }`, with the fields of `PairTerms`, amounts as decimal strings, asset ids as
+  display hex. The server converts the DTO to `LenderTerms`, validates it (`validate` and the
+  `decode` rules), verifies the v2 signature over the name and the terms, and stores the encoded
+  bytes with `terms_published_at = now()`.
+- The list returns only entries with terms; `GET /private/directory/{pubkey}` returns an entry
+  with or without terms.
+
+- [ ] **Step 1: Write the failing tests** in `tests/directory_api.rs`: a put with terms then a
+  list returns them and the publication time; a put without terms is `422`; invalid terms (min
+  above max) are `422`; a signature over different terms is `401`; a replayed challenge and an
+  expired one are refused; an entry inserted without terms (as from before this phase) is
+  missing from the list, present by key, and a new put with terms lists it.
+- [ ] **Step 2: Run to see them fail.** Run: `cargo test -p lending-indexer --test directory_api`
+  Expected: FAIL.
+- [ ] **Step 3: Implement**, migrate the dev database, and regenerate `.sqlx` with
+  `cargo sqlx prepare --workspace -- --all-targets`. Do the three carried removals.
+- [ ] **Step 4: Check.** Run: `cargo test -p lending-indexer && cargo sqlx prepare --workspace --check -- --all-targets && cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  Expected: pass.
+- [ ] **Step 5: Commit** `indexer: the directory stores and serves lender terms`
+
+### Task 5: The asset pair from the build configuration
+
+**Files:** Modify `web/src/constants/network-config.ts`, `web/src/vite-env.d.ts`,
+`web/.env.example`, `web/.env.liquidtestnet`, `web/README.md`; create a check in
+`web/scripts/check-network-config.ts`.
+
+**Interfaces:**
+- Settings `VITE_COLLATERAL_ASSET_ID`, `VITE_COLLATERAL_ASSET_DECIMALS`,
+  `VITE_COLLATERAL_ASSET_SYMBOL`, and the same three for `PRINCIPAL`. Each unset setting takes
+  the network's current default, so today's builds do not change. A malformed one (an id not 64
+  hex characters, decimals not an integer from 0 to 18, an empty symbol) throws at startup with
+  the setting's name. The icon follows the symbol when one is known, else a generic asset icon.
+- `resolveNetworkConfig(network, env): NetworkConfig`, a pure function the module calls with
+  `import.meta.env`, so the check script can call it with plain objects. `protocolFeeAsset` goes
+  if nothing uses it after phase 2; otherwise it keeps following the principal asset.
+
+- [ ] **Step 1: Write the failing check** `check-network-config.ts`: defaults with an empty env
+  equal today's testnet values; each override applies; each malformed setting throws naming it.
+- [ ] **Step 2: Run to see it fail.** Run: `cd web && pnpm tsx --tsconfig tsconfig.app.json scripts/check-network-config.ts`
+  Expected: FAIL, `resolveNetworkConfig` does not exist.
+- [ ] **Step 3: Implement**; add a `check:config` script to `web/package.json`; document the
+  settings in `web/README.md` and `web/.env.example`.
+- [ ] **Step 4: Check.** Run: `cd web && pnpm check:config && pnpm build && pnpm lint && pnpm parity`
+  Expected: pass.
+- [ ] **Step 5: Commit** `web: the asset pair comes from the build configuration`
+
+### Task 6: Publishing and reading terms in the web app, and the e2e `directory` stage
+
+**Files:** Modify `web/src/privateLending/directory.ts`,
+`web/src/privateLending/hooks/useDirectory.ts`, `web/src/api/indexer/private.ts`,
+`web/src/pages/Private/components/{DirectorySection,BorrowSection}.tsx`,
+`web/scripts/e2e-private-lending.ts`, `web/scripts/e2e/env.ts`, `web/README.md`; create
+`web/src/privateLending/lenderTerms.ts`.
+
+**Interfaces:**
+- `registerInDirectory(deps, key, displayName, terms: LenderTermsInput, apiBaseUrl)`;
+  `LenderTermsInput` is the JSON shape of task 3.
+- `lenderTerms.ts`: `maxPrincipalPerCollateralFromDisplay(display: string, principalDecimals,
+  collateralDecimals): bigint` and its inverse for display, converting "principal per 1 whole
+  collateral coin" to base units per 10^8 collateral base units (exact, `bigint`, rejecting more
+  decimals than the asset has); checked in the parity script.
+- `useDirectory` returns each entry's terms and `terms_published_at`.
+
+- [ ] **Step 1: Write the failing e2e stage** `directory` (no chain spend, `STAGE_NEEDS` empty):
+  the lender publishes terms for the configured pair (minimum APR, maximum principal per
+  collateral, term range and principal range that the e2e's own `create` proposal satisfies);
+  the borrower lists the directory, finds the lender's entry and terms, and `checkProposal` on
+  the e2e's proposal returns no breach; the same proposal with collateral one unit below
+  `minCollateral` returns `["CollateralBelowMinimum"]`. Add the conversion checks to the parity
+  script.
+- [ ] **Step 2: Run to see it fail.** Run: `cd web && pnpm e2e:private directory` (a local
+  indexer on the task 4 schema, as `web/README.md` describes) Expected: FAIL.
+- [ ] **Step 3: Implement.** The Private page's directory section gets a minimal terms form for
+  the configured pair (phase 4 replaces it), and the borrower's lender list shows each lender's
+  terms and when they were published.
+- [ ] **Step 4: Check.** Run: `cd web && pnpm build && pnpm lint && pnpm parity && pnpm e2e:private directory`
+  Expected: pass.
+- [ ] **Step 5: Commit** `web: lenders publish terms, borrowers read them`
+
+### Task 7: Verify the phase
+
+- [ ] **Step 1:** `cargo test --workspace` without the contracts' regtest tests, then
+  `cd crates/contracts && simplex test`, and `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
+- [ ] **Step 2:** Every e2e stage from an empty state with a local indexer on a fresh database,
+  `directory` included (fund the wallets from the testnet faucet if `wallets` reports a
+  shortfall).
+- [ ] **Step 3:** The migration on a copy of the dev database with a pre-phase-3 entry: the
+  entry survives with null terms.
+- [ ] **Step 4:** `docker compose build` and the docs build. Commit `docs: v2 phase 3 verified`
+  with the results.
+
+The phase review follows (whole branch, Opus).
+
+---
 
 ## Phase 4: The lender console and the borrower app (spec item 10; the demo)
 
@@ -707,6 +943,20 @@ Branch `v2/phase-4-two-areas`.
     nginx `/.well-known/liquid-asset-proof-` block (its endpoint is gone), redirects for the old
     docs URLs (`/docs/borrower/*`, `/docs/lender/*`, `/docs/protocol/*`), and the unwrapped prose
     in `docs/docs/{developers,contracts}` and `simplicity.md`.
+- **Carried from phase 3's review:**
+  - Readers cannot check what the indexer serves. Store the put's challenge and signature with
+    the entry, serve them, and verify them in the browser (a wasm `verifyDirectoryAction`) before
+    showing a lender or building a proposal from its terms; run served terms through
+    `encodeLenderTerms` (`validate`) too. This proves the key signed exactly that name and those
+    terms; freshness and completeness still rest on the indexer.
+  - One rule for how a proposal's `term_blocks` is measured, shared by the borrower's form and
+    the console's check: the e2e's real offers count the expiry from the build tip and come out
+    under `min_term_days · 1440`, so `checkProposal` flags them as too short.
+  - The lender's own terms are not taken from the served list: keep them locally, or verify them
+    as above, before pre-filling the edit form; find the lender's own entry by key
+    (`fetchDirectoryEntry`), so a lender listed before phase 3 (no terms) does not look unlisted.
+  - The APR error message names the APR, not "an amount"; an entry whose terms could not be read
+    says so instead of "No terms published."
 - **Done when:** `pnpm build` and `pnpm lint` pass; a scripted testnet demo runs: the lender
   publishes terms, the borrower's form refuses a lower APR and less collateral, an e2e-built
   proposal outside the terms shows the badge naming the broken terms, the lender accepts, the

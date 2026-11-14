@@ -1,17 +1,34 @@
 // Proves that the browser (LWK + the private-lending wasm) derives the same offer addresses
 // as the Rust code. Run it with `pnpm parity`; it must pass before browser addresses are relied on.
-// It also checks, offline, the rules of the app's lending-key holder (`checkLendingKeyHolder`,
+// It also checks, offline, the lender terms arithmetic of the wasm against the core's vectors
+// (`checkLenderTerms`), the app's conversion of typed terms (`checkTermsConversion`), the rules of
+// the app's lending-key holder (`checkLendingKeyHolder`,
 // `checkSyncInSession`) and the PSET builder's `'none'` blinding mode
 // (`checkPsetBuilderNoneBlinding`).
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isDeepStrictEqual } from 'node:util'
 
 import * as lwk from 'lwk_wasm'
 
+import { resolveNetworkConfig } from '@/constants/resolve-network-config'
 import { buildPset, type PsetInputSpec } from '@/lwk/psetBuilder'
 import { createWaterfallsRecipientResolver } from '@/lwk/waterfallsRecipient'
 import { inspectPset } from '@/privateLending/inspectPset'
+import {
+  EMPTY_PAIR_TERMS_FORM,
+  lenderTermsFromForm,
+  maxPrincipalPerCollateralFromDisplay,
+  maxPrincipalPerCollateralToDisplay,
+  otherPairs,
+  type PairTermsForm,
+  pairTermsFromForm,
+  pairTermsToForm,
+  U64_MAX,
+  unitsFromDecimal,
+  unitsToDecimal,
+} from '@/privateLending/lenderTerms'
 import { createLendingKeyHolder, syncInSession } from '@/privateLending/lendingKeyHolder'
 import * as wasm from '@/wasm/private-lending/private_lending_wasm'
 
@@ -51,6 +68,42 @@ interface Fixture {
 const fixture = JSON.parse(
   fs.readFileSync(path.join(here, 'fixtures/private-lending-parity.json'), 'utf-8'),
 ) as Fixture
+
+// Written by the `parity_vectors` test of `crates/private-lending-core/src/lender_terms.rs`, in the
+// JSON the wasm takes: u64 amounts as decimal strings, u32 fields as numbers.
+interface LenderTermsPair {
+  principal_asset: string
+  collateral_asset: string
+  min_apr_bps: number
+  max_principal_per_collateral: string
+  min_term_days: number
+  max_term_days: number
+  min_principal: string
+  max_principal: string
+}
+
+interface LenderTermsVector {
+  name: string
+  terms: { pairs: LenderTermsPair[] }
+  proposal: {
+    principal_asset: string
+    collateral_asset: string
+    principal_amount: string
+    collateral_amount: string
+    repayment_amount: string
+    term_blocks: number
+  }
+  // null is the core's None
+  min_repayment: string | null
+  min_collateral: string | null
+  apr_bps: string | null
+  principal_per_collateral: string | null
+  check_proposal: string[]
+}
+
+const lenderTermsFixture = JSON.parse(
+  fs.readFileSync(path.join(here, 'fixtures/lender-terms-parity.json'), 'utf-8'),
+) as { vectors: LenderTermsVector[] }
 
 function readSimf(name: string): string {
   // Trimmed, as simplicitySourcesPlugin does.
@@ -194,12 +247,307 @@ async function main(): Promise<void> {
     !verifyOfferAddresses(tamperedScripts, creationTx),
   )
 
+  checkLenderTerms()
+  checkTermsConversion()
   await checkLendingKeyHolder()
   await checkSyncInSession()
   await checkWaterfallsRecipient()
   checkPsetBuilderNoneBlinding()
 
   report('private lending parity: ok')
+}
+
+/**
+ * Every vector of the core's lender terms fixture, through the wasm: the terms survive an encoding
+ * round trip, the proposal check names the same breaches, and the four amounts match. As the
+ * fixture's description says, `minRepayment` and `minCollateral` take the rates of the pair with
+ * the proposal's assets, or of the first pair when none has them. A `null` amount is the core's
+ * `None`, which the wasm throws as a `bad-input:` error.
+ */
+function checkLenderTerms(): void {
+  const amount = (compute: () => bigint): string | null => {
+    try {
+      return compute().toString()
+    } catch (error) {
+      if (typeof error === 'string' && error.startsWith('bad-input:')) return null
+      throw error
+    }
+  }
+  // The JSON with its keys sorted, so the decoded terms compare whatever the key order.
+  const canonical = (value: unknown): string =>
+    JSON.stringify(value, (_key, inner: unknown) =>
+      inner !== null && typeof inner === 'object' && !Array.isArray(inner)
+        ? Object.fromEntries(Object.entries(inner).sort(([a], [b]) => (a < b ? -1 : 1)))
+        : inner,
+    )
+
+  const { vectors } = lenderTermsFixture
+  check('lender terms: the fixture has vectors', vectors.length > 0)
+  for (const vector of vectors) {
+    const name = (what: string) => `lender terms "${vector.name}": ${what}`
+    const terms = JSON.stringify(vector.terms)
+    const { proposal } = vector
+
+    const decoded = wasm.decodeLenderTerms(wasm.encodeLenderTerms(terms))
+    check(
+      name('encoding round trip'),
+      canonical(JSON.parse(decoded)) === canonical(vector.terms),
+      decoded,
+    )
+    const breaches = wasm.checkProposal(terms, JSON.stringify(proposal))
+    check(
+      name('proposal check'),
+      JSON.stringify(breaches) === JSON.stringify(vector.check_proposal),
+      `got ${JSON.stringify(breaches)}, expected ${JSON.stringify(vector.check_proposal)}`,
+    )
+
+    const rates =
+      vector.terms.pairs.find(
+        pair =>
+          pair.principal_asset === proposal.principal_asset &&
+          pair.collateral_asset === proposal.collateral_asset,
+      ) ?? vector.terms.pairs[0]
+    const principal = BigInt(proposal.principal_amount)
+    const amounts = {
+      min_repayment: amount(() =>
+        wasm.minRepayment(principal, rates.min_apr_bps, proposal.term_blocks),
+      ),
+      min_collateral: amount(() =>
+        wasm.minCollateral(principal, BigInt(rates.max_principal_per_collateral)),
+      ),
+      apr_bps: amount(() =>
+        wasm.aprBps(principal, BigInt(proposal.repayment_amount), proposal.term_blocks),
+      ),
+      principal_per_collateral: amount(() =>
+        wasm.principalPerCollateral(principal, BigInt(proposal.collateral_amount)),
+      ),
+    }
+    for (const [field, got] of Object.entries(amounts)) {
+      const expected = vector[field as keyof typeof amounts]
+      check(name(field), got === expected, `got ${got}, expected ${expected}`)
+    }
+  }
+}
+
+/** Whether `compute` throws a `RangeError`, as the terms conversion does on what it refuses. */
+function refuses(compute: () => unknown): boolean {
+  try {
+    compute()
+    return false
+  } catch (error) {
+    if (error instanceof RangeError) return true
+    throw error
+  }
+}
+
+/**
+ * The conversion of what a lender types into terms (`src/privateLending/lenderTerms.ts`): the rate
+ * per whole collateral coin to principal base units per 10^8 collateral base units and back,
+ * exactly, against the wasm's arithmetic; and the terms form, whose terms the wasm accepts.
+ */
+function checkTermsConversion(): void {
+  const fromDisplay = maxPrincipalPerCollateralFromDisplay
+  const toDisplay = maxPrincipalPerCollateralToDisplay
+
+  // [display, principal decimals, collateral decimals, base units per 10^8, or null if refused]
+  const vectors: [string, number, number, bigint | null][] = [
+    ['1', 3, 8, 1_000n],
+    ['10000', 3, 8, 10_000_000n],
+    ['0.001', 3, 8, 1n],
+    [' 2.5 ', 3, 8, 2_500n],
+    ['0', 3, 8, 0n],
+    ['1', 8, 8, 100_000_000n],
+    ['1', 2, 2, 100_000_000n],
+    ['0.01', 2, 2, 1_000_000n],
+    ['100', 8, 18, 1n],
+    ['18446744073709551615', 0, 8, U64_MAX],
+    ['184467440737095.51615', 5, 8, U64_MAX],
+    // more decimals than the principal asset has
+    ['0.0001', 3, 8, null],
+    ['1.5', 0, 8, null],
+    // not a whole number of base units per 10^8 collateral base units
+    ['1', 8, 18, null],
+    // above u64::MAX
+    ['18446744073709551616', 0, 8, null],
+    ['18446744073709552', 3, 8, null],
+    // malformed
+    ...['', ' ', '-1', '+1', '1e3', '.5', '5.', '0x10', '1,000', 'NaN', 'Infinity', '1 000'].map(
+      (display): [string, number, number, null] => [display, 3, 8, null],
+    ),
+  ]
+  for (const [display, principal, collateral, expected] of vectors) {
+    const decimals = `${principal}/${collateral} decimals`
+    const what = `terms conversion: ${JSON.stringify(display)} (${decimals})`
+    if (expected === null) {
+      check(
+        `${what} is refused`,
+        refuses(() => fromDisplay(display, principal, collateral)),
+      )
+    } else {
+      const got = fromDisplay(display, principal, collateral)
+      check(what, got === expected, `got ${got}, expected ${expected}`)
+    }
+  }
+  for (const decimals of [Number.NaN, -1, 19, 1.5]) {
+    check(
+      `terms conversion: ${decimals} decimals are refused`,
+      refuses(() => fromDisplay('1', decimals, 8)) &&
+        refuses(() => fromDisplay('1', 3, decimals)) &&
+        refuses(() => toDisplay(1n, decimals, 8)) &&
+        refuses(() => unitsFromDecimal('1', decimals)),
+    )
+  }
+
+  // The inverse: exact, and back to the same value whenever the principal's decimals suffice.
+  equal('terms conversion: 1000 back', toDisplay(1_000n, 3, 8), '1')
+  equal('terms conversion: 1 back', toDisplay(1n, 3, 8), '0.001')
+  equal('terms conversion: u64::MAX back', toDisplay(U64_MAX, 3, 8), '18446744073709551.615')
+  equal('terms conversion: 1 back, 2/2 decimals', toDisplay(1n, 2, 2), '0.00000001')
+  equal('terms conversion: 1 back, 8/18 decimals', toDisplay(1n, 8, 18), '100')
+  for (const [principal, collateral] of [
+    [3, 8],
+    [8, 8],
+    [0, 8],
+    [2, 2],
+    [8, 18],
+  ]) {
+    for (const value of [0n, 1n, 999n, 1_000n, 10_000_000n, 123_456_789n, U64_MAX]) {
+      const display = toDisplay(value, principal, collateral)
+      const decimals = display.split('.')[1]?.length ?? 0
+      check(
+        `terms conversion: ${value} round trip (${principal}/${collateral} decimals)`,
+        decimals <= principal
+          ? fromDisplay(display, principal, collateral) === value
+          : refuses(() => fromDisplay(display, principal, collateral)),
+        display,
+      )
+    }
+  }
+
+  // Against the wasm: 1 TEST for 0.0002 tL-BTC is 5000 TEST per tL-BTC, which needs 0.0002 tL-BTC.
+  const rate = wasm.principalPerCollateral(1_000n, 20_000n)
+  equal('terms conversion: the wasm rate shown', toDisplay(rate, 3, 8), '5000')
+  equal(
+    'terms conversion: the least collateral at the typed rate',
+    wasm.minCollateral(1_000n, fromDisplay('5000', 3, 8)).toString(),
+    '20000',
+  )
+
+  // Whole coins, as the form's principal range takes them.
+  equal('terms conversion: units', unitsFromDecimal('0.1', 3).toString(), '100')
+  equal('terms conversion: units back', unitsToDecimal(100n, 3), '0.1')
+  check(
+    'terms conversion: units refuse 4 decimals of 3',
+    refuses(() => unitsFromDecimal('0.0001', 3)),
+  )
+  check(
+    'terms conversion: units refuse -1',
+    refuses(() => unitsFromDecimal('-1', 3)),
+  )
+  check(
+    'terms conversion: units refuse u64::MAX + 1',
+    refuses(() => unitsFromDecimal('18446744073709551616', 0)),
+  )
+
+  // The form, for the testnet pair: its terms are terms the wasm takes, and they read back.
+  const { collateralAsset, principalAsset } = resolveNetworkConfig('liquidtestnet', {})
+  const pair = { collateral: collateralAsset, principal: principalAsset }
+  const form: PairTermsForm = {
+    minAprPercent: '5.25',
+    maxPrincipalPerCollateral: '50000',
+    minTermDays: '1',
+    maxTermDays: '3650',
+    minPrincipal: '0.001',
+    maxPrincipal: '18446744073709551.615',
+  }
+  const parsed = pairTermsFromForm(form, pair)
+  check(
+    'terms form: a valid form gives terms',
+    parsed.terms !== null,
+    JSON.stringify(parsed.errors),
+  )
+  if (parsed.terms !== null) {
+    check(
+      'terms form: the terms',
+      JSON.stringify(parsed.terms) ===
+        JSON.stringify({
+          principal_asset: principalAsset.id,
+          collateral_asset: collateralAsset.id,
+          min_apr_bps: 525,
+          max_principal_per_collateral: '50000000',
+          min_term_days: 1,
+          max_term_days: 3650,
+          min_principal: '1',
+          max_principal: U64_MAX.toString(),
+        }),
+      JSON.stringify(parsed.terms),
+    )
+    const terms = { pairs: [parsed.terms] }
+    const decoded = wasm.decodeLenderTerms(wasm.encodeLenderTerms(JSON.stringify(terms)))
+    check(
+      'terms form: the wasm takes the terms',
+      isDeepStrictEqual(JSON.parse(decoded), terms),
+      decoded,
+    )
+    check(
+      'terms form: the terms read back into the form',
+      JSON.stringify(pairTermsToForm(parsed.terms, pair)) === JSON.stringify(form),
+      JSON.stringify(pairTermsToForm(parsed.terms, pair)),
+    )
+  }
+  // [field, typed, rest of the form]: each is refused with an error on that field.
+  const refusals: [keyof PairTermsForm, string, Partial<PairTermsForm>][] = [
+    ['maxTermDays', '3651', {}],
+    ['minTermDays', '0', {}],
+    ['minTermDays', '1.5', {}],
+    ['maxTermDays', '6', { minTermDays: '7' }],
+    ['minPrincipal', '0.0001', {}],
+    ['minPrincipal', '0', {}],
+    ['maxPrincipal', '1', { minPrincipal: '2' }],
+    ['maxPrincipal', '18446744073709551.616', {}],
+    ['minAprPercent', '1.234', {}],
+    ['minAprPercent', '42949672.96', {}],
+    ['minAprPercent', '-1', {}],
+    ['maxPrincipalPerCollateral', '0', {}],
+    ['maxPrincipalPerCollateral', '0.0001', {}],
+  ]
+  for (const [field, typed, rest] of refusals) {
+    const result = pairTermsFromForm({ ...form, ...rest, [field]: typed }, pair)
+    check(
+      `terms form: ${field} ${JSON.stringify(typed)} is refused`,
+      result.terms === null && typeof result.errors[field] === 'string',
+      JSON.stringify(result),
+    )
+  }
+  // A served entry with a pair for other assets (as a hostile indexer could add): the lender
+  // publishes, and so signs, the form's pair alone.
+  if (parsed.terms !== null) {
+    const injected = { ...parsed.terms, principal_asset: 'ab'.repeat(32) }
+    const served = { pairs: [parsed.terms, injected] }
+    const published = lenderTermsFromForm(form, pair)
+    check(
+      "terms form: the published terms are the form's pair alone",
+      isDeepStrictEqual(published.terms, { pairs: [parsed.terms] }),
+      JSON.stringify(published),
+    )
+    check(
+      'terms form: a served pair for other assets is found, to be dropped',
+      isDeepStrictEqual(otherPairs(served, pair), [injected]) &&
+        otherPairs({ pairs: [parsed.terms] }, pair).length === 0 &&
+        otherPairs(null, pair).length === 0,
+    )
+    check(
+      'terms form: an invalid form publishes nothing',
+      lenderTermsFromForm({ ...form, maxTermDays: '3651' }, pair).terms === null,
+    )
+  }
+  const largest = pairTermsFromForm({ ...form, minAprPercent: '42949672.95' }, pair)
+  check('terms form: the largest APR is u32::MAX bps', largest.terms?.min_apr_bps === 2 ** 32 - 1)
+  const empty = pairTermsFromForm(EMPTY_PAIR_TERMS_FORM, pair)
+  check(
+    'terms form: an empty form has an error on every field',
+    empty.terms === null && Object.keys(empty.errors).length === 6,
+  )
 }
 
 /**

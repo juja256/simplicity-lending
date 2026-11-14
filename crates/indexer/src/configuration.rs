@@ -1,4 +1,4 @@
-use simplex::{provider::SimplicityNetwork, simplicityhl::elements::AssetId};
+use simplex::provider::SimplicityNetwork;
 
 #[derive(serde::Deserialize)]
 pub struct Settings {
@@ -41,7 +41,6 @@ pub struct EsploraSettings {
 
 #[derive(serde::Deserialize, Clone)]
 pub struct IndexerSettings {
-    pub protocol_fee_keeper_asset_id: AssetId,
     pub interval: u64,
     pub last_indexed_height: u64,
 }
@@ -204,12 +203,13 @@ mod tests {
         assert!(err.contains("not a supported network"));
     }
 
-    /// A deployed config written from the old template still has an `asset_registry` section,
-    /// which the indexer no longer reads. It must still load.
+    /// A deployed config written from an old template still has an `asset_registry` section and a
+    /// `protocol_fee_keeper_asset_id`, which the indexer no longer reads. It must still load.
     #[test]
-    fn settings_load_with_a_stale_asset_registry_section() {
+    fn settings_load_with_stale_indexer_keys() {
         let stale_section = r#"
 indexer:
+  protocol_fee_keeper_asset_id: "38fca2d939696061a8f76d4e6b5eecd54e3b4221c846f24a6b279e79952850a5"
   asset_registry:
     domain: "lending.example.com"
     registry_url: "https://assets-testnet.blockstream.info"

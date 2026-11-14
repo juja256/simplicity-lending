@@ -51,11 +51,7 @@ import { WalletContext } from './WalletContext'
 const SESSION_STORAGE_KEY = 'jade_wallet_session'
 // Assets the app moves; Humid reports coins per asset, so these are the ones it's asked for.
 const APP_ASSET_IDS = [
-  ...new Set([
-    NETWORK_CONFIG.collateralAsset.id,
-    NETWORK_CONFIG.principalAsset.id,
-    NETWORK_CONFIG.protocolFeeAsset.id,
-  ]),
+  ...new Set([NETWORK_CONFIG.collateralAsset.id, NETWORK_CONFIG.principalAsset.id]),
 ]
 const BALANCE_POLL_INTERVAL_MS = 60_000
 const MIN_SYNC_GAP_MS = 15_000

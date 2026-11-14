@@ -1,0 +1,380 @@
+{
+  "description": "Lender terms vectors from private-lending-core. Each vector's min_repayment and min_collateral take the proposal's amounts and term with the rates of the pair matching the proposal's assets, or of the first pair when none does; apr_bps and principal_per_collateral take the proposal's amounts and term. null is the core's None. Written by the parity_vectors test in lender_terms.rs.",
+  "vectors": [
+    {
+      "apr_bps": "608",
+      "check_proposal": [],
+      "min_collateral": "33333334",
+      "min_repayment": "1004109589042",
+      "name": "inside the terms",
+      "principal_per_collateral": "2000000000000",
+      "proposal": {
+        "collateral_amount": "50000000",
+        "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+        "principal_amount": "1000000000000",
+        "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0",
+        "repayment_amount": "1005000000000",
+        "term_blocks": 43200
+      },
+      "terms": {
+        "pairs": [
+          {
+            "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+            "max_principal": "10000000000000",
+            "max_principal_per_collateral": "3000000000000",
+            "max_term_days": 365,
+            "min_apr_bps": 500,
+            "min_principal": "100000000",
+            "min_term_days": 7,
+            "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0"
+          }
+        ]
+      }
+    },
+    {
+      "apr_bps": "500",
+      "check_proposal": [],
+      "min_collateral": "3334",
+      "min_repayment": "100095891",
+      "name": "at every minimum",
+      "principal_per_collateral": "2999400119976",
+      "proposal": {
+        "collateral_amount": "3334",
+        "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+        "principal_amount": "100000000",
+        "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0",
+        "repayment_amount": "100095891",
+        "term_blocks": 10080
+      },
+      "terms": {
+        "pairs": [
+          {
+            "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+            "max_principal": "10000000000000",
+            "max_principal_per_collateral": "3000000000000",
+            "max_term_days": 365,
+            "min_apr_bps": 500,
+            "min_principal": "100000000",
+            "min_term_days": 7,
+            "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0"
+          }
+        ]
+      }
+    },
+    {
+      "apr_bps": "500",
+      "check_proposal": [],
+      "min_collateral": "333333334",
+      "min_repayment": "10500000000000",
+      "name": "at every maximum",
+      "principal_per_collateral": "2999999994000",
+      "proposal": {
+        "collateral_amount": "333333334",
+        "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+        "principal_amount": "10000000000000",
+        "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0",
+        "repayment_amount": "10500000000000",
+        "term_blocks": 525600
+      },
+      "terms": {
+        "pairs": [
+          {
+            "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+            "max_principal": "10000000000000",
+            "max_principal_per_collateral": "3000000000000",
+            "max_term_days": 365,
+            "min_apr_bps": 500,
+            "min_principal": "100000000",
+            "min_term_days": 7,
+            "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0"
+          }
+        ]
+      }
+    },
+    {
+      "apr_bps": "499",
+      "check_proposal": ["AprBelowMinimum"],
+      "min_collateral": "33333334",
+      "min_repayment": "1004109589042",
+      "name": "repayment one unit short",
+      "principal_per_collateral": "2999999940000",
+      "proposal": {
+        "collateral_amount": "33333334",
+        "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+        "principal_amount": "1000000000000",
+        "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0",
+        "repayment_amount": "1004109589041",
+        "term_blocks": 43200
+      },
+      "terms": {
+        "pairs": [
+          {
+            "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+            "max_principal": "10000000000000",
+            "max_principal_per_collateral": "3000000000000",
+            "max_term_days": 365,
+            "min_apr_bps": 500,
+            "min_principal": "100000000",
+            "min_term_days": 7,
+            "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0"
+          }
+        ]
+      }
+    },
+    {
+      "apr_bps": "500",
+      "check_proposal": ["CollateralBelowMinimum"],
+      "min_collateral": "33333334",
+      "min_repayment": "1004109589042",
+      "name": "collateral one unit short",
+      "principal_per_collateral": "3000000030000",
+      "proposal": {
+        "collateral_amount": "33333333",
+        "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+        "principal_amount": "1000000000000",
+        "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0",
+        "repayment_amount": "1004109589042",
+        "term_blocks": 43200
+      },
+      "terms": {
+        "pairs": [
+          {
+            "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+            "max_principal": "10000000000000",
+            "max_principal_per_collateral": "3000000000000",
+            "max_term_days": 365,
+            "min_apr_bps": 500,
+            "min_principal": "100000000",
+            "min_term_days": 7,
+            "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0"
+          }
+        ]
+      }
+    },
+    {
+      "apr_bps": "0",
+      "check_proposal": [
+        "PrincipalBelowRange",
+        "TermBelowRange",
+        "AprBelowMinimum",
+        "CollateralBelowMinimum"
+      ],
+      "min_collateral": "3334",
+      "min_repayment": "100095880",
+      "name": "below the ranges",
+      "principal_per_collateral": null,
+      "proposal": {
+        "collateral_amount": "0",
+        "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+        "principal_amount": "99999999",
+        "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0",
+        "repayment_amount": "99999999",
+        "term_blocks": 10079
+      },
+      "terms": {
+        "pairs": [
+          {
+            "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+            "max_principal": "10000000000000",
+            "max_principal_per_collateral": "3000000000000",
+            "max_term_days": 365,
+            "min_apr_bps": 500,
+            "min_principal": "100000000",
+            "min_term_days": 7,
+            "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0"
+          }
+        ]
+      }
+    },
+    {
+      "apr_bps": "9999",
+      "check_proposal": ["PrincipalAboveRange", "TermAboveRange"],
+      "min_collateral": "333333334",
+      "min_repayment": "10500000951295",
+      "name": "above the ranges",
+      "principal_per_collateral": "1000000000000",
+      "proposal": {
+        "collateral_amount": "1000000000",
+        "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+        "principal_amount": "10000000000001",
+        "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0",
+        "repayment_amount": "20000000000000",
+        "term_blocks": 525601
+      },
+      "terms": {
+        "pairs": [
+          {
+            "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+            "max_principal": "10000000000000",
+            "max_principal_per_collateral": "3000000000000",
+            "max_term_days": 365,
+            "min_apr_bps": 500,
+            "min_principal": "100000000",
+            "min_term_days": 7,
+            "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0"
+          }
+        ]
+      }
+    },
+    {
+      "apr_bps": "608",
+      "check_proposal": ["UnsupportedPair"],
+      "min_collateral": "33333334",
+      "min_repayment": "1004109589042",
+      "name": "unsupported pair",
+      "principal_per_collateral": "2000000000000",
+      "proposal": {
+        "collateral_amount": "50000000",
+        "collateral_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0",
+        "principal_amount": "1000000000000",
+        "principal_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+        "repayment_amount": "1005000000000",
+        "term_blocks": 43200
+      },
+      "terms": {
+        "pairs": [
+          {
+            "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+            "max_principal": "10000000000000",
+            "max_principal_per_collateral": "3000000000000",
+            "max_term_days": 365,
+            "min_apr_bps": 500,
+            "min_principal": "100000000",
+            "min_term_days": 7,
+            "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0"
+          }
+        ]
+      }
+    },
+    {
+      "apr_bps": "1200",
+      "check_proposal": [],
+      "min_collateral": "500000",
+      "min_repayment": "502302",
+      "name": "second pair matches",
+      "principal_per_collateral": "100000000",
+      "proposal": {
+        "collateral_amount": "500000",
+        "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+        "principal_amount": "500000",
+        "principal_asset": "7f7e7d7c7b7a797877767574737271706f6e6d6c6b6a69686766656463626160",
+        "repayment_amount": "502302",
+        "term_blocks": 20160
+      },
+      "terms": {
+        "pairs": [
+          {
+            "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+            "max_principal": "10000000000000",
+            "max_principal_per_collateral": "3000000000000",
+            "max_term_days": 365,
+            "min_apr_bps": 500,
+            "min_principal": "100000000",
+            "min_term_days": 7,
+            "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0"
+          },
+          {
+            "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+            "max_principal": "1000000",
+            "max_principal_per_collateral": "100000000",
+            "max_term_days": 30,
+            "min_apr_bps": 1200,
+            "min_principal": "1",
+            "min_term_days": 1,
+            "principal_asset": "7f7e7d7c7b7a797877767574737271706f6e6d6c6b6a69686766656463626160"
+          }
+        ]
+      }
+    },
+    {
+      "apr_bps": "0",
+      "check_proposal": ["PrincipalAboveRange", "AprBelowMinimum"],
+      "min_collateral": "614891469123652",
+      "min_repayment": null,
+      "name": "repayment minimum overflows",
+      "principal_per_collateral": "100000000",
+      "proposal": {
+        "collateral_amount": "18446744073709551615",
+        "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+        "principal_amount": "18446744073709551615",
+        "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0",
+        "repayment_amount": "18446744073709551615",
+        "term_blocks": 43200
+      },
+      "terms": {
+        "pairs": [
+          {
+            "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+            "max_principal": "10000000000000",
+            "max_principal_per_collateral": "3000000000000",
+            "max_term_days": 365,
+            "min_apr_bps": 500,
+            "min_principal": "100000000",
+            "min_term_days": 7,
+            "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0"
+          }
+        ]
+      }
+    },
+    {
+      "apr_bps": "0",
+      "check_proposal": ["CollateralBelowMinimum"],
+      "min_collateral": null,
+      "min_repayment": "18446744073709551615",
+      "name": "collateral minimum overflows",
+      "principal_per_collateral": "100000000",
+      "proposal": {
+        "collateral_amount": "18446744073709551615",
+        "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+        "principal_amount": "18446744073709551615",
+        "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0",
+        "repayment_amount": "18446744073709551615",
+        "term_blocks": 43200
+      },
+      "terms": {
+        "pairs": [
+          {
+            "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+            "max_principal": "18446744073709551615",
+            "max_principal_per_collateral": "1",
+            "max_term_days": 365,
+            "min_apr_bps": 0,
+            "min_principal": "100000000",
+            "min_term_days": 7,
+            "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0"
+          }
+        ]
+      }
+    },
+    {
+      "apr_bps": null,
+      "check_proposal": ["PrincipalBelowRange", "TermBelowRange"],
+      "min_collateral": "0",
+      "min_repayment": "0",
+      "name": "zero amounts and term",
+      "principal_per_collateral": null,
+      "proposal": {
+        "collateral_amount": "0",
+        "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+        "principal_amount": "0",
+        "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0",
+        "repayment_amount": "0",
+        "term_blocks": 0
+      },
+      "terms": {
+        "pairs": [
+          {
+            "collateral_asset": "5f5e5d5c5b5a595857565554535251504f4e4d4c4b4a49484746454443424140",
+            "max_principal": "10000000000000",
+            "max_principal_per_collateral": "3000000000000",
+            "max_term_days": 365,
+            "min_apr_bps": 500,
+            "min_principal": "100000000",
+            "min_term_days": 7,
+            "principal_asset": "bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a0"
+          }
+        ]
+      }
+    }
+  ]
+}
