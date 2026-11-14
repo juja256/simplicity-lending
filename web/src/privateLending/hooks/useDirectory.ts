@@ -1,8 +1,8 @@
-// The lender directory: the lenders whose served entries verify, with a lookup of names by x-only
-// key, the wallet's own entry, and the signed writes. Each entry is checked against its key
-// (`checkDirectoryEntry`): only verified terms are shown or used, and an entry that does not
-// verify is hidden from the lenders and counted. Names are chosen by whoever holds a key and are
-// never an identity, verified or not: always show them (inside <bdi>) next to the key's
+// The lender directory: the lenders whose served entries verify, with a lookup of their names by
+// x-only key, the wallet's own entry, and the signed writes. Each entry is checked against its key
+// (`checkDirectoryEntry`): only verified names and terms are shown or used, and an entry that does
+// not verify is hidden from the lenders and counted. Names are chosen by whoever holds a key and
+// are never an identity, verified or not: always show them (inside <bdi>) next to the key's
 // fingerprint.
 //
 // The wallet's own entry is read by its x-only key, the one part of the key that leaves the
@@ -132,12 +132,13 @@ export function useDirectory() {
     [checked],
   )
   const byPubkey = useMemo(
-    () => new Map(checked.map(({ entry }) => [entry.pubkey, entry])),
-    [checked],
+    () => new Map(lenders.map(({ entry }) => [entry.pubkey, entry])),
+    [lenders],
   )
   /**
-   * The entry of an x-only key (any case), if the directory lists it, verified or not: for its
-   * name only, never its terms.
+   * The verified entry of an x-only key (any case), if the directory lists one. The signature
+   * binds the name, so a key whose entry did not verify, or is not listed, gets undefined: show
+   * its fingerprint with no name.
    */
   const lookup = useCallback(
     (pubkey: string): DirectoryEntry | undefined => byPubkey.get(normalizeHex(pubkey)),
