@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Path, Query, State, rejection::JsonRejection},
     http::StatusCode,
 };
 use elements::secp256k1_zkp::{XOnlyPublicKey, schnorr};
-use private_lending_core::{DirectoryAction, verify_directory_action};
+use private_lending_core::{DirectoryAction, LenderTerms, verify_directory_action};
 use serde::Deserialize;
 use utoipa::IntoParams;
 
@@ -73,15 +73,17 @@ fn validate_display_name(name: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Checks the signature over the action, the challenge, the name and the terms. A put carries a
+/// name and terms, a delete an empty name and none.
 fn check_signature(
     key: &XOnlyPublicKey,
     action: DirectoryAction,
     challenge: &[u8; 32],
     display_name: &str,
+    terms: Option<&LenderTerms>,
     signature: &schnorr::Signature,
 ) -> Result<(), ApiError> {
-    // a put is verified over no terms until the entry carries them
-    if verify_directory_action(key, action, challenge, display_name, None, signature) {
+    if verify_directory_action(key, action, challenge, display_name, terms, signature) {
         Ok(())
     } else {
         Err(ApiError::Unauthorized("invalid signature".to_string()))
@@ -116,7 +118,7 @@ pub async fn issue_challenge(
     operation_id = "list_directory_entries",
     params(DirectoryQuery),
     responses(
-        (status = 200, description = "Directory entries ordered by display name", body = DirectoryList),
+        (status = 200, description = "Directory entries with terms, ordered by display name", body = DirectoryList),
         (status = 400, description = "Invalid query parameters", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     )
@@ -143,7 +145,7 @@ pub async fn list_entries(
     operation_id = "get_directory_entry",
     params(("pubkey" = String, Path, description = "X-only lending key, 32 bytes, hex")),
     responses(
-        (status = 200, description = "The directory entry", body = DirectoryEntry),
+        (status = 200, description = "The directory entry, with or without terms", body = DirectoryEntry),
         (status = 400, description = "Malformed pubkey", body = ErrorResponse),
         (status = 404, description = "No such entry", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
@@ -172,6 +174,7 @@ pub async fn get_entry(
         (status = 200, description = "The created or updated entry", body = DirectoryEntry),
         (status = 400, description = "Malformed request", body = ErrorResponse),
         (status = 401, description = "Invalid signature, or unknown, used or expired challenge", body = ErrorResponse),
+        (status = 422, description = "Missing, malformed or invalid terms, or an unknown field", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     )
 )]
@@ -179,17 +182,20 @@ pub async fn get_entry(
 pub async fn put_entry(
     State(state): State<Arc<AppState>>,
     Path(pubkey): Path<String>,
-    Json(body): Json<PutDirectoryEntry>,
+    body: Result<Json<PutDirectoryEntry>, JsonRejection>,
 ) -> Result<Json<DirectoryEntry>, ApiError> {
+    let Json(body) = body?;
     let (key, bytes) = parse_pubkey(&pubkey)?;
     let challenge = parse_challenge(&body.challenge)?;
     let signature = parse_signature(&body.signature)?;
     validate_display_name(&body.display_name)?;
+    let terms = body.terms.to_terms().map_err(ApiError::Unprocessable)?;
     check_signature(
         &key,
         DirectoryAction::Put,
         &challenge,
         &body.display_name,
+        Some(&terms),
         &signature,
     )?;
 
@@ -197,7 +203,8 @@ pub async fn put_entry(
     if !super::db::consume_challenge(&mut tx, &challenge).await? {
         return Err(challenge_rejected());
     }
-    let entry = super::db::upsert_entry(&mut tx, &bytes, &body.display_name).await?;
+    let entry =
+        super::db::upsert_entry(&mut tx, &bytes, &body.display_name, &terms.encode()).await?;
     tx.commit().await?;
     Ok(Json(entry))
 }
@@ -214,6 +221,7 @@ pub async fn put_entry(
         (status = 400, description = "Malformed request", body = ErrorResponse),
         (status = 401, description = "Invalid signature, or unknown, used or expired challenge", body = ErrorResponse),
         (status = 404, description = "No such entry", body = ErrorResponse),
+        (status = 422, description = "A missing or unknown field, such as terms", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     )
 )]
@@ -221,12 +229,20 @@ pub async fn put_entry(
 pub async fn delete_entry(
     State(state): State<Arc<AppState>>,
     Path(pubkey): Path<String>,
-    Json(body): Json<DeleteDirectoryEntry>,
+    body: Result<Json<DeleteDirectoryEntry>, JsonRejection>,
 ) -> Result<StatusCode, ApiError> {
+    let Json(body) = body?;
     let (key, bytes) = parse_pubkey(&pubkey)?;
     let challenge = parse_challenge(&body.challenge)?;
     let signature = parse_signature(&body.signature)?;
-    check_signature(&key, DirectoryAction::Delete, &challenge, "", &signature)?;
+    check_signature(
+        &key,
+        DirectoryAction::Delete,
+        &challenge,
+        "",
+        None,
+        &signature,
+    )?;
 
     let mut tx = state.db.begin().await?;
     if !super::db::consume_challenge(&mut tx, &challenge).await? {

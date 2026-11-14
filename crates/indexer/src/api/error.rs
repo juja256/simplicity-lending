@@ -1,5 +1,6 @@
 use axum::{
     Json,
+    extract::rejection::JsonRejection,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -18,6 +19,20 @@ pub enum ApiError {
 
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
+
+    /// Well-formed JSON whose content is refused, such as a missing field or invalid terms.
+    #[error("Unprocessable: {0}")]
+    Unprocessable(String),
+}
+
+impl From<JsonRejection> for ApiError {
+    /// JSON of the wrong shape is `422`, naming the field; any other rejected body is `400`.
+    fn from(rejection: JsonRejection) -> Self {
+        match rejection {
+            JsonRejection::JsonDataError(error) => ApiError::Unprocessable(error.body_text()),
+            other => ApiError::BadRequest(other.body_text()),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -38,6 +53,11 @@ impl IntoResponse for ApiError {
             ),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg.clone()),
             ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "unauthorized", msg.clone()),
+            ApiError::Unprocessable(msg) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unprocessable_entity",
+                msg.clone(),
+            ),
         };
 
         let body = Json(json!({
@@ -83,6 +103,20 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(json["error"]["code"], "unauthorized");
         assert_eq!(json["error"]["message"], "invalid signature");
+    }
+
+    #[tokio::test]
+    async fn unprocessable_maps_to_422() {
+        let response = ApiError::Unprocessable("terms: bad".to_string()).into_response();
+        let status = response.status();
+        let body_bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: Value = serde_json::from_slice(&body_bytes).expect("valid json");
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(json["error"]["code"], "unprocessable_entity");
+        assert_eq!(json["error"]["message"], "terms: bad");
     }
 
     #[tokio::test]
