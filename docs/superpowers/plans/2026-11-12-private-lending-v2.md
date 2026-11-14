@@ -913,55 +913,404 @@ The phase review follows (whole branch, Opus).
 
 ## Phase 4: The lender console and the borrower app (spec item 10; the demo)
 
-Branch `v2/phase-4-two-areas`.
+Branch `v2/phase-4-two-areas`, from `v2/main` after phase 3 is merged into it.
 
-- Load the `frontend-design` skill at phase start. The wireframes from the discussion are in
-  `docs/superpowers/specs/2026-11-12-v2-wireframes/` (`site-structure.html`,
-  `lender-console.html`, `borrower-app.html`; layout only, the numbers are made up).
-- Routes: `/` the landing page with its two entrances; `/lend/proposals`, `/lend/loans`,
-  `/lend/terms`, `/lend/profile`; `/borrow` (choose a lender), `/borrow/:lenderKey` (the
-  proposal), `/borrow/loans`. `web/src/pages/Private` goes once both areas replace it; its
-  modals and offer rows are reused where they fit.
-- The console's proposal table shows phase 3's `check_proposal` result as the "within terms" or
-  "outside terms" badge; the accept modal warns before accepting a flagged proposal and still
-  hides acceptance after expiry (item 4).
-- The proposal form starts at the lender's minimums and refuses lower values; its summary states
-  the repayment, the due date, what happens on default and that the borrower can cancel until
-  acceptance. Leave room in the proposal form, the accept review, the repay modal and the loan
-  views for phase 6's messages.
-- **Carried from phase 2's review:**
-  - A per-session high-water mark for receive and change indices: `walletReceiver` and the
-    internal change of acceptance and repayment take `max(address(null).index(), last handed out
-    + 1)`, so a flow started before a scan sees the previous one does not reuse its addresses
-    (LWK's `apply_transaction` does not advance `last_unused`), with a guard against index 0 (the
-    identity address) and a bound that keeps unused indices inside LWK's gap limit.
-  - Hardening of the e2e: `creationNftReceiver` compares each receiver with the identity script,
-    and `checkWalletIdentities` fails when the `wallets` stage never ran on the state file.
-  - Cleanup: the orphaned public IndexedDB `simplicity-lending:pending-transactions` (one
-    `deleteDB`), `utils/zod.ts`'s dead exports, the `z-toast` utility, `verifyReceiveAddress` and
-    `getReceiveAddress` (no callers), the wallet button's address taken once at connect, the
-    nginx `/.well-known/liquid-asset-proof-` block (its endpoint is gone), redirects for the old
-    docs URLs (`/docs/borrower/*`, `/docs/lender/*`, `/docs/protocol/*`), and the unwrapped prose
-    in `docs/docs/{developers,contracts}` and `simplicity.md`.
-- **Carried from phase 3's review:**
-  - Readers cannot check what the indexer serves. Store the put's challenge and signature with
-    the entry, serve them, and verify them in the browser (a wasm `verifyDirectoryAction`) before
-    showing a lender or building a proposal from its terms; run served terms through
-    `encodeLenderTerms` (`validate`) too. This proves the key signed exactly that name and those
-    terms; freshness and completeness still rest on the indexer.
-  - One rule for how a proposal's `term_blocks` is measured, shared by the borrower's form and
-    the console's check: the e2e's real offers count the expiry from the build tip and come out
-    under `min_term_days · 1440`, so `checkProposal` flags them as too short.
-  - The lender's own terms are not taken from the served list: keep them locally, or verify them
-    as above, before pre-filling the edit form; find the lender's own entry by key
-    (`fetchDirectoryEntry`), so a lender listed before phase 3 (no terms) does not look unlisted.
-  - The APR error message names the APR, not "an amount"; an entry whose terms could not be read
-    says so instead of "No terms published."
-- **Done when:** `pnpm build` and `pnpm lint` pass; a scripted testnet demo runs: the lender
-  publishes terms, the borrower's form refuses a lower APR and less collateral, an e2e-built
-  proposal outside the terms shows the badge naming the broken terms, the lender accepts, the
-  borrower receives the principal and repays, the lender claims, and an overdue loan is
-  liquidated; the borrower app has no horizontal scroll at 375 px.
+The wireframes from the discussion are in `docs/superpowers/specs/2026-11-12-v2-wireframes/`
+(`site-structure.html`, option A; `lender-console.html`; `borrower-app.html`). They show layout
+only: their numbers are made up, and their reference price and collateral ratio were replaced in
+phase 3 by one term, the maximum principal per unit of collateral.
+
+Decided at phase start (2026-11-14):
+- **Routes.** `/` the landing page with its two entrances; `/lend` redirects to
+  `/lend/proposals`, then `/lend/loans`, `/lend/terms`, `/lend/profile`; `/borrow` (choose a
+  lender), `/borrow/:lenderKey` (the proposal), `/borrow/loans`. `/app` and `/app/*` redirect to
+  `/`. Nothing remembers a role: the route decides the area. `web/src/pages/Private` is deleted
+  in task 9; its modals and rows are reused where they fit.
+- **The term rule** (carried from phase 3). A proposal's term counts whole days from the block
+  its creation confirmed in: `termBlocks = floor((expiry − createdAtHeight) / 1440) · 1440`. The
+  borrower's form sets `expiry = tip + days · 1440 + TERM_MARGIN_BLOCKS` (60), so a proposal
+  that confirms within an hour of being built counts exactly the days the borrower chose. One
+  function in `web/src/privateLending/lenderTerms.ts` serves the form, the console and the e2e.
+  A proposal that confirms later than that counts a day less and may be flagged; the lender can
+  still accept it.
+- **The lender's own terms** are read by key (`fetchDirectoryEntry`) and verified like any entry
+  (task 2), then pre-fill the terms form; nothing is kept in local storage.
+- **Tests.** The web gets Vitest (`pnpm test`) for the pure rules of this phase; checks that need
+  the chain stay in `pnpm e2e:private`, and the UI is checked by a Playwright demo on testnet
+  (task 11), which needs `@playwright/test` and its Chromium (`pnpm exec playwright install
+  chromium`).
+- **Messages (phase 6).** The proposal form, the accept review, the repay modal and the loan views
+  are built as stacks of labeled sections, so phase 6 adds a message section without changing
+  the layout. No placeholder appears in this phase.
+
+### Design direction (from the `frontend-design` skill)
+
+The site keeps its brand: Inter, the tokens in `web/src/styles/tokens.css` (accent `#2706cf`),
+HeroUI v3 components. The two areas differ in density, not in brand.
+
+- **Lender console: a ledger.** A fixed 224 px sidebar on `--background` (#f5f5f5) with the four
+  sections and the area switch at its foot; the work area on `--surface` (#ffffff). Tables are
+  the main form: 13 px rows, `tabular-nums`, amounts right-aligned with their unit, keys as
+  `KeyFingerprint`. The summary strip is one row of figures divided by `--separator` rules, not
+  a row of cards. The memorable element is the terms column: each breach named in plain words
+  ("APR below 6 %", "collateral below 0.0790 tL-BTC"), the within-terms badge in `--success`
+  soft, the outside-terms badge in `--warning` soft. Desktop first; under 1024 px the sidebar
+  becomes a top bar.
+- **Borrower app: one column, one decision at a time.** Max width 560 px, centered, 16 px
+  gutters, no table: lenders and loans are lists of rows that wrap. The steps are a real
+  sequence, so the header shows "Choose a lender, Propose, My loans" as steps. The memorable
+  element is the proposal's summary sentence, set at `text-h3` and updated as the borrower types:
+  "You repay 5,086.30 TEST by 10 February 2027. If you don't, E2E Lender keeps your 0.085 tL-BTC."
+- **Both.** No all-caps labels and no middle-dot meta strings (the current page's 11 px
+  uppercase headings are not carried over); labels are sentence case. Monospace only for keys.
+  Motion only where an action changes something (a row's status after a broadcast). Visible
+  focus, `prefers-reduced-motion` respected.
+- **Words.** The borrower app says "proposal", "lender", "collateral", "receive", "repay" and
+  "cancel", never "offer", "NFT" or "lending key"; it shows key fingerprints as "Lender key".
+  The console may use the protocol's words. An action keeps its name from button to toast: "Sign
+  and publish" gives "Terms published".
+
+### Phase 4 review focus
+
+1. A directory entry the indexer altered (a changed rate, a swapped name, or a signature from
+   another key): no borrower sees it as a lender, and the lender's own form is not pre-filled
+   from it. Task 1 and task 2 test it.
+2. A proposal confirmed hours after it was built, or built outside the app with an odd expiry:
+   the console counts its term by the term rule and names the broken term; the lender can still
+   accept after the warning. Task 3's tests pin the rule; task 6 shows the badge.
+3. Two flows in one session before a scan (a creation, then a cancellation; an acceptance, then
+   a claim): the second gets new receive and change addresses, never index 0, never past the gap
+   limit. Task 4 tests it.
+4. A borrower typing less than the lender's minimums (APR, collateral, a term or principal out
+   of range, more decimals than the asset has): the form says which term and does not submit.
+   Task 3 tests the limits; task 8 wires them and task 11 drives them.
+5. The borrower app at 375 px: no horizontal scroll on any of its three pages, the summary and
+   the action buttons reachable. Task 11 measures it.
+
+### Task 1: The indexer serves each entry's signature, and the wasm verifies it
+
+**Files:**
+- Create: `crates/indexer/migrations/20261115120000_directory_signatures.sql`
+- Modify: `crates/indexer/src/api/directory/{db,dto,handlers}.rs`, `crates/indexer/tests/directory_api.rs`,
+  `.sqlx/` (regenerated with `cargo sqlx prepare --workspace`)
+- Modify: `crates/private-lending-wasm/src/directory.rs` (and its wasm build in `web/src/wasm/private-lending/`)
+
+**Interfaces (produces):**
+- Columns `signed_challenge BYTEA` and `signature BYTEA`, both null for entries written before
+  this task; a put stores the challenge it consumed and the signature it checked.
+- The entry DTO gains `signed_challenge: Option<String>` and `signature: Option<String>` (hex),
+  in the list and in `GET /directory/{pubkey}`, and in the OpenAPI schema.
+- Wasm `verifyDirectoryEntry(pubkeyHex: string, challengeHex: string, displayName: string,
+  termsJson: string, signatureHex: string): boolean`: the core's `verify_directory_action` for
+  the put action, after `decode`/`validate` of the terms (invalid terms give `false`, never a
+  throw); malformed hex gives an error naming the field.
+
+- [ ] **Step 1: Write the failing tests.** In `directory_api.rs`:
+  `put_stores_challenge_and_signature` (the served pair equals the put's, and verifies with
+  `verify_directory_action`) and `entry_before_signatures_serves_nulls` (an entry inserted
+  without them serves `null`). In the wasm's tests: `verify_entry_accepts_signed_put` and
+  `verify_entry_rejects_changed_terms_name_or_key` (one byte of the rate, the name, another key).
+- [ ] **Step 2: Run them to see them fail.** `cargo test -p lending-indexer --test directory_api`
+  and `cargo test -p private-lending-wasm`. Expected: FAIL.
+- [ ] **Step 3: Implement**, then `pnpm build:wasm` in `web`.
+- [ ] **Step 4: Check.** The two test commands, `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
+  Expected: pass.
+- [ ] **Step 5: Commit** `indexer, wasm: directory entries carry a verifiable signature`
+
+### Task 2: The web reads verified entries only
+
+**Files:** Modify `web/src/api/indexer/private.ts` (schema), `web/src/privateLending/directory.ts`,
+`web/src/privateLending/hooks/useDirectory.ts`, `web/src/pages/Private/components/{DirectorySection,BorrowSection,PairTermsSummary}.tsx`,
+`web/scripts/e2e-private-lending.ts` (`directory` stage), `web/scripts/check-private-lending-parity.ts`.
+
+**Interfaces (produces):**
+- `directory.ts`: `type EntryCheck = { status: 'verified'; terms: LenderTermsInput } | { status:
+  'unsigned' | 'invalid' }` and `checkDirectoryEntry(wasm, entry: DirectoryEntry): EntryCheck`.
+- `useDirectory()` returns `lenders: VerifiedLender[]` (`entry` plus its verified `terms`; only
+  entries whose check is `verified`), `hiddenCount: number`, `lookup(pubkey)` over all entries
+  (for names only), and `own: { entry: DirectoryEntry | null; check: EntryCheck | null }` from
+  `fetchDirectoryEntry` by the session's key (a 404 is `entry: null`), replacing `ownEntry`.
+- Messages: the APR error of the terms form reads "Enter the minimum APR as a percent, such as
+  6 or 6.25"; an entry whose terms could not be read or verified says "These terms could not be
+  verified" instead of "No terms published."
+
+- [ ] **Step 1: Write the failing checks.** The `directory` stage reads the lender's entry back
+  through `checkDirectoryEntry` (`verified`), then the same entry with one changed rate,
+  another name, and its signature cleared (`invalid`, `invalid`, `unsigned`). The parity script
+  runs `verifyDirectoryEntry` on a fixture entry signed by the core.
+- [ ] **Step 2: Run to see them fail.** `cd web && pnpm parity && pnpm e2e:private directory`.
+  Expected: FAIL.
+- [ ] **Step 3: Implement.** The Private page's directory and borrow sections use `lenders` and
+  `own` (this page goes in task 9; it must keep working until then).
+- [ ] **Step 4: Check.** `pnpm build && pnpm lint && pnpm parity && pnpm e2e:private directory`.
+  Expected: pass.
+- [ ] **Step 5: Commit** `web: borrowers and the lender's own form see verified terms only`
+
+### Task 3: Vitest, the term rule and the proposal checks
+
+**Files:**
+- Modify: `web/package.json` (`vitest` dev dependency, script `"test": "vitest run"`),
+  `web/vite.config.ts` (test block, `environment: 'node'`)
+- Create: `web/src/test/wasm.ts` (loads the private-lending wasm in Node with `initSync`, as the
+  parity script does)
+- Modify: `web/src/privateLending/lenderTerms.ts`
+- Create: `web/src/privateLending/proposalCheck.ts`, `web/src/privateLending/lenderTerms.test.ts`,
+  `web/src/privateLending/proposalCheck.test.ts`
+- Modify: `web/scripts/e2e-private-lending.ts` (the `create` stage's expiry and `createProposal`)
+
+**Interfaces (produces):**
+- `lenderTerms.ts`: `TERM_MARGIN_BLOCKS = 60`; `proposalExpiry(tipHeight: number, days: number):
+  number`; `termBlocksOf(expiry: number, createdAtHeight: number): number` (the rule above; 0
+  when the expiry is not after the creation block).
+- `proposalCheck.ts`:
+  - `proposalOfOffer(terms: PrivateOfferTerms, createdAtHeight: number): ProposalInput`.
+  - `type TermsVerdict = { kind: 'within' } | { kind: 'outside'; breaches: TermBreachName[];
+    labels: string[] } | { kind: 'unknown'; reason: 'no-terms' | 'unverified' }` and
+    `checkAgainstTerms(wasm, own: EntryCheck | null, proposal: ProposalInput, pairInfo:
+    TermsPair): TermsVerdict`.
+  - `breachLabel(breach: TermBreachName, pair: PairTermsInput, pairInfo: TermsPair): string`,
+    plain words with the lender's figure: "APR below 6 %", "collateral below 0.0790 tL-BTC",
+    "term shorter than 30 days", "term longer than 180 days", "principal below 1,000 TEST",
+    "principal above 50,000 TEST", "pair you do not lend".
+  - `proposalLimits(wasm, pair: PairTermsInput, principal: bigint, days: number): { minCollateral:
+    bigint; minRepayment: bigint }`; `repaymentAt(wasm, principal: bigint, aprBps: number, days:
+    number): bigint` (`minRepayment` at the borrower's APR, rounded up); and
+    `proposalFormErrors(wasm, pair, pairInfo, form: ProposalForm): Partial<Record<keyof
+    ProposalForm, string>>` for `ProposalForm { principal: string; days: string; collateral:
+    string; aprPercent: string }` (display strings; the APR takes at most two decimals, a basis
+    point): a principal or term outside the ranges, collateral below `minCollateral`, an APR
+    below the minimum, more decimals than the asset has. Each message names the lender's figure.
+
+- [ ] **Step 1: Write the failing tests.** `lenderTerms.test.ts`: `termBlocksOf` at a creation
+  one block and 60 blocks after the build tip (whole days), 61 blocks after (a day less), and an
+  expiry at or before the creation block (0). `proposalCheck.test.ts`: a proposal exactly at
+  every minimum is `within`; one unit of collateral below gives `["CollateralBelowMinimum"]` with
+  the label naming the least collateral; no own entry gives `unknown`/`no-terms`, an `invalid`
+  check `unknown`/`unverified`; `proposalFormErrors` refuses an APR a basis point low (a
+  repayment one unit below `minRepayment`), a collateral one unit low, 0 and `maxTermDays + 1`
+  days, and `1.000000001` for an 8-decimal asset; `repaymentAt` at the minimum APR equals
+  `minRepayment`, and a proposal built from the form's minimums is `within`.
+- [ ] **Step 2: Run to see them fail.** `cd web && pnpm test`. Expected: FAIL.
+- [ ] **Step 3: Implement**, and build the e2e `create` offer with `proposalExpiry(tip, 1)` and
+  its proposal with `termBlocksOf` from the candidate's `created_at_height` (the `directory`
+  stage keeps `1 · 1440`, its stated term).
+- [ ] **Step 4: Check.** `pnpm test && pnpm build && pnpm lint`. Expected: pass.
+- [ ] **Step 5: Commit** `web: one term rule and the proposal checks, under Vitest`
+
+### Task 4: Fresh addresses across flows in one session, and the e2e's identity checks (**Review now**: a receiver outside the gap limit is not found by a restored wallet, and index 0 is the wallet's identity)
+
+**Files:**
+- Create: `web/src/privateLending/addressCursor.ts`, `web/src/privateLending/addressCursor.test.ts`
+- Modify: `web/src/privateLending/{receiver,deps}.ts`, `web/src/privateLending/flows/{acceptance,repayment,creation,cancellation,claimPrincipal,claimRepayment,liquidation}.ts`,
+  `web/src/privateLending/hooks/usePrivateFlowDeps.ts`, `web/scripts/e2e-private-lending.ts`
+
+**Interfaces (produces):**
+- `GAP_LIMIT = 20` (LWK's). `class AddressCursor { nextReceive(wollet): Address;
+  nextChange(wollet, count: number): Address[] }`: each returns indices from `max(LWK's last
+  unused, highest handed out + 1)`, never index 0 for receive, and at most `last unused +
+  GAP_LIMIT − 1`; at that bound it hands out the bound again (privacy, not funds, is lost).
+- `PrivateFlowDeps.addresses: AddressCursor`, one per wallet session (made where the session's
+  deps are, dropped with the session). `walletReceiver(deps)` uses it; every flow's change comes
+  from `nextChange` (acceptance and repayment take two).
+- e2e: `creationNftReceiver` refuses a receiver equal to the identity script;
+  `checkWalletIdentities` fails when the state file has no `wallets` record.
+
+- [ ] **Step 1: Write the failing tests** in `addressCursor.test.ts` over a fake wollet with a
+  settable last-unused index: two `nextReceive` calls give two indices; after LWK's last unused
+  moves past them the next one follows it; a fresh wallet (last unused 0) gets 1, not 0;
+  `nextChange(w, 2)` gives two consecutive change indices and the next call continues after
+  them; at the bound the same address repeats.
+- [ ] **Step 2: Run to see them fail.** `pnpm test`. Expected: FAIL.
+- [ ] **Step 3: Implement**, and the two e2e checks.
+- [ ] **Step 4: Check.** `pnpm test && pnpm build && pnpm lint && pnpm parity`, then the e2e
+  `create`, `cancel`, `accept` and `claim-principal` stages from an empty state: the run logs each
+  receiver and change index, and no index repeats within the run.
+- [ ] **Step 5: Commit** `web: each flow in a session gets new addresses`
+
+### Task 5: The site's shell: landing entrances, two areas, routes
+
+**Files:**
+- Modify: `web/src/App.tsx`, `web/src/constants/routes.ts`, `web/src/pages/Landing/components/{Hero,LandingHeader,GetStarted}.tsx`
+- Create: `web/src/areas/lend/LenderLayout.tsx`, `web/src/areas/borrow/BorrowerLayout.tsx`,
+  `web/src/areas/WalletGate.tsx`
+- Delete: `web/src/components/AppLayout.tsx` once nothing uses it (the Private page moves under
+  `/lend/proposals` as a stand-in until task 6 replaces it)
+
+**Interfaces (produces):**
+- `RoutePath`: `Landing '/'`, `Lend '/lend'`, `LendProposals`, `LendLoans`, `LendTerms`,
+  `LendProfile`, `Borrow '/borrow'`, `BorrowLender '/borrow/:lenderKey'`, `BorrowLoans`, and
+  `borrowLenderPath(pubkey: string): string`.
+- `isAppPath(pathname)` covers `/lend` and `/borrow`, so the providers mount there.
+- `WalletGate({ children })`: the wallet's states as the Private page shows them now
+  (connect, reconnecting, a wallet that cannot do private loans), the children once ready.
+- `LenderLayout`: the sidebar of the design direction with its header (directory name from
+  `useDirectory().own`, key fingerprint, the wallet button naming the connected signer) and
+  the "Borrower side" link;
+  `BorrowerLayout`: the stepped header and the "Lender console" link.
+
+- [ ] **Step 1: Implement.** The landing hero gets the two entrances ("For lenders": publish
+  your terms, review proposals, run your book, "Open lender console"; "For borrowers": pick a
+  lender and borrow against your collateral, "Borrow"); `/app` and `/app/*` redirect to `/`.
+- [ ] **Step 2: Check.** `pnpm build && pnpm lint && pnpm test`, and in `pnpm dev` each route
+  renders its layout (record it in the report; screenshots are task 11's).
+- [ ] **Step 3: Commit** `web: the landing page opens two areas, lend and borrow`
+
+### Task 6: The console's proposals and loan book
+
+**Files:**
+- Create: `web/src/areas/lend/ProposalsPage.tsx`, `web/src/areas/lend/LoanBookPage.tsx`,
+  `web/src/areas/lend/SummaryStrip.tsx`, `web/src/areas/lend/TermsBadge.tsx`,
+  `web/src/areas/lend/bookSummary.ts`, `web/src/areas/lend/bookSummary.test.ts`
+- Modify: `web/src/components/modals/private/AcceptPrivateOfferModal.tsx`, the offer view
+  (`web/src/privateLending/offerView.ts`) for the lender's actions
+
+**Interfaces:**
+- Consumes: `checkAgainstTerms`, `proposalOfOffer`, `breachLabel` (task 3); `useDirectory().own`
+  (task 2); the lender's `usePrivateOffers().lending`, `lenderView` moved from `LendSection` to
+  `offerView.ts`.
+- Produces: `bookSummary(items: OpenedOfferItem[], tipHeight: number): { waiting: number; active:
+  number; lent: bigint; collateralHeld: bigint; dueWithin7Days: number; overdue: number }` (lent
+  and held sum the active loans; due within seven days is active with `0 < expiry − tip ≤ 7 ·
+  1440`; overdue is active past expiry). `AcceptPrivateOfferModal` gains `verdict:
+  TermsVerdict`: for `outside` or `unknown` it lists the reasons and the sign button stays
+  disabled until the lender ticks "Accept outside my terms".
+
+- [ ] **Step 1: Write the failing test** `bookSummary.test.ts`: the counts and sums over a mix of
+  pending, active (due in 3 days, due in 8 days, overdue), repaid and claimed items, and with
+  the tip unknown (0: nothing due, nothing overdue).
+- [ ] **Step 2: Run to see it fail.** `pnpm test`. Expected: FAIL.
+- [ ] **Step 3: Implement.** Proposals: the strip and the table of pending proposals (received
+  as the block's age, borrower fingerprint, principal, collateral, principal per collateral, APR
+  from `aprBps` over the term rule, term in days, the badge, "Review"). Review opens the accept
+  modal; a proposal past its expiry shows "Its term has passed" and no Review (item 4). Loan
+  book: active, repaid and overdue loans with "Claim" and "Liquidate" as `lenderView` decides,
+  the unsent and processing states as the action row shows them now.
+- [ ] **Step 4: Check.** `pnpm test && pnpm build && pnpm lint`. Expected: pass.
+- [ ] **Step 5: Commit** `web: the lender console's proposals and loan book`
+
+### Task 7: The console's terms and profile
+
+**Files:** Create `web/src/areas/lend/TermsPage.tsx`, `web/src/areas/lend/ProfilePage.tsx`;
+reuse `PairTermsSummary`; move the form logic out of `DirectorySection.tsx`.
+
+**Interfaces:** Consumes `useDirectory()` (`own`, `register`, `remove`) and
+`lenderTermsFromForm`/`pairTermsToForm`. Terms: the configured pair's form, pre-filled from
+`own` only when its check is `verified`; "Sign and publish" gives the toast "Terms published";
+"Last published" from `terms_published_at`; an unverified own entry says so and asks for a
+fresh publish. Profile: the display name (published with the terms, the same signature), the
+key fingerprint, "Copy key", and "Remove from directory" behind a confirmation.
+
+- [ ] **Step 1: Implement.**
+- [ ] **Step 2: Check.** `pnpm build && pnpm lint && pnpm test && pnpm e2e:private directory`.
+- [ ] **Step 3: Commit** `web: the lender console's terms and profile`
+
+### Task 8: The borrower's lender list and proposal form
+
+**Files:** Create `web/src/areas/borrow/ChooseLenderPage.tsx`, `web/src/areas/borrow/ProposalPage.tsx`,
+`web/src/areas/borrow/ProposalSummary.tsx`; modify
+`web/src/components/modals/private/CreatePrivateOfferModal.tsx` (its words); retire
+`CreatePrivateOfferForm.tsx` once nothing uses it.
+
+**Interfaces:** Consumes `useDirectory().lenders`, `proposalLimits`, `proposalFormErrors`,
+`repaymentAt`, `proposalExpiry` (task 3), the creation flow through `CreatePrivateOfferModal`.
+- Choose a lender: the pair as a heading ("Borrow TEST against tL-BTC", from the build
+  configuration), each verified lender with its name, "Lender key" fingerprint, terms
+  (`PairTermsSummary`) and "Terms published 3 hours ago", and "Borrow from <name>"; the hidden
+  count as "N lenders hidden: their terms could not be verified" when it is not 0.
+- Proposal (`/borrow/:lenderKey`; an unknown or unverified key goes back to `/borrow` with a
+  note): fields principal, term in days, collateral and APR, opening at the minimum principal,
+  the minimum term, `minCollateral` and the minimum APR; when principal or days change,
+  collateral rises to the new minimum but never drops below what was typed; the repayment is
+  `repaymentAt`, shown and not typed; the errors of `proposalFormErrors` under each field; the
+  summary sentence of the design direction,
+  then "You can cancel and take your collateral back until <name> accepts." and "Only you and
+  <name> can read this proposal."; "Lock collateral and send".
+
+- [ ] **Step 1: Implement.**
+- [ ] **Step 2: Check.** `pnpm build && pnpm lint && pnpm test`.
+- [ ] **Step 3: Commit** `web: borrowers choose a lender and propose within its terms`
+
+### Task 9: The borrower's loans, and the Private page goes
+
+**Files:** Create `web/src/areas/borrow/MyLoansPage.tsx`; modify the borrower modals
+(`CancelPrivateOfferModal`, `ClaimPrincipalModal`, `RepayPrivateOfferModal`) for the words;
+delete `web/src/pages/Private/` and whatever only it used.
+
+**Interfaces:** Consumes `usePrivateOffers().borrowing` and the borrower's view from
+`BorrowSection` (moved to `offerView.ts`). One row per loan: lender name and key, principal and
+collateral, a status in the borrower's words ("waiting for <name>", "accepted", "active, due in
+12 days", "repaid", "cancelled", "collateral taken"), and the one action that applies now
+("Cancel", "Receive 20,000 TEST", "Repay 3,021.40 TEST"), with "Broadcast again" for an unsent
+transaction.
+
+- [ ] **Step 1: Implement**, and check that `grep -rn "pages/Private" web/src` finds nothing.
+- [ ] **Step 2: Check.** `pnpm build && pnpm lint && pnpm test`.
+- [ ] **Step 3: Commit** `web: the borrower's loans; the Private page is gone`
+
+### Task 10: Cleanup carried from phase 2
+
+**Files:** as listed below.
+
+- [ ] **Step 1:** The orphaned IndexedDB `simplicity-lending:pending-transactions` is deleted
+  once at startup (`deleteDB`, errors ignored); `utils/zod.ts`'s dead exports, the `z-toast`
+  utility, `verifyReceiveAddress` and `getReceiveAddress` go (`pnpm build` proves no caller);
+  the wallet button reads the address when it renders, not once at connect; the nginx
+  `/.well-known/liquid-asset-proof-` block goes; the docs site redirects `/docs/borrower/*`,
+  `/docs/lender/*` and `/docs/protocol/*` to the private-loans guide; the prose in
+  `docs/docs/{developers,contracts}` and `simplicity.md` is wrapped at 100 columns; the links to
+  `/app/private` in `docs/docs/private-loans/guide.md`, `web/README.md`, `deployment/README.md` and
+  `deployment/local-compose-check.md` point at `/lend` and `/borrow`, and the guide describes the
+  two areas.
+- [ ] **Step 2: Check.** `pnpm build && pnpm lint && pnpm test`, the docs build, `docker compose build web`.
+- [ ] **Step 3: Commit** `web, docs, deployment: phase 2's leftovers`
+
+### Task 11: The scripted testnet demo
+
+**Files:**
+- Modify: `web/package.json` (`@playwright/test` dev dependency, script `"demo:testnet": "playwright test -c scripts/demo"`)
+- Create: `web/scripts/demo/playwright.config.ts`, `web/scripts/demo/demo.spec.ts`,
+  `web/scripts/demo/wallet.ts` (connects a seed wallet through the connect modal)
+- Modify: `web/scripts/e2e-private-lending.ts` (stage `short-proposal`), `web/README.md`
+
+**Interfaces:** The demo starts `pnpm dev --mode demo` against the local indexer of
+`web/README.md`, with the e2e's two seed phrases from `.env.e2e.local`, one browser context per
+wallet, and runs in order (one test, `test.step` per line below; timeouts sized for testnet
+blocks). The e2e stage `short-proposal` creates a proposal to the lender with a 15-block term
+(outside any terms of at least one day) and stops.
+
+- [ ] **Step 1: Write the demo.**
+  1. The lender publishes terms on `/lend/terms` (the e2e terms) and sees "Terms published".
+  2. The borrower opens `/borrow`, picks the lender, types an APR one basis point below the
+     minimum and a collateral one base unit below it: both fields show their error and "Lock
+     collateral and send" stays disabled; with the minimums it sends, and My loans shows
+     "waiting for E2E Lender".
+  3. `pnpm e2e:private short-proposal` runs; the lender's proposals show it with the badge
+     "term shorter than 1 day".
+  4. The lender reviews the borrower's proposal (within terms) and accepts; the borrower
+     receives the principal and repays; the lender claims.
+  5. The lender accepts the short proposal after ticking "Accept outside my terms", waits for
+     its expiry and liquidates; the loan book shows it as liquidated.
+  6. At a 375 × 812 viewport, each borrower page has `scrollWidth ≤ clientWidth`; a screenshot
+     of each page of both areas is saved under `web/.demo-output/` (git-ignored).
+- [ ] **Step 2: Run it.** `pnpm exec playwright install chromium && pnpm demo:testnet` (fund the
+  wallets from the faucet if `pnpm e2e:private wallets` reports a shortfall). Expected: pass.
+  Fix what it finds in the task that owns the code, one commit each.
+- [ ] **Step 3: Commit** `web: a scripted testnet demo of both areas`
+
+### Task 12: Verify the phase
+
+- [ ] **Step 1:** `cargo test --workspace` without the regtest tests, `cd crates/contracts &&
+  simplex test`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
+- [ ] **Step 2:** `cd web && pnpm test && pnpm build && pnpm lint && pnpm parity &&
+  pnpm check:config`; every e2e stage from an empty state with a fresh local indexer database.
+- [ ] **Step 3:** `pnpm demo:testnet` once more on the final tree; look at the screenshots.
+- [ ] **Step 4:** The migration on a copy of the dev database with a phase 3 entry: it survives
+  with null signature fields and is hidden from borrowers. `docker compose build` and the docs
+  build. Commit `docs: v2 phase 4 verified` with the results.
+
+The phase review follows (whole branch, Opus).
+
+---
 
 ## Phase 5: The contract revision (spec items 1 and 3a)
 
