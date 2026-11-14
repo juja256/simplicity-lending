@@ -1,6 +1,7 @@
 // Proves that the browser (LWK + the private-lending wasm) derives the same offer addresses
 // as the Rust code. Run it with `pnpm parity`; it must pass before browser addresses are relied on.
-// It also checks, offline, the rules of the app's lending-key holder (`checkLendingKeyHolder`,
+// It also checks, offline, the lender terms arithmetic of the wasm against the core's vectors
+// (`checkLenderTerms`), the rules of the app's lending-key holder (`checkLendingKeyHolder`,
 // `checkSyncInSession`) and the PSET builder's `'none'` blinding mode
 // (`checkPsetBuilderNoneBlinding`).
 import fs from 'node:fs'
@@ -51,6 +52,42 @@ interface Fixture {
 const fixture = JSON.parse(
   fs.readFileSync(path.join(here, 'fixtures/private-lending-parity.json'), 'utf-8'),
 ) as Fixture
+
+// Written by the `parity_vectors` test of `crates/private-lending-core/src/lender_terms.rs`, in the
+// JSON the wasm takes: u64 amounts as decimal strings, u32 fields as numbers.
+interface LenderTermsPair {
+  principal_asset: string
+  collateral_asset: string
+  min_apr_bps: number
+  max_principal_per_collateral: string
+  min_term_days: number
+  max_term_days: number
+  min_principal: string
+  max_principal: string
+}
+
+interface LenderTermsVector {
+  name: string
+  terms: { pairs: LenderTermsPair[] }
+  proposal: {
+    principal_asset: string
+    collateral_asset: string
+    principal_amount: string
+    collateral_amount: string
+    repayment_amount: string
+    term_blocks: number
+  }
+  // null is the core's None
+  min_repayment: string | null
+  min_collateral: string | null
+  apr_bps: string | null
+  principal_per_collateral: string | null
+  check_proposal: string[]
+}
+
+const lenderTermsFixture = JSON.parse(
+  fs.readFileSync(path.join(here, 'fixtures/lender-terms-parity.json'), 'utf-8'),
+) as { vectors: LenderTermsVector[] }
 
 function readSimf(name: string): string {
   // Trimmed, as simplicitySourcesPlugin does.
@@ -194,12 +231,85 @@ async function main(): Promise<void> {
     !verifyOfferAddresses(tamperedScripts, creationTx),
   )
 
+  checkLenderTerms()
   await checkLendingKeyHolder()
   await checkSyncInSession()
   await checkWaterfallsRecipient()
   checkPsetBuilderNoneBlinding()
 
   report('private lending parity: ok')
+}
+
+/**
+ * Every vector of the core's lender terms fixture, through the wasm: the terms survive an encoding
+ * round trip, the proposal check names the same breaches, and the four amounts match. As the
+ * fixture's description says, `minRepayment` and `minCollateral` take the rates of the pair with
+ * the proposal's assets, or of the first pair when none has them. A `null` amount is the core's
+ * `None`, which the wasm throws as a `bad-input:` error.
+ */
+function checkLenderTerms(): void {
+  const amount = (compute: () => bigint): string | null => {
+    try {
+      return compute().toString()
+    } catch (error) {
+      if (typeof error === 'string' && error.startsWith('bad-input:')) return null
+      throw error
+    }
+  }
+  // The JSON with its keys sorted, so the decoded terms compare whatever the key order.
+  const canonical = (value: unknown): string =>
+    JSON.stringify(value, (_key, inner: unknown) =>
+      inner !== null && typeof inner === 'object' && !Array.isArray(inner)
+        ? Object.fromEntries(Object.entries(inner).sort(([a], [b]) => (a < b ? -1 : 1)))
+        : inner,
+    )
+
+  const { vectors } = lenderTermsFixture
+  check('lender terms: the fixture has vectors', vectors.length > 0)
+  for (const vector of vectors) {
+    const name = (what: string) => `lender terms "${vector.name}": ${what}`
+    const terms = JSON.stringify(vector.terms)
+    const { proposal } = vector
+
+    const decoded = wasm.decodeLenderTerms(wasm.encodeLenderTerms(terms))
+    check(
+      name('encoding round trip'),
+      canonical(JSON.parse(decoded)) === canonical(vector.terms),
+      decoded,
+    )
+    const breaches = wasm.checkProposal(terms, JSON.stringify(proposal))
+    check(
+      name('proposal check'),
+      JSON.stringify(breaches) === JSON.stringify(vector.check_proposal),
+      `got ${JSON.stringify(breaches)}, expected ${JSON.stringify(vector.check_proposal)}`,
+    )
+
+    const rates =
+      vector.terms.pairs.find(
+        pair =>
+          pair.principal_asset === proposal.principal_asset &&
+          pair.collateral_asset === proposal.collateral_asset,
+      ) ?? vector.terms.pairs[0]
+    const principal = BigInt(proposal.principal_amount)
+    const amounts = {
+      min_repayment: amount(() =>
+        wasm.minRepayment(principal, rates.min_apr_bps, proposal.term_blocks),
+      ),
+      min_collateral: amount(() =>
+        wasm.minCollateral(principal, BigInt(rates.max_principal_per_collateral)),
+      ),
+      apr_bps: amount(() =>
+        wasm.aprBps(principal, BigInt(proposal.repayment_amount), proposal.term_blocks),
+      ),
+      principal_per_collateral: amount(() =>
+        wasm.principalPerCollateral(principal, BigInt(proposal.collateral_amount)),
+      ),
+    }
+    for (const [field, got] of Object.entries(amounts)) {
+      const expected = vector[field as keyof typeof amounts]
+      check(name(field), got === expected, `got ${got}, expected ${expected}`)
+    }
+  }
 }
 
 /**

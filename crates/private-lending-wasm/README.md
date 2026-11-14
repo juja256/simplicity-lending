@@ -122,6 +122,22 @@ LWK helpers:
 
 Directory:
 
-- `signDirectoryAction(key, action, challengeHex, displayName)`: the Schnorr signature (hex) over a
-  server challenge, with `DirectoryAction.Put` or `Delete`. A delete is signed over an empty name;
-  a non-empty name is `bad-input`.
+- `signDirectoryAction(key, action, challengeHex, displayName, termsJson)`: the Schnorr signature
+  (hex) over a server challenge, with `DirectoryAction.Put` or `Delete`. A put signs a non-empty
+  name and the lender's terms together; a delete signs an empty name and no terms (`undefined`).
+  Anything else, and invalid terms, is `bad-input`.
+
+Lender terms, as JSON: terms are `{"pairs": [...]}` and a proposal one object, with the snake_case
+field names of the core's `PairTerms` and `Proposal`, `u64` amounts as decimal strings, `u32`
+fields as numbers and asset ids as display hex. An unknown or missing field, or a malformed value,
+is `bad-input` naming the field.
+
+- `encodeLenderTerms(termsJson)`, `decodeLenderTerms(hex)`: the encoding the directory stores and
+  signs, and back. Terms the core's `LenderTerms::validate` rejects are `bad-input`.
+- `checkProposal(termsJson, proposalJson)`: the names of the terms the proposal breaks
+  (`TermBreach::name`, such as `AprBelowMinimum`), empty when it is within them.
+- `minRepayment(principal, minAprBps, termBlocks)`, `minCollateral(principal,
+  maxPrincipalPerCollateral)`, `aprBps(principal, repayment, termBlocks)`,
+  `principalPerCollateral(principal, collateral)`: the core's arithmetic on `bigint` amounts; where
+  the core has no value (a zero divisor, or a result above `u64::MAX`), `bad-input`. A `bigint`
+  argument outside `u64` is wrapped by the JS boundary, so callers pass amounts in range.
