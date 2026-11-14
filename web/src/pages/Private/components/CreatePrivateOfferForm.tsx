@@ -103,7 +103,7 @@ export default function CreatePrivateOfferForm({
   onReview,
 }: CreatePrivateOfferFormProps) {
   const { collateralAsset, principalAsset } = NETWORK_CONFIG
-  const { entries, lookup } = useDirectory()
+  const { lenders, lookup } = useDirectory()
   const identity = useLendingKeyIdentity()
   const fingerprintOf = useFingerprintOf()
   const { data: tipHeight } = useBlockHeight()
@@ -124,19 +124,20 @@ export default function CreatePrivateOfferForm({
     ? 'Your lending key is unavailable (see above), so no lender can be chosen.'
     : 'Loading your lending key: a lender can be chosen once it is known, never your own.'
 
-  // Directory entries are untrusted: only valid keys are offered, never the wallet's own.
+  // Directory entries are untrusted: only verified entries with valid keys are offered, never the
+  // wallet's own.
   const listed = useMemo<Lender[]>(
     () =>
       ownKey === undefined
         ? []
-        : entries.flatMap(entry => {
+        : lenders.flatMap(({ entry }) => {
             const pubkey = entry.pubkey.toLowerCase()
             const fingerprint = fingerprintOf(pubkey)
             return fingerprint && pubkey !== ownKey
               ? [{ pubkey, fingerprint, name: entry.display_name }]
               : []
           }),
-    [entries, fingerprintOf, ownKey],
+    [lenders, fingerprintOf, ownKey],
   )
 
   // A pasted key wins over the directory pick; picking from the directory clears it.

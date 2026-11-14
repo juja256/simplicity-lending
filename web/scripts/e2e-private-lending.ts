@@ -40,7 +40,12 @@ import {
   utxoOutpoint,
 } from '@/privateLending/candidate'
 import type { PrivateFlowDeps } from '@/privateLending/deps'
-import { registerInDirectory, removeFromDirectory } from '@/privateLending/directory'
+import {
+  checkDirectoryEntry,
+  type EntryCheck,
+  registerInDirectory,
+  removeFromDirectory,
+} from '@/privateLending/directory'
 import { buildPrivateAcceptance } from '@/privateLending/flows/acceptance'
 import { buildPrivateCancellation } from '@/privateLending/flows/cancellation'
 import { buildPrincipalClaim } from '@/privateLending/flows/claimPrincipal'
@@ -2383,9 +2388,12 @@ async function expectInvalidSignature(
 /**
  * The lender publishes terms for the configured pair in the local indexer's directory (`web/
  * README.md`, "Local testnet indexer"); a write whose name or terms differ from what was signed is
- * refused. The borrower lists the directory, finds the lender's entry and terms, and checks the
- * `create` proposal against them: within, also at exactly the least collateral, and one unit
- * below it only `CollateralBelowMinimum`. Last, the lender removes its entry. Nothing is broadcast.
+ * refused. The entry read back by key is verified against the key (`checkDirectoryEntry`), and the
+ * same entry as an indexer could alter it is not: one changed rate, another name or a signature
+ * from another key is `invalid`, a cleared signature `unsigned`. The borrower lists the directory,
+ * finds the lender's verified entry and terms, and checks the `create` proposal against them:
+ * within, also at exactly the least collateral, and one unit below it only
+ * `CollateralBelowMinimum`. Last, the lender removes its entry. Nothing is broadcast.
  */
 async function directoryStage(ctx: Context): Promise<void> {
   const { lender } = ctx.wallets
@@ -2445,6 +2453,36 @@ async function directoryStage(ctx: Context): Promise<void> {
       'GET shows the same',
   )
 
+  // What a reader checks: the served name and terms against the key, never the indexer's word.
+  const otherTerms = { pairs: [{ ...parsed.terms, min_apr_bps: parsed.terms.min_apr_bps + 1 }] }
+  if (fetched.signed_challenge === null || fetched.signature === null) {
+    throw new Error(`GET serves the entry without its signature: ${JSON.stringify(fetched)}`)
+  }
+  const otherKeySignature = wasm.signDirectoryAction(
+    ctx.wallets.borrower.lendingKey,
+    wasm.DirectoryAction.Put,
+    fetched.signed_challenge,
+    name,
+    JSON.stringify(terms),
+  )
+  const entryCases: [string, DirectoryEntry, EntryCheck['status']][] = [
+    ['as served', fetched, 'verified'],
+    ['with one changed rate', { ...fetched, terms: otherTerms }, 'invalid'],
+    ['with another name', { ...fetched, display_name: 'E2E Impostor' }, 'invalid'],
+    ['signed by another key', { ...fetched, signature: otherKeySignature }, 'invalid'],
+    ['with its signature cleared', { ...fetched, signature: null }, 'unsigned'],
+  ]
+  for (const [what, served, expected] of entryCases) {
+    const checked = checkDirectoryEntry(wasm, served)
+    if (
+      checked.status !== expected ||
+      (checked.status === 'verified' && !isDeepStrictEqual(checked.terms, terms))
+    ) {
+      throw new Error(`the entry ${what} checks as ${JSON.stringify(checked)}, not ${expected}`)
+    }
+    out(`  the entry ${what}: ${checked.status}`)
+  }
+
   // Signed over the name and the terms together: a write that changes either is refused.
   const signedPut = async (): Promise<PutDirectoryEntryBody> => {
     const { challenge } = await requestDirectoryChallenge(ctx.apiUrl)
@@ -2463,7 +2501,6 @@ async function directoryStage(ctx: Context): Promise<void> {
     { ...(await signedPut()), display_name: 'E2E Impostor' },
     'signed over another name',
   )
-  const otherTerms = { pairs: [{ ...parsed.terms, min_apr_bps: parsed.terms.min_apr_bps + 1 }] }
   await expectInvalidSignature(
     ctx,
     pubkey,
@@ -2471,23 +2508,28 @@ async function directoryStage(ctx: Context): Promise<void> {
     'signed over other terms',
   )
 
-  // The borrower: the lender's terms from the list, and the `create` proposal against them.
+  // The borrower: the lender's verified terms from the list, and the `create` proposal against
+  // them.
   const listed = (await listWholeDirectory(ctx.apiUrl)).find(item => item.pubkey === pubkey)
   if (listed === undefined) throw new Error('the directory list does not show the lender')
-  const pair = findPairTerms(listed.terms, { collateral, principal })
+  const listedCheck = checkDirectoryEntry(wasm, listed)
+  if (listedCheck.status !== 'verified') {
+    throw new Error(`the listed entry checks as ${listedCheck.status}: ${JSON.stringify(listed)}`)
+  }
+  const pair = findPairTerms(listedCheck.terms, { collateral, principal })
   if (
     pair === undefined ||
-    !isDeepStrictEqual(listed.terms, terms) ||
+    !isDeepStrictEqual(listedCheck.terms, terms) ||
     listed.terms_published_at !== entry.terms_published_at
   ) {
     throw new Error(`the directory lists the lender as ${JSON.stringify(listed)}`)
   }
   out(
-    `  the borrower lists "${listed.display_name}", terms published at ` +
+    `  the borrower lists "${listed.display_name}", verified, terms published at ` +
       formatPublishedAt(listed.terms_published_at!),
   )
 
-  const listedTerms = JSON.stringify(listed.terms)
+  const listedTerms = JSON.stringify(listedCheck.terms)
   const check = (proposal: ProposalInput): string[] =>
     wasm.checkProposal(listedTerms, JSON.stringify(proposal))
   const proposal = createProposal()

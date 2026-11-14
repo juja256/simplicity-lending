@@ -410,4 +410,95 @@ mod tests {
             "3639cfb10d0e74a5fcbd208c5826f648caf70eaa0150c2476778b0b39d9886e0"
         );
     }
+
+    const FIXTURE_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../web/scripts/fixtures/directory-parity.json"
+    );
+
+    /// A directory entry as the indexer serves it, without its timestamps: the terms in the JSON
+    /// the wasm takes (u64 amounts as decimal strings, u32 fields as numbers) and the put's
+    /// challenge and signature.
+    fn entry_json(
+        pubkey: &XOnlyPublicKey,
+        name: &str,
+        terms: &LenderTerms,
+        signature: &str,
+    ) -> serde_json::Value {
+        let pairs = terms
+            .pairs
+            .iter()
+            .map(|pair| {
+                serde_json::json!({
+                    "principal_asset": pair.principal_asset.to_string(),
+                    "collateral_asset": pair.collateral_asset.to_string(),
+                    "min_apr_bps": pair.min_apr_bps,
+                    "max_principal_per_collateral": pair.max_principal_per_collateral.to_string(),
+                    "min_term_days": pair.min_term_days,
+                    "max_term_days": pair.max_term_days,
+                    "min_principal": pair.min_principal.to_string(),
+                    "max_principal": pair.max_principal.to_string(),
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "pubkey": pubkey.serialize().to_hex(),
+            "display_name": name,
+            "terms": { "pairs": pairs },
+            "signed_challenge": CHALLENGE.to_hex(),
+            "signature": signature,
+        })
+    }
+
+    /// The entry the web's parity check verifies with the wasm (`verifyDirectoryEntry`). Its name
+    /// is not ASCII, so its length in bytes differs from its length in characters. Signatures take
+    /// random auxiliary data, so the fixture is written once, with
+    /// `WRITE_DIRECTORY_FIXTURE=1 cargo test -p private-lending-core directory_parity_entry`, then
+    /// `pnpm exec prettier --write scripts/fixtures/directory-parity.json` in `web`; otherwise the
+    /// test checks that the fixture's entry is this one and that its signature verifies.
+    #[test]
+    fn directory_parity_entry() {
+        let key = LendingKey::from_master_blinding_key(&[1; 32]);
+        let pk = key.x_only_public_key();
+        let name = "Acme Bank — Zürich";
+        let terms = known_answer_terms();
+        let description = concat!(
+            "A lender directory entry signed by private-lending-core, as the indexer serves it ",
+            "without its timestamps. Written by the directory_parity_entry test in directory.rs.",
+        );
+
+        if std::env::var_os("WRITE_DIRECTORY_FIXTURE").is_some() {
+            let signature =
+                sign_directory_action(&key, DirectoryAction::Put, &CHALLENGE, name, Some(&terms))
+                    .unwrap();
+            let fixture = serde_json::json!({
+                "description": description,
+                "entry": entry_json(&pk, name, &terms, &signature.serialize().to_hex()),
+            });
+            let text = serde_json::to_string_pretty(&fixture).unwrap() + "\n";
+            std::fs::write(FIXTURE_PATH, text).unwrap();
+            return;
+        }
+
+        let text = std::fs::read_to_string(FIXTURE_PATH).unwrap();
+        let written: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let signature_hex = written["entry"]["signature"].as_str().unwrap();
+        let fixture = serde_json::json!({
+            "description": description,
+            "entry": entry_json(&pk, name, &terms, signature_hex),
+        });
+        assert_eq!(
+            written, fixture,
+            "the fixture is stale; regenerate it as this test's documentation says"
+        );
+        let signature: schnorr::Signature = signature_hex.parse().unwrap();
+        assert!(verify_directory_action(
+            &pk,
+            DirectoryAction::Put,
+            &CHALLENGE,
+            name,
+            Some(&terms),
+            &signature
+        ));
+    }
 }

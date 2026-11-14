@@ -9,25 +9,30 @@ import {
 import { formatAmount } from '@/utils/format'
 
 interface PairTermsSummaryProps {
-  /** A directory entry's terms; null when it has none, or none the app could read. */
-  terms: LenderTermsInput | null
-  /** Unix seconds; null when the entry has no terms. */
+  /**
+   * A directory entry's terms as `checkDirectoryEntry` verified them; null when the entry did not
+   * verify, and when it has no terms.
+   */
+  verifiedTerms: LenderTermsInput | null
+  /** The entry's `terms_published_at`: unix seconds, null when it has no terms. */
   publishedAt: number | null
 }
 
 /**
- * A lender's terms for the configured pair, as the directory serves them, and when they were
- * published. Terms for other pairs are not shown.
+ * A lender's verified terms for the configured pair, and when the indexer says they were
+ * published. Terms for other pairs are not shown, nor terms that did not verify.
  */
-export default function PairTermsSummary({ terms, publishedAt }: PairTermsSummaryProps) {
+export default function PairTermsSummary({ verifiedTerms, publishedAt }: PairTermsSummaryProps) {
   const { collateralAsset: collateral, principalAsset: principal } = NETWORK_CONFIG
-  const pair = findPairTerms(terms, { collateral, principal })
+  const pair = findPairTerms(verifiedTerms, { collateral, principal })
   if (pair === undefined) {
     return (
       <p className='text-muted text-xs'>
-        {terms === null
-          ? 'No terms published.'
-          : `No terms for ${principal.symbol} against ${collateral.symbol}.`}
+        {verifiedTerms !== null
+          ? `No terms for ${principal.symbol} against ${collateral.symbol}.`
+          : publishedAt === null
+            ? 'No terms published.'
+            : 'These terms could not be verified'}
       </p>
     )
   }

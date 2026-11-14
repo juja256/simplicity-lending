@@ -132,8 +132,10 @@ Initialises LWK and the private lending wasm module in Node and compares them wi
 `scripts/fixtures/private-lending-parity.json`, made from a regtest offer by the Rust code. It
 checks the program id, the contract arguments as lender and as borrower, the output script hashes,
 and the pending offer, active offer and lender NFT lock scripts, and that a tampered commitment is
-rejected. It must print `private lending parity: ok` before the browser's offer addresses are
-relied on (C2). Needs the wasm module built first.
+rejected. It also verifies `scripts/fixtures/directory-parity.json`, a directory entry the Rust
+core signed, with the wasm, and checks that the entry with a changed rate, name, key or challenge
+does not verify. It must print `private lending parity: ok` before the browser's offer addresses
+are relied on (C2). Needs the wasm module built first.
 
 ## Private lending e2e on Liquid testnet
 
@@ -193,11 +195,13 @@ With no stage named, every stage below runs in this order.
   lender publishes "E2E Lender" with terms for the configured pair, typed as in the app: at least
   10 % APR, twice the `create` offer's principal per collateral, 1 to 30 days and a tenth to a
   hundred times its principal. `PUT` and `GET` must return the terms and their publication time,
-  and a write signed over another name or other terms must get a 401. The borrower then lists the
-  directory and finds the lender's entry and terms, and `checkProposal` must find no breach in the
-  `create` proposal (built from the amounts under Funding and the 1 440-block term, so no `create`
-  record is needed) nor at exactly the least collateral, and only `CollateralBelowMinimum` one
-  unit below it. Last, the lender removes its entry, which `GET` and the list must no longer show.
+  and a write signed over another name or other terms must get a 401. The entry read back by key
+  must verify against the key, and the same entry with one changed rate, another name or a
+  signature from another key must not; with its signature cleared it is unsigned. The borrower
+  then lists the directory and finds the lender's verified entry and terms, and `checkProposal`
+  must find no breach in the `create` proposal (built from the amounts under Funding and the
+  1 440-block term, so no `create` record is needed) nor at exactly the least collateral, and
+  only `CollateralBelowMinimum` one unit below it. Last, the lender removes its entry, which `GET` and the list must no longer show.
 
 Each stage prints its txids and the PSET it built, with the checks it ran. It fails if a covenant
 or NFT input's witness outweighs the constant its builder gives LWK for the fee: on chain, and in

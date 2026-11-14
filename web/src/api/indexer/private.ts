@@ -131,13 +131,20 @@ export const directoryEntrySchema = zod.object({
   /** Chosen by whoever holds the key: never a verified identity. */
   display_name: zod.string(),
   /**
-   * The lender's terms, unchecked beyond their shape (the wasm checks them before use). Null for an
-   * entry without terms, and for terms the indexer could not decode or served malformed: one such
-   * entry must not hide the others.
+   * The lender's terms, unchecked beyond their shape: use them only as `checkDirectoryEntry`
+   * returns them, verified. Null for an entry without terms, and for terms the indexer could not
+   * decode or served malformed: one such entry must not hide the others.
    */
   terms: lenderTermsSchema.nullable().catch(null),
-  /** Unix seconds of the terms' publication; null when the entry has no terms. */
+  /** Unix seconds of the terms' publication; null when the entry has no terms. Not signed. */
   terms_published_at: unixSecondsSchema.nullable(),
+  /**
+   * The challenge the last put consumed and the signature it carried, as served: hex the wasm
+   * checks (`checkDirectoryEntry`), so malformed hex fails that check instead of the whole list.
+   * Null for an entry written before the indexer kept them, and for a value that is not a string.
+   */
+  signed_challenge: zod.string().nullable().catch(null),
+  signature: zod.string().nullable().catch(null),
   /** Unix seconds. */
   created_at: unixSecondsSchema,
   updated_at: unixSecondsSchema,

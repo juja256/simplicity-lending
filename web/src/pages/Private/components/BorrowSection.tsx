@@ -149,15 +149,18 @@ function PendingCreationRow({
 }
 
 /**
- * The lenders of the directory with their terms and when they published them, to choose a lender
- * by; never the wallet's own entry, nor a key that is not valid.
+ * The lenders of the directory whose entries verified, with their terms and when they published
+ * them, to choose a lender by; never the wallet's own entry, nor a key that is not valid. Entries
+ * that did not verify are only counted.
  */
 function ListedLenders({ directory }: { directory: ReturnType<typeof useDirectory> }) {
   const fingerprintOf = useFingerprintOf()
-  const { own, entries } = directory
-  const lenders = entries.flatMap(entry => {
-    const fingerprint = fingerprintOf(entry.pubkey)
-    return fingerprint && entry.pubkey !== own?.pubkey ? [{ entry, fingerprint }] : []
+  const { identity, hiddenCount } = directory
+  const lenders = directory.lenders.flatMap(lender => {
+    const fingerprint = fingerprintOf(lender.entry.pubkey)
+    return fingerprint && lender.entry.pubkey !== identity?.pubkey
+      ? [{ ...lender, fingerprint }]
+      : []
   })
 
   return (
@@ -178,13 +181,20 @@ function ListedLenders({ directory }: { directory: ReturnType<typeof useDirector
         </div>
       ) : (
         <ul className='flex max-h-96 flex-col gap-2 overflow-y-auto'>
-          {lenders.map(({ entry, fingerprint }) => (
+          {lenders.map(({ entry, terms, fingerprint }) => (
             <li key={entry.pubkey} className='bg-surface flex flex-col gap-2 rounded-2xl p-4'>
               <KeyFingerprint fingerprint={fingerprint} name={entry.display_name} />
-              <PairTermsSummary terms={entry.terms} publishedAt={entry.terms_published_at} />
+              <PairTermsSummary verifiedTerms={terms} publishedAt={entry.terms_published_at} />
             </li>
           ))}
         </ul>
+      )}
+      {directory.directory.isSuccess && hiddenCount > 0 && (
+        <p className='text-muted text-xs'>
+          {hiddenCount === 1
+            ? 'One more lender is not shown: its terms could not be verified.'
+            : `${hiddenCount} more lenders are not shown: their terms could not be verified.`}
+        </p>
       )}
     </div>
   )

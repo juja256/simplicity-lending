@@ -13,5 +13,9 @@ export const privateQueryKeys = {
  */
 export const privateDirectoryQueryKeys = {
   all: () => ['private-directory'] as const,
-  list: (apiBaseUrl: string) => ['private-directory', apiBaseUrl] as const,
+  /** The list and every entry read by key, of one indexer. */
+  api: (apiBaseUrl: string) => ['private-directory', apiBaseUrl] as const,
+  list: (apiBaseUrl: string) => ['private-directory', apiBaseUrl, 'list'] as const,
+  entry: (apiBaseUrl: string, pubkey: string) =>
+    ['private-directory', apiBaseUrl, 'entry', normalizeHex(pubkey)] as const,
 } as const
