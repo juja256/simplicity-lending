@@ -943,6 +943,20 @@ Branch `v2/phase-4-two-areas`.
     nginx `/.well-known/liquid-asset-proof-` block (its endpoint is gone), redirects for the old
     docs URLs (`/docs/borrower/*`, `/docs/lender/*`, `/docs/protocol/*`), and the unwrapped prose
     in `docs/docs/{developers,contracts}` and `simplicity.md`.
+- **Carried from phase 3's review:**
+  - Readers cannot check what the indexer serves. Store the put's challenge and signature with
+    the entry, serve them, and verify them in the browser (a wasm `verifyDirectoryAction`) before
+    showing a lender or building a proposal from its terms; run served terms through
+    `encodeLenderTerms` (`validate`) too. This proves the key signed exactly that name and those
+    terms; freshness and completeness still rest on the indexer.
+  - One rule for how a proposal's `term_blocks` is measured, shared by the borrower's form and
+    the console's check: the e2e's real offers count the expiry from the build tip and come out
+    under `min_term_days · 1440`, so `checkProposal` flags them as too short.
+  - The lender's own terms are not taken from the served list: keep them locally, or verify them
+    as above, before pre-filling the edit form; find the lender's own entry by key
+    (`fetchDirectoryEntry`), so a lender listed before phase 3 (no terms) does not look unlisted.
+  - The APR error message names the APR, not "an amount"; an entry whose terms could not be read
+    says so instead of "No terms published."
 - **Done when:** `pnpm build` and `pnpm lint` pass; a scripted testnet demo runs: the lender
   publishes terms, the borrower's form refuses a lower APR and less collateral, an e2e-built
   proposal outside the terms shows the badge naming the broken terms, the lender accepts, the
