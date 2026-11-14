@@ -36,6 +36,7 @@ import { useLwk } from '@/providers/lwk/useLwk'
 import { ErrorHandler } from '@/utils/errorHandler'
 import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
+import { walletIdentityScript } from './identity'
 import {
   type CachePolicy,
   type ConnectOptions,
@@ -394,9 +395,11 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         }
         const { total: balances, confirmed: confirmedBalances, pending: pendingBalances } = loaded
 
-        const address = wollet.address(0).address()
-        const receiveAddress = connector.receiveAddress?.() ?? address.toString()
-        const scriptPubkey = address.scriptPubkey().toString()
+        // The receive address is a fresh one; the session's `scriptPubkey` is the wallet's
+        // identity, address 0, which keys its saved private transactions and is never a receiver.
+        const receiveAddress =
+          connector.receiveAddress?.() ?? wollet.address(null).address().toString()
+        const scriptPubkey = walletIdentityScript(wollet)
 
         setState(s => ({
           ...s,
@@ -553,11 +556,11 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     [withAssetContracts],
   )
 
-  const getReceiveAddress = useCallback(
-    async (): Promise<string | null> =>
-      sessionRef.current?.connector.receiveAddress?.() ?? state.receiveAddress,
-    [state.receiveAddress],
-  )
+  const getReceiveAddress = useCallback(async (): Promise<string | null> => {
+    const session = sessionRef.current
+    if (!session) return null
+    return session.connector.receiveAddress?.() ?? session.wollet.address(null).address().toString()
+  }, [])
 
   const getChangeAddress = useCallback(async (): Promise<Address> => {
     const session = sessionRef.current
@@ -571,7 +574,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     if (!session) throw new Error('WalletProvider: not connected')
     if (session.connector.receiveAddress) return getReceiveAddress().then(String)
     if (!session.connector.getVerifiedReceiveAddress) {
-      return session.wollet.address(0).address().toString()
+      return session.wollet.address(null).address().toString()
     }
 
     return session.connector.getVerifiedReceiveAddress(

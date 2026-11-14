@@ -30,7 +30,7 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
   const { item } = props
   const { terms } = item
   const { principalAsset } = NETWORK_CONFIG
-  const { getReceiveAddress, confirmedBalances } = useWallet()
+  const { confirmedBalances } = useWallet()
   const { data: tipHeight } = useBlockHeight()
   const { formatCollateralDisplay, formatPrincipalAmount } = useFormatAmount()
 
@@ -73,7 +73,7 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
       borrowerNftOutpoint: borrowerNft,
       principalCoins,
       feeCoins,
-      collateralReceiver: await walletReceiver(deps, getReceiveAddress),
+      collateralReceiver: walletReceiver(deps),
     })
   }
 

@@ -1,7 +1,7 @@
 // The wallet's side of a private build: coin selection over the wallet's coins with their secrets
 // (`WalletTxOut`), and the wallet's receive address. The selection rules of `@/lwk/utxo` apply
 // (confirmed coins, the fee reserve), and the picked coins keep their type.
-import type { Address, WalletTxOut } from 'lwk_wasm'
+import type { WalletTxOut } from 'lwk_wasm'
 
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import {
@@ -13,6 +13,8 @@ import {
 import { formatFeeReserve } from '@/utils/format'
 
 import type { PrivateFlowDeps } from './deps'
+
+export { walletReceiver } from './receiver'
 
 /** Confirmed coins of `asset` covering `amount`. Throws on an insufficient balance. */
 export function selectAssetCoins(
@@ -144,14 +146,4 @@ export function selectCreationCoins(
     collateralAmount,
     feeRate,
   )
-}
-
-/** The wallet's receive address, a confidential one, for a builder's receiver. */
-export async function walletReceiver(
-  deps: Pick<PrivateFlowDeps, 'lwk' | 'network'>,
-  getReceiveAddress: () => Promise<string | null>,
-): Promise<Address> {
-  const address = await getReceiveAddress()
-  if (!address) throw new Error('Missing wallet receive address')
-  return deps.lwk.Address.parse(address, deps.network)
 }

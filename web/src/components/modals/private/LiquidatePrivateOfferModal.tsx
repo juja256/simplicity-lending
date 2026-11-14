@@ -10,7 +10,6 @@ import { utxoOutpoint } from '@/privateLending/candidate'
 import { buildPrivateLiquidation } from '@/privateLending/flows/liquidation'
 import { isPastExpiry } from '@/privateLending/offerView'
 import { selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
-import { useWallet } from '@/providers/wallet/useWallet'
 import { ACCEPTANCE_OUTPUT } from '@/simplicity/private-lending/layout'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
 
@@ -26,7 +25,6 @@ const LIQUIDATE_WEIGHT_UNITS =
 /** The lender takes the collateral of an expired loan, burning its lender NFT. */
 export default function LiquidatePrivateOfferModal(props: PrivateOfferActionModalProps) {
   const { terms } = props.item
-  const { getReceiveAddress } = useWallet()
   const { data: tipHeight } = useBlockHeight()
   const { formatCollateralDisplay } = useFormatAmount()
   const isExpired = isPastExpiry(terms, tipHeight)
@@ -47,7 +45,7 @@ export default function LiquidatePrivateOfferModal(props: PrivateOfferActionModa
       // The acceptance created the active offer and paid the lender NFT in the same transaction.
       lenderNftOutpoint: `${utxo.txid}:${ACCEPTANCE_OUTPUT.lenderNft}`,
       feeCoins,
-      collateralReceiver: await walletReceiver(deps, getReceiveAddress),
+      collateralReceiver: walletReceiver(deps),
       tipHeight: currentTip,
     })
   }
