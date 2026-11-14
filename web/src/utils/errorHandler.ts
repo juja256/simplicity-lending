@@ -23,10 +23,8 @@ function describeInsufficientAsset(message: string): string | null {
     return `Insufficient ${NETWORK_CONFIG.collateralAsset.symbol} balance: missing ${formatFeeReserve(amount)}.`
   }
 
-  const asset = [NETWORK_CONFIG.principalAsset, NETWORK_CONFIG.protocolFeeAsset].find(
-    candidate => candidate.id.toLowerCase() === assetId,
-  )
-  if (asset) {
+  const asset = NETWORK_CONFIG.principalAsset
+  if (asset.id.toLowerCase() === assetId) {
     return `Insufficient ${asset.symbol} balance: missing ${formatAmount(amount, asset.decimals)} ${asset.symbol}.`
   }
 
