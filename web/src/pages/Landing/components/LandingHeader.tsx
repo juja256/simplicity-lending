@@ -85,7 +85,7 @@ export function LandingHeader() {
 
           <div className='flex items-center gap-2 sm:gap-3'>
             <a
-              className={`${buttonVariants({ variant: 'ghost' })} hidden sm:inline-flex`}
+              className={`${buttonVariants({ variant: 'ghost' })} hidden lg:inline-flex`}
               href={ExternalLink.AboutSimplicity}
               target='_blank'
               rel='noopener noreferrer'
@@ -95,7 +95,7 @@ export function LandingHeader() {
             </a>
             {env.VITE_NETWORK === 'liquidtestnet' && (
               <a
-                className={`${buttonVariants({ variant: 'outline' })} hidden sm:inline-flex`}
+                className={`${buttonVariants({ variant: 'outline' })} hidden lg:inline-flex`}
                 style={
                   {
                     borderColor: 'var(--accent)',
@@ -113,10 +113,23 @@ export function LandingHeader() {
               </a>
             )}
 
+            <Link
+              to={RoutePath.Borrow}
+              className={`${buttonVariants({ variant: 'secondary' })} hidden sm:inline-flex`}
+            >
+              Borrow
+            </Link>
+            <Link
+              to={RoutePath.Lend}
+              className={`${buttonVariants({ variant: 'primary' })} hidden sm:inline-flex`}
+            >
+              Lender console
+            </Link>
+
             <Drawer.Root isOpen={isMenuOpen} onOpenChange={setIsMenuOpen}>
               <Drawer.Trigger
                 aria-label='Menu'
-                className={`${buttonVariants({ variant: 'ghost', isIconOnly: true })} sm:hidden`}
+                className={`${buttonVariants({ variant: 'ghost', isIconOnly: true })} lg:hidden`}
               >
                 <span className='flex size-full items-center justify-center'>
                   <MenuIcon className='size-5' />
@@ -146,7 +159,7 @@ export function LandingHeader() {
                     </Drawer.Body>
                     <Drawer.Footer className='flex-col items-stretch'>
                       <Link
-                        to={RoutePath.Private}
+                        to={RoutePath.Lend}
                         className={buttonVariants({
                           variant: 'primary',
                           size: 'lg',
@@ -154,7 +167,19 @@ export function LandingHeader() {
                         })}
                         onClick={closeMenu}
                       >
-                        Launch App
+                        Open lender console
+                        <ArrowRightIcon className='size-4' />
+                      </Link>
+                      <Link
+                        to={RoutePath.Borrow}
+                        className={buttonVariants({
+                          variant: 'secondary',
+                          size: 'lg',
+                          fullWidth: true,
+                        })}
+                        onClick={closeMenu}
+                      >
+                        Borrow
                         <ArrowRightIcon className='size-4' />
                       </Link>
                     </Drawer.Footer>
@@ -162,13 +187,6 @@ export function LandingHeader() {
                 </Drawer.Content>
               </Drawer.Backdrop>
             </Drawer.Root>
-
-            <Link
-              to={RoutePath.Private}
-              className={`${buttonVariants({ variant: 'primary' })} hidden sm:inline-flex`}
-            >
-              Launch App
-            </Link>
           </div>
         </div>
       </div>
