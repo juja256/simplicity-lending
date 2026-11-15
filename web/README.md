@@ -161,7 +161,7 @@ broadcasts real Liquid testnet transactions. It never touches mainnet.
 
 ### Stages
 
-With no stage named, every stage below runs in this order.
+With no stage named, every stage below but `short-proposal` runs in this order.
 
 - `wallets`: prints each wallet's address, confirmed balances and lending-key fingerprint. A
   wallet with too few confirmed tL-BTC coins is split into 6 × 15 000 tL-sats (borrower) or
@@ -208,6 +208,11 @@ With no stage named, every stage below runs in this order.
   must find no breach in the `create` proposal (built from the amounts under Funding and the
   1 440-block term, so no `create` record is needed) nor at exactly the least collateral, and
   only `CollateralBelowMinimum` one unit below it. Last, the lender removes its entry, which `GET` and the list must no longer show.
+- `short-proposal`: runs only when named, for the testnet demo (below). A new offer to the lender
+  that expires 15 blocks after the tip (record `short-proposal`), which the lender opens and
+  verifies. Counted by the term rule, its term is under a day, so against the `directory` stage's
+  terms it must break the shortest term only. The stage stops there; the demo accepts and
+  liquidates it.
 
 Each stage prints its txids and the PSET it built, with the checks it ran. It fails if a covenant
 or NFT input's witness outweighs the constant its builder gives LWK for the fee: on chain, and in
@@ -297,7 +302,8 @@ creation, which needs the funds again.
 ### Funding
 
 Every run first checks that both wallets hold, in confirmed coins, what the transactions without a
-`confirmed` record still need, and exits 1 naming each shortfall and the address to fund. Each
+`confirmed` record still need (`short-proposal` only when it is named), and exits 1 naming each
+shortfall and the address to fund. Each
 stage checks its own need again right before it builds. The needs, per record, are in
 `STAGE_NEEDS` (`scripts/e2e/env.ts`), from these amounts: collateral 20 000 tL-sats, principal
 1 000 TEST units, repayment 1 100 TEST units, and 2 000 tL-sats of fee budget per transaction. A
@@ -310,6 +316,58 @@ state, the stages need:
 
 The cancellation returns the borrower's collateral, and the liquidation pays its collateral to the
 lender.
+
+## Scripted testnet demo
+
+```bash
+pnpm exec playwright install chromium   # once
+pnpm demo:testnet
+```
+
+Drives both areas of the app with Playwright on Liquid testnet, with the e2e's two seed wallets:
+the lender in the console at 1280 px, the borrower in the borrower app at 375 × 812, each in its
+own browser context, connected through the connect modal's test-seed option. It broadcasts real
+transactions and waits for their blocks: a run takes 30 to 60 minutes. One test, one step per
+part:
+
+1. the lender publishes the `directory` stage's terms as "E2E Lender" on `/lend/terms`, and the
+   console shows the name, the key fingerprint and "Seed phrase" on the wallet button; the terms
+   form opens pre-filled from the verified entry; under 1024 px the sidebar becomes a top bar;
+2. the borrower picks the lender on `/borrow`; the form opens at the lender's minimums, the
+   summary sentence follows the typing, an APR one basis point low and a collateral one base unit
+   low each show their error and keep "Lock collateral and send" disabled; at the minimums the
+   proposal is sent, the app moves to `/borrow/loans`, which shows it "Waiting for E2E Lender",
+   and the wallet button moves on to a new address;
+3. `pnpm e2e:private short-proposal` runs, and the lender's proposals show it as "Term shorter
+   than 1 day"; as its term is 15 blocks, the lender accepts it at once, after ticking "Accept
+   outside my terms";
+4. the lender accepts the borrower's proposal, within its terms; the borrower receives the
+   principal and repays; the lender claims the repayment;
+5. once the short loan expired, the lender liquidates it, and the loan book shows it liquidated;
+6. each borrower page has no horizontal scroll at 375 px, and every page of both areas gets a
+   screenshot.
+
+It needs:
+
+- the e2e set up and funded (Setup, above); the demo first runs the `wallets` stage, which exits 1
+  naming any shortfall. Besides `short-proposal`'s funds, the demo's own loan takes 0.00001 tL-BTC
+  of collateral from the borrower and 0.1 TEST from the lender, with fees;
+- the local testnet indexer (above), indexing, on a fresh database that starts at the tip
+  (`INDEXER__LAST_INDEXED_HEIGHT`), after an earlier run's last transaction: the demo finds its
+  loans by their amounts, so an earlier run's loans would match too. The dev server proxies it
+  from `DEMO_INDEXER_URL` (default `http://127.0.0.1:8000`);
+- esplora requests to spare: blockstream.info serves 700 an hour to an IP, and the two wallets'
+  polling, the e2e stages and an indexer on the same esplora spend that within the run, after
+  which the app's transactions stop moving. Leave the indexer on its default esplora
+  (liquid.network, without `ESPLORA__BASE_URL`), and if blockstream.info refuses already, set
+  `DEMO_ESPLORA_URL=https://liquid.network/liquidtestnet` for the app and the e2e stages.
+
+The demo starts its own dev server, `pnpm dev --mode demo` on port 5199, proxying the indexer
+under `/api`. A `short-proposal` record that an earlier run left confirmed is removed first, so
+the stage makes a new proposal. Screenshots and the e2e stages' output go to `.demo-output/`, and
+Playwright's output (the page snapshot of a failure) to `test-results/`, both git-ignored. There is
+no trace or report, which could keep the seed phrases typed into the app. The demo's proposals
+are addressed to the e2e lender, so a `scan` whose indexed range covers a demo finds them too.
 
 ## Run
 
