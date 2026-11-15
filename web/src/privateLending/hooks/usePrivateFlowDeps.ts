@@ -2,6 +2,7 @@
 // wallet from `WalletProvider`, esplora, the indexer and the covenant sources. Only these hooks
 // read the app's providers; the builders get everything through `PrivateFlowDeps`.
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import type { Wollet } from 'lwk_wasm'
 import { useCallback } from 'react'
 import { sources } from 'virtual:simplicity-sources'
 
@@ -11,6 +12,7 @@ import { esploraQueryKeys } from '@/api/esplora/queryKeys'
 import { env } from '@/constants/env'
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import { getLwk } from '@/lwk'
+import { AddressCursor } from '@/privateLending/addressCursor'
 import type { PrivateFlowDeps } from '@/privateLending/deps'
 import { getPrivateLendingWasm } from '@/privateLending/wasm'
 import { useLwk } from '@/providers/lwk/useLwk'
@@ -31,6 +33,19 @@ const PRIVATE_SOURCES: PrivateLendingSources = {
 // A fee rate this fresh is reused.
 const FEE_RATE_STALE_MS = 30_000
 
+// The address cursor of each wallet session, keyed by the session's `Wollet`: every connection
+// makes a new one, so a disconnect or a switch drops the cursor with the session it belonged to.
+const sessionAddresses = new WeakMap<Wollet, AddressCursor>()
+
+function addressesOf(wollet: Wollet): AddressCursor {
+  let cursor = sessionAddresses.get(wollet)
+  if (!cursor) {
+    cursor = new AddressCursor()
+    sessionAddresses.set(wollet, cursor)
+  }
+  return cursor
+}
+
 /**
  * The fee rate a build pays, in sat/kvb: esplora's estimate if it is a finite number above zero,
  * else `FALLBACK_FEE_RATE_SAT_PER_KVB`. Esplora's answer passes through unchecked, so it can be
@@ -45,7 +60,8 @@ function usableFeeRate(estimate: unknown): number {
 /**
  * A function that assembles fresh `PrivateFlowDeps` for one build or scan: the connected wallet's
  * `Wollet` and coins, esplora's transactions (checked against the requested txid), its tip height
- * and its fee rate in sat/kvb (`usableFeeRate`; a failed fee query also gives the fallback).
+ * and its fee rate in sat/kvb (`usableFeeRate`; a failed fee query also gives the fallback),
+ * and the session's address cursor, the same for every build of the session.
  * Rejects while no wallet is connected. Sync the wallet first when its coins must be current.
  */
 export function usePrivateFlowDeps(): () => Promise<PrivateFlowDeps> {
@@ -73,6 +89,7 @@ export function usePrivateFlowDeps(): () => Promise<PrivateFlowDeps> {
       networkName: network,
       sources: PRIVATE_SOURCES,
       wollet,
+      addresses: addressesOf(wollet),
       walletUtxos: () => wollet.utxos(),
       fetchTx: async txid => {
         const tx = lwk.Transaction.fromBytes(await fetchTxRaw(txid))

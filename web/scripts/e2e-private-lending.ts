@@ -33,6 +33,7 @@ import {
   requestDirectoryChallenge,
 } from '@/api/indexer/private'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
+import { AddressCursor } from '@/privateLending/addressCursor'
 import {
   borrowerNftOutpoint as candidateBorrowerNftOutpoint,
   repaymentBorrowerNftOutpoint,
@@ -214,18 +215,35 @@ function requireStageNeed(ctx: Context, stage: Stage): void {
 
 /**
  * Throws `wallet identity changed` if a wallet's identity script differs from the one the
- * `wallets` stage saved; with `save`, saves the ones not saved yet. The saved private transactions
- * of the app are keyed by it, so taking fresh receive addresses must leave it as it was.
+ * `wallets` stage saved. With `save` (the `wallets` stage), saves the ones not saved yet; without
+ * it, throws if one is not saved, so no stage runs unchecked. The saved private transactions of
+ * the app are keyed by it, so taking fresh receive addresses must leave it as it was.
  */
 function checkWalletIdentities(ctx: Context, save: boolean): void {
   for (const name of NAMES) {
     const script = walletIdentityScript(ctx.wallets[name].wollet)
     const saved = getWalletIdentity(name)
-    if (saved !== undefined && saved !== script) {
+    if (saved === undefined) {
+      if (!save) throw new Error(`no saved identity for the ${name}: run the wallets stage`)
+      saveWalletIdentity(name, script)
+    } else if (saved !== script) {
       throw new Error(`wallet identity changed: ${name} was ${saved}, is ${script}`)
     }
-    if (saved === undefined && save) saveWalletIdentity(name, script)
   }
+}
+
+/**
+ * The address cursor of wallet `name` for this run, one wallet session: it logs each receive and
+ * change index it hands out, and throws if one repeats within the run.
+ */
+function runAddresses(name: Wallet): AddressCursor {
+  const handedOut = new Set<string>()
+  return new AddressCursor((chain, index) => {
+    out(`${name} ${chain} index ${index}`)
+    const key = `${chain} ${index}`
+    if (handedOut.has(key)) throw new Error(`${name}: ${chain} index ${index} handed out twice`)
+    handedOut.add(key)
+  })
 }
 
 async function walletsStage(ctx: Context): Promise<void> {
@@ -449,13 +467,17 @@ async function buildFreshCreation(
 }
 
 /**
- * A fresh receiver for the borrower NFT of the creation `stage`, saved in the state. Throws if an
- * earlier creation saved the same one: the wallet must have applied each broadcast creation
- * before the next takes its address.
+ * A fresh receiver for the borrower NFT of the creation `stage`, saved in the state. Throws if it
+ * is the wallet's identity (address 0), or if an earlier creation saved the same one: the
+ * session's address cursor must hand out a new address to each flow.
  */
 function creationNftReceiver(ctx: Context, stage: CreationRecord): lwk.Address {
-  const receiver = walletReceiver({ wollet: ctx.wallets.borrower.wollet })
+  const { borrower } = ctx.wallets
+  const receiver = walletReceiver(borrower)
   const address = receiver.toString()
+  if (receiver.scriptPubkey().toString() === walletIdentityScript(borrower.wollet)) {
+    throw new Error(`NFT receiver is the wallet's identity: ${address}`)
+  }
   for (const [other, saved] of Object.entries(getNftReceivers())) {
     if (other !== stage && saved === address) throw new Error(`NFT receiver reused: ${address}`)
   }
@@ -573,11 +595,7 @@ async function checkCreatedTerm(ctx: Context, txid: string): Promise<void> {
 /** A creation built twice and checked, but never signed, broadcast or saved. */
 async function createDryStage(ctx: Context): Promise<void> {
   requireStageNeed(ctx, 'create')
-  await buildFreshCreation(
-    ctx,
-    offerExpiry,
-    walletReceiver({ wollet: ctx.wallets.borrower.wollet }),
-  )
+  await buildFreshCreation(ctx, offerExpiry, walletReceiver(ctx.wallets.borrower))
   out('\ncreate-dry: ok (nothing signed, broadcast or saved)')
 }
 
@@ -830,7 +848,7 @@ async function buildSignedAcceptance(
   offer: VerifiedOffer,
 ): Promise<{ hex: string; txid: string }> {
   const { lender } = ctx.wallets
-  const lenderNftReceiver = walletReceiver({ wollet: lender.wollet })
+  const lenderNftReceiver = walletReceiver(lender)
   const principalCoins = pickCoins(lender, TESTNET_ASSETS.principal, PRINCIPAL, 'lender principal')
   const feeCoins = pickCoins(lender, TESTNET_ASSETS.policy, FEE_BUDGET, 'lender fee')
   out(`principal coins ${principalCoins.map(outpointOf).join(', ')}`)
@@ -943,7 +961,7 @@ async function buildSignedClaim(
   acceptTxid: string,
 ): Promise<{ hex: string; txid: string }> {
   const { borrower } = ctx.wallets
-  const receiver = walletReceiver({ wollet: borrower.wollet })
+  const receiver = walletReceiver(borrower)
   const feeCoins = pickCoins(borrower, TESTNET_ASSETS.policy, FEE_BUDGET, 'borrower fee')
   out(`fee coins ${feeCoins.map(outpointOf).join(', ')}`)
 
@@ -1136,7 +1154,7 @@ async function buildSignedRepayment(
   acceptTxid: string,
 ): Promise<{ hex: string; txid: string }> {
   const { borrower } = ctx.wallets
-  const collateralReceiver = walletReceiver({ wollet: borrower.wollet })
+  const collateralReceiver = walletReceiver(borrower)
   const principalCoins = pickCoins(
     borrower,
     TESTNET_ASSETS.principal,
@@ -1320,7 +1338,7 @@ async function repayHostileDryStage(ctx: Context): Promise<void> {
     'borrower repayment',
   )
   const feeCoins = pickCoins(borrower, TESTNET_ASSETS.policy, FEE_BUDGET, 'borrower fee')
-  const collateralReceiver = walletReceiver({ wollet: borrower.wollet })
+  const collateralReceiver = walletReceiver(borrower)
   const deps = stopAtBuild(flowDeps(borrower, ctx.chain))
   const tryBuild = (activeOfferOutpoint: string, borrowerNftOutpoint: string) =>
     buildPrivateRepayment(deps, offer, {
@@ -1460,7 +1478,7 @@ async function buildSignedRepaymentClaim(
   repayTxid: string,
 ): Promise<{ hex: string; txid: string }> {
   const { lender } = ctx.wallets
-  const receiver = walletReceiver({ wollet: lender.wollet })
+  const receiver = walletReceiver(lender)
   const feeCoins = pickCoins(lender, TESTNET_ASSETS.policy, FEE_BUDGET, 'lender fee')
   out(`fee coins ${feeCoins.map(outpointOf).join(', ')}`)
 
@@ -1668,7 +1686,7 @@ async function buildSignedCancellation(
   creationTxid: string,
 ): Promise<{ hex: string; txid: string }> {
   const { borrower } = ctx.wallets
-  const collateralReceiver = walletReceiver({ wollet: borrower.wollet })
+  const collateralReceiver = walletReceiver(borrower)
   const feeCoins = pickCoins(borrower, TESTNET_ASSETS.policy, FEE_BUDGET, 'borrower fee')
   out(`fee coins ${feeCoins.map(outpointOf).join(', ')}`)
 
@@ -1812,7 +1830,7 @@ function liquidationParams(ctx: Context, acceptTxid: string, tipHeight: number):
     activeOfferOutpoint: `${acceptTxid}:${ACCEPTANCE_OUTPUT.activeOffer}`,
     lenderNftOutpoint: `${acceptTxid}:${ACCEPTANCE_OUTPUT.lenderNft}`,
     feeCoins: pickCoins(lender, TESTNET_ASSETS.policy, FEE_BUDGET, 'lender fee'),
-    collateralReceiver: walletReceiver({ wollet: lender.wollet }),
+    collateralReceiver: walletReceiver(lender),
     tipHeight,
   }
 }
@@ -2701,8 +2719,8 @@ async function main(): Promise<void> {
   const ctx: Context = {
     chain: createChain(env.esploraApi),
     wallets: {
-      borrower: seedWallet(env, env.borrowerMnemonic),
-      lender: seedWallet(env, env.lenderMnemonic),
+      borrower: seedWallet(env, env.borrowerMnemonic, runAddresses('borrower')),
+      lender: seedWallet(env, env.lenderMnemonic, runAddresses('lender')),
     },
     apiUrl: env.apiUrl,
   }
