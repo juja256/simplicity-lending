@@ -271,7 +271,7 @@ export async function buildPrivateCreation(
           blindingPubkey: pendingOffer.blindingPubkey(),
         },
       ],
-      changeAddress: deps.wollet.change(null).address(),
+      changeAddress: deps.addresses.nextChange(deps.wollet, 1)[0],
     })
 
     // 5. The layout of the unblinded PSET.
