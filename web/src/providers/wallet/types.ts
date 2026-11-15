@@ -37,9 +37,13 @@ export interface WalletContextValue extends WalletState {
   signPset(pset: Pset): Promise<Pset>
   getBlindedWalletUtxos(): Promise<WalletCoin[]>
   getWollet(): Promise<Wollet>
-  getReceiveAddress(): Promise<string | null>
   getChangeAddress(): Promise<Address>
-  verifyReceiveAddress(): Promise<string>
+  /**
+   * The address to show for deposits, read when called: the connector's own, or the wallet's
+   * last unused external address as the wallet knows it now. Null when not connected. Call it
+   * while rendering, so a scan or broadcast that used the address shows the next one.
+   */
+  currentReceiveAddress(): string | null
   /** Whether the signer can run private loans: Jade or the seed wallet. */
   privateCapable: boolean
   /**
@@ -95,8 +99,6 @@ export interface WalletState {
   balances: Record<string, string>
   confirmedBalances: Record<string, string>
   pendingBalances: Record<string, string>
-  // Resolved once on connect; null until ready.
-  receiveAddress: string | null
   scriptPubkey: string | null
   syncing: boolean
   reconnecting: boolean
@@ -116,7 +118,6 @@ export const INITIAL_WALLET_STATE: WalletState = {
   balances: {},
   confirmedBalances: {},
   pendingBalances: {},
-  receiveAddress: null,
   scriptPubkey: null,
   syncing: false,
   reconnecting: false,
