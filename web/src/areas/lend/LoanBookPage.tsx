@@ -16,6 +16,7 @@ import {
   isPastExpiry,
   LENDER_ACTION_LABELS,
   type LenderAction,
+  lenderSendable,
   lenderView,
   type OfferActions,
   type OfferActionState,
@@ -194,8 +195,12 @@ export default function LoanBookPage() {
             item={item}
             borrowerName={borrowerName(item)}
             tipHeight={tipHeight}
-            state={offerActionState(privateTxs, item, LOAN_ACTIONS, opened =>
-              lenderView(opened, tipHeight),
+            state={offerActionState(
+              privateTxs,
+              item,
+              LOAN_ACTIONS,
+              opened => lenderView(opened, tipHeight),
+              lenderSendable(tipHeight),
             )}
             onOpen={(action, opened, unsentTx) => open({ action, item: opened, unsentTx })}
           />

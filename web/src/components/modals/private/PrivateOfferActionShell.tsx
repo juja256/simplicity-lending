@@ -74,6 +74,11 @@ interface PrivateOfferActionShellProps<TSummary> extends PrivateOfferActionModal
   /** Shown under the offer details, such as why the action is disabled. */
   notice?: ReactNode
   build: (fresh: FreshOffer) => Promise<UpdatedPset<TSummary> | AsyncUpdatedPset<TSummary>>
+  /**
+   * Must resolve before the transaction is broadcast, after signing and on a retry, such as a
+   * check of the tip: when it throws, nothing is broadcast.
+   */
+  beforeBroadcast?: () => Promise<void>
 }
 
 function OfferDetails({
@@ -135,6 +140,7 @@ export default function PrivateOfferActionShell<TSummary>({
   kind,
   requires,
   build,
+  beforeBroadcast,
   ...shell
 }: PrivateOfferActionShellProps<TSummary>) {
   const { syncWallet, getLendingKey } = useWallet()
@@ -146,19 +152,23 @@ export default function PrivateOfferActionShell<TSummary>({
     // The opened offer holds the offer's secrets: freed once the transaction is finalized.
     const held: { offer?: VerifiedOffer } = {}
     try {
-      return await run({ kind, offerTxid: item.txid }, async () => {
-        await syncInSession(getLendingKey, syncWallet)
-        const candidate = await fetchPrivateCandidate(item.txid, PRIVATE_API_BASE_URL)
-        const utxo = unspentUtxo(candidate, requires)
-        if (!utxo) {
-          throw new Error(
-            `The indexer lists no unspent ${PRIVATE_UTXO_LABEL[requires]} for this offer`,
-          )
-        }
-        const deps = await getDeps()
-        held.offer = await loadOffer(deps, item.txid, item.role)
-        return build({ deps, offer: held.offer, candidate, utxo })
-      })
+      return await run(
+        { kind, offerTxid: item.txid },
+        async () => {
+          await syncInSession(getLendingKey, syncWallet)
+          const candidate = await fetchPrivateCandidate(item.txid, PRIVATE_API_BASE_URL)
+          const utxo = unspentUtxo(candidate, requires)
+          if (!utxo) {
+            throw new Error(
+              `The indexer lists no unspent ${PRIVATE_UTXO_LABEL[requires]} for this offer`,
+            )
+          }
+          const deps = await getDeps()
+          held.offer = await loadOffer(deps, item.txid, item.role)
+          return build({ deps, offer: held.offer, candidate, utxo })
+        },
+        beforeBroadcast,
+      )
     } finally {
       held.offer?.opened.free()
     }
@@ -170,6 +180,7 @@ export default function PrivateOfferActionShell<TSummary>({
       isOpen={isOpen}
       unsentTx={unsentTx}
       execute={execute}
+      beforeBroadcast={beforeBroadcast}
       onClose={onClose}
     >
       <OfferDetails item={item} counterpartyName={counterpartyName} />

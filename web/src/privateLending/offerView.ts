@@ -115,6 +115,29 @@ export function isPastExpiry(terms: PrivateOfferTerms, tipHeight: number): boole
 }
 
 /**
+ * Whether a pending offer can still be accepted at `tipHeight`: the tip known (not 0) and below
+ * the expiry, so an acceptance mined in the next block is not past it. The acceptance sets no lock
+ * time and the covenant does not check the expiry: this rule is the only guard.
+ */
+export function canStillAccept(terms: PrivateOfferTerms, tipHeight: number): boolean {
+  return tipHeight > 0 && tipHeight < terms.loanExpirationTime
+}
+
+export const TIP_UNKNOWN_NOTE = 'Waiting for the chain tip.'
+export const TERM_PASSED_NOTE = 'Its term has passed.'
+
+/**
+ * Throws a message for the lender unless `canStillAccept`: before an acceptance is built, and
+ * again before it is broadcast, with the tip read at that moment.
+ */
+export function checkStillAcceptable(terms: PrivateOfferTerms, tipHeight: number): void {
+  if (!(tipHeight > 0)) {
+    throw new Error("The chain tip is not known, so the proposal's term cannot be checked.")
+  }
+  if (!canStillAccept(terms, tipHeight)) throw new Error(TERM_PASSED_NOTE)
+}
+
+/**
  * The expiry block, with the term left while the offer is pending or active and the tip is known
  * (0 while unknown): `#2685018 (~3h)`.
  */
@@ -176,14 +199,26 @@ export interface OfferActions<A extends string, K extends PrivateTxKind> {
   actionOfKind: Record<K, A>
 }
 
-/** The button an offer gets: its action, on `item`, with the saved transaction to send again. */
-export interface OfferActionButton<A extends string> {
-  action: A
-  item: OpenedOfferItem
-  unsentTx?: PrivateTxRecord
-  label: string
-  variant: 'primary' | 'secondary' | 'danger-soft'
-}
+/**
+ * The button an offer gets: its action on `item` (`open`), with the saved transaction to send
+ * again; or `discard`, which drops a saved transaction that can no longer be sent.
+ */
+export type OfferActionButton<A extends string> =
+  | {
+      kind: 'open'
+      action: A
+      item: OpenedOfferItem
+      unsentTx?: PrivateTxRecord
+      label: string
+      variant: 'primary' | 'secondary' | 'danger-soft'
+    }
+  | { kind: 'discard'; record: PrivateTxRecord; label: string; variant: 'secondary' }
+
+/**
+ * Whether a saved transaction may still be broadcast: `expired` once it no longer may, `unknown`
+ * while that cannot be told (the tip not known yet).
+ */
+export type Sendable = 'yes' | 'expired' | 'unknown'
 
 /** An offer's action and note, as both sides show them. */
 export interface OfferActionState<A extends string> {
@@ -197,7 +232,9 @@ export interface OfferActionState<A extends string> {
  * An offer's action, by the same rules on both sides. This browser's own transaction for the
  * offer, which the indexer may not show yet, comes first:
  * - one saved but not broadcast gets only "Broadcast again", which opens its action's modal on the
- *   saved transaction: a retry never rebuilds, and no new build is offered meanwhile;
+ *   saved transaction: a retry never rebuilds, and no new build is offered meanwhile. When
+ *   `sendable` says it can no longer be sent, it gets only "Discard"; while that cannot be told,
+ *   nothing;
  * - one broadcast and not yet final gets no action until it is.
  *
  * Otherwise the offer gets the side's `viewOf` when it can be acted on at all, and only the note
@@ -208,22 +245,36 @@ export function offerActionState<A extends string, K extends PrivateTxKind>(
   item: PrivateOfferItem,
   actions: OfferActions<A, K>,
   viewOf: (item: OpenedOfferItem) => OfferView<A>,
+  sendable: (record: PrivateTxRecord, item: OpenedOfferItem) => Sendable = () => 'yes',
 ): OfferActionState<A> {
   const kinds = Object.keys(actions.actionOfKind) as K[]
   const txState = offerTxState(privateTxs, item.txid, kinds)
   const opened = isOpenedOffer(item) ? item : null
   if (txState?.state === 'unsent') {
     const { record } = txState
-    return {
-      note: 'Your transaction was signed but not broadcast.',
-      isProcessing: false,
-      button: opened && {
-        action: actions.actionOfKind[record.kind],
-        item: opened,
-        unsentTx: record,
-        label: 'Broadcast again',
-        variant: 'secondary',
-      },
+    const unsent = 'Your transaction was signed but not broadcast'
+    switch (opened ? sendable(record, opened) : 'yes') {
+      case 'unknown':
+        return { note: `${unsent}. ${TIP_UNKNOWN_NOTE}`, isProcessing: false, button: null }
+      case 'expired':
+        return {
+          note: `${unsent}, and it can no longer be sent: ${TERM_PASSED_NOTE.toLowerCase()}`,
+          isProcessing: false,
+          button: { kind: 'discard', record, label: 'Discard', variant: 'secondary' },
+        }
+      case 'yes':
+        return {
+          note: `${unsent}.`,
+          isProcessing: false,
+          button: opened && {
+            kind: 'open',
+            action: actions.actionOfKind[record.kind],
+            item: opened,
+            unsentTx: record,
+            label: 'Broadcast again',
+            variant: 'secondary',
+          },
+        }
     }
   }
   if (txState?.state === 'processing') {
@@ -241,6 +292,7 @@ export function offerActionState<A extends string, K extends PrivateTxKind>(
     button:
       opened && action !== undefined
         ? {
+            kind: 'open',
             action,
             item: opened,
             label: actions.labels[action],
@@ -264,15 +316,17 @@ export const LENDER_ACTION_LABELS: Record<LenderAction, string> = {
 
 /**
  * What the lender can do with an offer, from the indexer's view of it (untrusted: the action's
- * builder checks every outpoint): accept a pending offer before its expiry, claim an unspent
- * repayment, liquidate an active loan once the tip is past its expiry.
+ * builder checks every outpoint): accept a pending offer while `canStillAccept` (nothing while the
+ * tip is unknown), claim an unspent repayment, liquidate an active loan once the tip is past its
+ * expiry.
  */
 export function lenderView(item: OpenedOfferItem, tipHeight: number): OfferView<LenderAction> {
   const { candidate, terms } = item
   const expired = isPastExpiry(terms, tipHeight)
   switch (candidate.status) {
     case 'pending':
-      return expired ? { note: 'Its term has passed.' } : { action: 'accept' }
+      if (tipHeight === 0) return { note: TIP_UNKNOWN_NOTE }
+      return canStillAccept(terms, tipHeight) ? { action: 'accept' } : { note: TERM_PASSED_NOTE }
     case 'active':
       if (unspentUtxo(candidate, 'active_offer') === undefined) return {}
       return expired
@@ -284,5 +338,19 @@ export function lenderView(item: OpenedOfferItem, tipHeight: number): OfferView<
         : {}
     default:
       return {}
+  }
+}
+
+/**
+ * Whether the lender's saved transaction may still be broadcast at `tipHeight`: an acceptance
+ * only while `canStillAccept`, and not while the tip is unknown; the other kinds always.
+ */
+export function lenderSendable(
+  tipHeight: number,
+): (record: PrivateTxRecord, item: OpenedOfferItem) => Sendable {
+  return (record, item) => {
+    if (record.kind !== 'private_accept_offer') return 'yes'
+    if (tipHeight === 0) return 'unknown'
+    return canStillAccept(item.terms, tipHeight) ? 'yes' : 'expired'
   }
 }

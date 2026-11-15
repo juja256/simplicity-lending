@@ -28,6 +28,8 @@ export interface PrivateTxShellProps {
   unsentTx?: PrivateTxRecord
   /** Builds, signs, saves and broadcasts, through `usePrivateTransaction().run`. */
   execute: () => Promise<{ txid: string }>
+  /** Must resolve before a saved transaction is broadcast again, such as a check of the tip. */
+  beforeBroadcast?: () => Promise<void>
   onClose: () => void
   /** Called on closing after a broadcast went through. */
   onSuccess?: () => void
@@ -58,6 +60,7 @@ export default function PrivateTxShell({
   disabled,
   unsentTx,
   execute,
+  beforeBroadcast,
   onClose,
   onSuccess,
   notice,
@@ -77,7 +80,7 @@ export default function PrivateTxShell({
 
   const run = useMutation({ mutationFn: execute, onError: keepUnsent })
   const retry = useMutation({
-    mutationFn: (txid: string) => retryBroadcast(txid),
+    mutationFn: (txid: string) => retryBroadcast(txid, beforeBroadcast),
     onError: keepUnsent,
   })
 

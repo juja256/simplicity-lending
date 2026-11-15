@@ -4,7 +4,10 @@ import { BLOCKS_PER_DAY } from '@/privateLending/lenderTerms'
 import type { OpenedOfferItem } from '@/privateLending/offerView'
 
 export interface BookSummary {
-  /** Pending proposals that can still be accepted: not past their expiry. */
+  /**
+   * Pending proposals that can still be accepted: the tip below their expiry, as `canStillAccept`
+   * reads it.
+   */
   waiting: number
   /** Active loans, overdue ones included. */
   active: number
@@ -34,15 +37,16 @@ export function bookSummary(items: OpenedOfferItem[], tipHeight: number): BookSu
     overdue: 0,
   }
   for (const { candidate, terms } of items) {
-    // The tip known and past the expiry, as `isPastExpiry` reads it.
     const blocksLeft = terms.loanExpirationTime - tipHeight
     const known = tipHeight > 0
     if (candidate.status === 'pending') {
-      if (!known || blocksLeft >= 0) summary.waiting++
+      // Acceptance ends one block before the expiry, as `canStillAccept` reads it.
+      if (!known || blocksLeft > 0) summary.waiting++
     } else if (candidate.status === 'active') {
       summary.active++
       summary.lent += terms.principalAmount
       summary.collateralHeld += terms.collateralAmount
+      // Overdue: the tip known and past the expiry, as `isPastExpiry` reads it.
       if (known && blocksLeft < 0) summary.overdue++
       else if (known && blocksLeft > 0 && blocksLeft <= DUE_SOON_BLOCKS) summary.dueWithin7Days++
     }

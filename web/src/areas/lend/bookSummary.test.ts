@@ -89,6 +89,12 @@ describe('bookSummary', () => {
     })
   })
 
+  it('no longer counts a proposal waiting at its expiry block', () => {
+    const atExpiry = item('pending', 0, amounts(1n, 1n))
+    const blockBefore = item('pending', 1, amounts(1n, 1n))
+    expect(bookSummary([atExpiry, blockBefore], TIP).waiting).toBe(1)
+  })
+
   it('counts a loan at its expiry block as neither due nor overdue', () => {
     expect(bookSummary([item('active', 0, amounts(1n, 1n))], TIP)).toMatchObject({
       active: 1,
