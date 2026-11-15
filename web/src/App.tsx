@@ -7,7 +7,9 @@ import {
   useLocation,
 } from 'react-router-dom'
 
-import AppLayout from '@/components/AppLayout'
+import BorrowerLayout from '@/areas/borrow/BorrowerLayout'
+import LenderLayout from '@/areas/lend/LenderLayout'
+import { WalletGate } from '@/areas/WalletGate'
 import { RoutePath } from '@/constants/routes'
 import { AppProviders } from '@/providers/AppProviders'
 import { initAnalytics, trackPageView } from '@/utils/analytics'
@@ -40,9 +42,19 @@ function ProvidersLayout() {
   )
 }
 
+/** The two areas need the wallet and the other providers; the landing page does not. */
 function isAppPath(pathname: string) {
-  return pathname === RoutePath.Dashboard || pathname.startsWith(`${RoutePath.Dashboard}/`)
+  return [RoutePath.Lend, RoutePath.Borrow].some(
+    area => pathname === area || pathname.startsWith(`${area}/`),
+  )
 }
+
+// The Private page stands in for each area page until that page is built.
+const standIn = (
+  <WalletGate>
+    <PrivatePage />
+  </WalletGate>
+)
 
 const router = createBrowserRouter([
   {
@@ -54,24 +66,27 @@ const router = createBrowserRouter([
         element: <LandingPage />,
       },
       {
-        path: RoutePath.Dashboard,
-        element: <AppLayout />,
+        path: RoutePath.Lend,
+        element: <LenderLayout />,
         children: [
-          {
-            path: RoutePath.Private,
-            element: <PrivatePage />,
-          },
-          // The private page is the app: `/app` and old links such as `/app/borrow` land on it.
-          {
-            index: true,
-            element: <Navigate to={RoutePath.Private} replace />,
-          },
-          {
-            path: '*',
-            element: <Navigate to={RoutePath.Private} replace />,
-          },
+          { index: true, element: <Navigate to={RoutePath.LendProposals} replace /> },
+          { path: RoutePath.LendProposals, element: standIn },
+          { path: RoutePath.LendLoans, element: standIn },
+          { path: RoutePath.LendTerms, element: standIn },
+          { path: RoutePath.LendProfile, element: standIn },
         ],
       },
+      {
+        path: RoutePath.Borrow,
+        element: <BorrowerLayout />,
+        children: [
+          { index: true, element: standIn },
+          { path: RoutePath.BorrowLoans, element: standIn },
+          { path: RoutePath.BorrowLender, element: standIn },
+        ],
+      },
+      // The old single app: `/app` and its pages lead to the landing page and its two entrances.
+      { path: '/app/*', element: <Navigate to={RoutePath.Landing} replace /> },
     ],
   },
 ])
