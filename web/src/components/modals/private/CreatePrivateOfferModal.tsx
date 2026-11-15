@@ -19,7 +19,7 @@ import { truncateAddress } from '@/utils/format'
 
 import PrivateTxShell from './PrivateTxShell'
 
-/** A private offer as the borrower reviewed it. */
+/** A proposal as the borrower reviewed it. */
 export interface PrivateOfferDraft {
   lender: {
     /** The lender's lending key, x-only hex, lowercase. */
@@ -31,13 +31,13 @@ export interface PrivateOfferDraft {
   collateralAmount: bigint
   principalAmount: bigint
   repaymentAmount: bigint
-  /** A block height: the tip when the offer was reviewed, plus the blocks chosen. */
+  /** A block height: the tip when the proposal was reviewed, plus its term and margin. */
   loanExpirationTime: number
 }
 
 interface CreatePrivateOfferModalProps {
   isOpen: boolean
-  /** The offer to create. Absent when the modal opens on a saved creation that was not sent. */
+  /** The proposal to send. Absent when the modal opens on a saved creation that was not sent. */
   draft?: PrivateOfferDraft
   /** A creation saved by an earlier attempt that no broadcast accepted. */
   unsentTx?: PrivateTxRecord
@@ -50,7 +50,8 @@ interface CreatePrivateOfferModalProps {
  * The borrower creates a private offer from a reviewed draft: the wallet's coins and a fresh
  * pair of NFTs, built at confirm time, then the borrower's self-check before it is saved and
  * broadcast. A failed broadcast is retried from the saved transaction, never rebuilt: a rebuild
- * would be another offer.
+ * would be another offer. The borrower app calls the offer a proposal and never names the NFTs or
+ * the lending key, so neither does anything this modal shows.
  */
 export default function CreatePrivateOfferModal({
   isOpen,
@@ -66,17 +67,17 @@ export default function CreatePrivateOfferModal({
   const { formatCollateralDisplay, formatPrincipalAmount } = useFormatAmount()
 
   const execute = async () => {
-    if (!draft) throw new Error('There is no offer to create')
+    if (!draft) throw new Error('There is no proposal to send')
     return run({ kind: 'private_create_offer' }, async () => {
       const borrower = await syncInSession(getLendingKey, syncWallet)
       const [deps, tip] = await Promise.all([getDeps(), fetchLatestBlockHeight()])
       if (draft.lender.pubkey === borrower.xOnlyPublicKey()) {
-        throw new Error('The lender is your own lending key')
+        throw new Error('The lender key is your own')
       }
       if (draft.loanExpirationTime <= tip) {
         throw new Error(
           `The expiry, block #${draft.loanExpirationTime}, is no longer ahead of the chain ` +
-            `(#${tip}). Review the offer again.`,
+            `(#${tip}). Review the proposal again.`,
         )
       }
       const coins = selectCreationCoins(
@@ -101,23 +102,24 @@ export default function CreatePrivateOfferModal({
   const rows = useMemo<DetailRow[]>(() => {
     if (!draft) {
       const txid = unsentTx?.txid ?? ''
-      return [{ label: 'Offer Transaction', value: truncateAddress(txid), copyValue: txid }]
+      return [{ label: 'Proposal transaction', value: truncateAddress(txid), copyValue: txid }]
     }
     return [
       {
-        label: 'Lender',
+        label: 'Lender key',
         value: <KeyFingerprint fingerprint={draft.lender.fingerprint} name={draft.lender.name} />,
+        tooltip: 'Compare it with the lender before you sign.',
       },
       { label: 'Collateral', value: formatCollateralDisplay(draft.collateralAmount) },
-      { label: 'Principal', value: formatPrincipalAmount(draft.principalAmount) },
-      { label: 'Repayment', value: formatPrincipalAmount(draft.repaymentAmount) },
+      { label: 'You receive', value: formatPrincipalAmount(draft.principalAmount) },
+      { label: 'You repay', value: formatPrincipalAmount(draft.repaymentAmount) },
       {
         label: 'Interest',
         value: formatPrincipalAmount(draft.repaymentAmount - draft.principalAmount),
         tooltip: 'The repayment minus the principal.',
       },
       {
-        label: 'Expiry Block',
+        label: 'Term ends at block',
         value: expiryLabel(draft.loanExpirationTime, 'pending', tipHeight),
       },
     ]
@@ -128,8 +130,8 @@ export default function CreatePrivateOfferModal({
       draft
         ? [
             { label: 'Collateral', value: formatCollateralDisplay(draft.collateralAmount) },
-            { label: 'Borrow', value: formatPrincipalAmount(draft.principalAmount) },
-            { label: 'Repayment', value: formatPrincipalAmount(draft.repaymentAmount) },
+            { label: 'You receive', value: formatPrincipalAmount(draft.principalAmount) },
+            { label: 'You repay', value: formatPrincipalAmount(draft.repaymentAmount) },
           ]
         : [],
     [draft, formatCollateralDisplay, formatPrincipalAmount],
@@ -138,14 +140,14 @@ export default function CreatePrivateOfferModal({
   return (
     <PrivateTxShell
       isOpen={isOpen}
-      title='Create Private Offer'
+      title='Send your proposal'
       chip={
         <Chip color='warning' variant='soft' size='sm'>
           New
         </Chip>
       }
-      label='Sign & Create Offer'
-      eyebrow='New Private Offer'
+      label='Lock collateral and send'
+      eyebrow='Lock collateral and send'
       summary={summary}
       unsentTx={unsentTx}
       execute={execute}
@@ -153,9 +155,9 @@ export default function CreatePrivateOfferModal({
       onSuccess={onCreated}
       notice={
         <Notice>
-          Only this lending key can read the offer and accept it: compare the fingerprint with the
-          lender before you sign. Your collateral stays locked until you repay the loan or cancel
-          the offer.
+          Only you and this lender key can read the proposal, and only it can accept: compare it
+          with the lender before you sign. Your collateral stays locked until you repay the loan, or
+          until you cancel the proposal before the lender accepts.
         </Notice>
       }
     >
