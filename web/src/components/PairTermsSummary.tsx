@@ -32,7 +32,7 @@ export default function PairTermsSummary({ verifiedTerms, publishedAt }: PairTer
           ? `No terms for ${principal.symbol} against ${collateral.symbol}.`
           : publishedAt === null
             ? 'No terms published.'
-            : 'These terms could not be verified'}
+            : 'These terms could not be verified.'}
       </p>
     )
   }
