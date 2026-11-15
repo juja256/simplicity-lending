@@ -10,6 +10,7 @@ import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { buildPrivateCreation } from '@/privateLending/flows/creation'
 import { usePrivateFlowDeps } from '@/privateLending/hooks/usePrivateFlowDeps'
 import { usePrivateTransaction } from '@/privateLending/hooks/usePrivateTransaction'
+import { proposalExpiryIsStale } from '@/privateLending/lenderTerms'
 import { syncInSession } from '@/privateLending/lendingKeyHolder'
 import { expiryLabel } from '@/privateLending/offerView'
 import { selectCreationCoins, walletReceiver } from '@/privateLending/wallet'
@@ -31,7 +32,12 @@ export interface PrivateOfferDraft {
   collateralAmount: bigint
   principalAmount: bigint
   repaymentAmount: bigint
-  /** A block height: the tip when the proposal was reviewed, plus its term and margin. */
+  /** The term the borrower chose, in days. */
+  termDays: number
+  /**
+   * A block height: `proposalExpiry` of the tip when "Lock collateral and send" was pressed and
+   * `termDays`. It is fixed then: a chain that moved on by the build refuses it.
+   */
   loanExpirationTime: number
 }
 
@@ -74,11 +80,8 @@ export default function CreatePrivateOfferModal({
       if (draft.lender.pubkey === borrower.xOnlyPublicKey()) {
         throw new Error('The lender key is your own')
       }
-      if (draft.loanExpirationTime <= tip) {
-        throw new Error(
-          `The expiry, block #${draft.loanExpirationTime}, is no longer ahead of the chain ` +
-            `(#${tip}). Review the proposal again.`,
-        )
+      if (proposalExpiryIsStale(draft.loanExpirationTime, tip, draft.termDays)) {
+        throw new Error('Review the proposal again: the chain moved on.')
       }
       const coins = selectCreationCoins(
         await getWalletTxOuts(),

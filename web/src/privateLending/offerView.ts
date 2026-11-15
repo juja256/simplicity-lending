@@ -1,5 +1,5 @@
-// Display and gating rules of the private offers, shared by the lender console, the private page
-// and their modals. The indexer's candidate (status, UTXOs) is untrusted: it only decides what to
+// Display and gating rules of the private offers, shared by the lender console, the borrower's
+// loans and their modals. The indexer's candidate (status, UTXOs) is untrusted: it only decides what to
 // show and which action to offer. Every action loads its offer fresh through the gate, and its
 // builder checks every outpoint it is given. The rules that read outpoints from the candidate are
 // in `./candidate`.
@@ -11,10 +11,10 @@ import type {
   PrivateUtxoType,
 } from '@/api/indexer/private'
 import { NETWORK_CONFIG } from '@/constants/network-config'
-import { unspentUtxo } from '@/privateLending/candidate'
+import { repaymentBorrowerNftOutpoint, unspentUtxo } from '@/privateLending/candidate'
 import type { PrivateOfferItem, PrivateOfferTerms } from '@/privateLending/hooks/usePrivateOffers'
 import type { PrivateTxKind, PrivateTxRecord } from '@/providers/pendingTransactions/types'
-import { formatTermLeft } from '@/utils/format'
+import { formatBlockSpan, formatTermLeft } from '@/utils/format'
 
 /** A key fingerprint in groups of four characters: `1aa0 5299 d34b b9f5`. */
 export function groupFingerprint(fingerprint: string): string {
@@ -49,7 +49,7 @@ export function isOpenedOffer(item: PrivateOfferItem): item is OpenedOfferItem {
 export function blockedNote(item: PrivateOfferItem): string | null {
   if (item.result === 'invalid') return 'It failed verification: no action is possible.'
   if (item.terms === null) return 'Its terms could not be opened; retried on the next sync.'
-  if (item.candidate === null) return 'The indexer no longer lists this offer.'
+  if (item.candidate === null) return 'The indexer no longer lists this proposal.'
   if (!usesConfiguredAssets(item.terms)) return 'It uses assets this app does not support.'
   return null
 }
@@ -86,10 +86,10 @@ export function counterpartyOf(item: PrivateOfferItem): Counterparty | null {
       }
 }
 
-/** What each tracked UTXO is, for messages. */
+/** What each tracked UTXO is, for messages that both areas show. */
 export const PRIVATE_UTXO_LABEL: Record<PrivateUtxoType, string> = {
-  pending_offer: 'pending offer',
-  active_offer: 'active offer',
+  pending_offer: 'proposal',
+  active_offer: 'loan',
   principal: 'principal',
   repayment: 'repayment',
 }
@@ -353,4 +353,128 @@ export function lenderSendable(
     if (tipHeight === 0) return 'unknown'
     return canStillAccept(item.terms, tipHeight) ? 'yes' : 'expired'
   }
+}
+
+export type BorrowerAction = 'cancel' | 'claimPrincipal' | 'repay'
+
+type BorrowerTxKind = 'private_cancel_offer' | 'private_claim_principal' | 'private_repay_offer'
+
+/**
+ * The borrower's actions on one loan, each named with what it moves: "Cancel", "Receive 20,000
+ * TEST", "Repay 3,021.40 TEST". `amounts` are the loan's principal and repayment as the page writes
+ * them, or null when its terms are not open (it then gets no action anyway).
+ */
+export function borrowerActions(
+  amounts: { receive: string; repay: string } | null,
+): OfferActions<BorrowerAction, BorrowerTxKind> {
+  return {
+    labels: {
+      cancel: 'Cancel',
+      claimPrincipal: amounts ? `Receive ${amounts.receive}` : 'Receive',
+      repay: amounts ? `Repay ${amounts.repay}` : 'Repay',
+    },
+    danger: 'cancel',
+    actionOfKind: {
+      private_cancel_offer: 'cancel',
+      private_claim_principal: 'claimPrincipal',
+      private_repay_offer: 'repay',
+    },
+  }
+}
+
+/**
+ * What the borrower can do with its loan, from the indexer's view of it (untrusted: the action's
+ * builder checks every outpoint): cancel a pending proposal, receive the principal while it is
+ * unspent, then repay an active loan. Repaying burns the borrower NFT, the only key to an
+ * unclaimed principal, so it is offered only on positive evidence that the principal was claimed
+ * (`repaymentBorrowerNftOutpoint`): a candidate that omits the principal gets no Repay. The notes
+ * are in the borrower's words: no "offer", "NFT" or "lending key".
+ */
+export function borrowerView(item: OpenedOfferItem, tipHeight: number): OfferView<BorrowerAction> {
+  const { candidate, terms } = item
+  const principalUnclaimed = unspentUtxo(candidate, 'principal') !== undefined
+  switch (candidate.status) {
+    case 'pending':
+      if (unspentUtxo(candidate, 'pending_offer') === undefined) return {}
+      return {
+        action: 'cancel',
+        note:
+          tipHeight === 0 || canStillAccept(terms, tipHeight)
+            ? 'You can cancel until the lender accepts.'
+            : 'Its term has passed. Cancel it to take your collateral back.',
+      }
+    case 'active':
+      if (principalUnclaimed) return { action: 'claimPrincipal' }
+      if (unspentUtxo(candidate, 'active_offer') === undefined) return {}
+      if (repaymentBorrowerNftOutpoint(item.txid, candidate) === undefined) {
+        return {
+          note: 'The indexer lists no receipt of your principal, so the loan cannot be repaid yet.',
+        }
+      }
+      return isPastExpiry(terms, tipHeight)
+        ? {
+            action: 'repay',
+            note: 'The term has ended: the lender may take your collateral at any time.',
+          }
+        : { action: 'repay' }
+    case 'liquidated':
+      // The lender took the collateral; the principal it paid is still the borrower's.
+      return principalUnclaimed
+        ? { action: 'claimPrincipal', note: 'The principal is still yours.' }
+        : {}
+    case 'repaid':
+    case 'cancelled':
+      return { note: 'Your collateral came back to you.' }
+    default:
+      return {}
+  }
+}
+
+/**
+ * A loan's status in the borrower's words:
+ * - `waiting` for the lender, while the proposal can still be accepted (or the tip is unknown);
+ * - `notAccepted` once its term passed unaccepted;
+ * - `accepted`, the principal waiting to be received;
+ * - `active`, with the blocks left to its expiry (negative past it, null while the tip is unknown);
+ * - `repaid`, `cancelled`, `collateralTaken`: how it ended.
+ */
+export type BorrowerStatus =
+  | { kind: 'waiting' }
+  | { kind: 'notAccepted' }
+  | { kind: 'accepted' }
+  | { kind: 'active'; blocksLeft: number | null }
+  | { kind: 'repaid' }
+  | { kind: 'cancelled' }
+  | { kind: 'collateralTaken' }
+
+/** The status of an opened loan, from the indexer's view of it (untrusted, for display). */
+export function borrowerStatus(item: OpenedOfferItem, tipHeight: number): BorrowerStatus {
+  const { candidate, terms } = item
+  switch (displayStatus(candidate)) {
+    case 'pending':
+      return tipHeight === 0 || canStillAccept(terms, tipHeight)
+        ? { kind: 'waiting' }
+        : { kind: 'notAccepted' }
+    case 'active':
+      if (unspentUtxo(candidate, 'principal') !== undefined) return { kind: 'accepted' }
+      return {
+        kind: 'active',
+        blocksLeft: tipHeight === 0 ? null : terms.loanExpirationTime - tipHeight,
+      }
+    case 'repaid':
+    case 'claimed':
+      return { kind: 'repaid' }
+    case 'cancelled':
+      return { kind: 'cancelled' }
+    case 'liquidated':
+      return { kind: 'collateralTaken' }
+  }
+}
+
+/** When an active loan is due, from the blocks left: `due in 12 days`, `overdue by 2 days`. */
+export function dueText(blocksLeft: number): string {
+  if (blocksLeft === 0) return 'due now'
+  return blocksLeft > 0
+    ? `due in ${formatBlockSpan(blocksLeft)}`
+    : `overdue by ${formatBlockSpan(-blocksLeft)}`
 }

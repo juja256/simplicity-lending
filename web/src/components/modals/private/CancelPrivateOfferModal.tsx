@@ -21,7 +21,10 @@ const CANCEL_WEIGHT_UNITS =
   SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY +
   EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY
 
-/** The borrower cancels a pending offer: both NFTs are burned and the collateral comes back. */
+/**
+ * The borrower cancels a pending offer: both NFTs are burned and the collateral comes back. It
+ * shows in the borrower's words: a proposal, cancelled to take the collateral back.
+ */
 export default function CancelPrivateOfferModal(props: PrivateOfferActionModalProps) {
   const { item } = props
   const { terms } = item
@@ -46,7 +49,7 @@ export default function CancelPrivateOfferModal(props: PrivateOfferActionModalPr
 
   const summary = useMemo(
     () => [
-      { label: 'Collateral Returned', value: formatCollateralDisplay(terms.collateralAmount) },
+      { label: 'Collateral back to you', value: formatCollateralDisplay(terms.collateralAmount) },
     ],
     [terms, formatCollateralDisplay],
   )
@@ -56,15 +59,15 @@ export default function CancelPrivateOfferModal(props: PrivateOfferActionModalPr
       {...props}
       kind='private_cancel_offer'
       requires='pending_offer'
-      title='Cancel Private Offer'
+      title='Cancel your proposal'
       chip={
-        <Chip color='default' variant='soft' size='sm'>
-          Cancel
+        <Chip color='warning' variant='soft' size='sm'>
+          Not accepted yet
         </Chip>
       }
-      label='Cancel Offer'
+      label='Cancel proposal'
       variant='danger-soft'
-      eyebrow='Cancel Private Offer'
+      eyebrow='Cancel proposal'
       summary={summary}
       build={build}
     />

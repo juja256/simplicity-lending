@@ -1,4 +1,4 @@
-import { Skeleton, Spinner } from '@heroui/react'
+import { Skeleton } from '@heroui/react'
 import type { UseQueryResult } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 
@@ -12,19 +12,6 @@ import { usePendingTransactions } from '@/providers/pendingTransactions/usePendi
 import { ErrorHandler } from '@/utils/errorHandler'
 
 type OffersQuery = UseQueryResult<PrivateOffers>
-
-/** How far the scan of the offers reached, with a spinner while it refreshes. */
-export function ScanNote({ offers }: { offers: OffersQuery }) {
-  if (!offers.data) return null
-  return (
-    <span className='text-muted inline-flex items-center gap-2 text-xs'>
-      {offers.isFetching && <Spinner size='sm' />}
-      {offers.data.syncedHeight === null
-        ? 'Nothing indexed yet'
-        : `Scanned up to block #${offers.data.syncedHeight}`}
-    </span>
-  )
-}
 
 export interface LedgerColumn {
   label: string

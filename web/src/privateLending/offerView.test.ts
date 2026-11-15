@@ -5,8 +5,12 @@ import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
 
 import type { PrivateOfferItem } from './hooks/usePrivateOffers'
 import {
+  borrowerActions,
+  borrowerStatus,
+  borrowerView,
   canStillAccept,
   checkStillAcceptable,
+  dueText,
   LENDER_ACTION_LABELS,
   type LenderAction,
   lenderSendable,
@@ -72,9 +76,13 @@ function pending(status: PrivateOfferStatus = 'pending'): OpenedOfferItem {
 }
 
 function unsentAcceptance(item: PrivateOfferItem): PrivateTxRecord {
+  return unsent(item, 'private_accept_offer')
+}
+
+function unsent(item: PrivateOfferItem, kind: PrivateTxRecord['kind']): PrivateTxRecord {
   return {
     txid: 'cd'.repeat(32),
-    kind: 'private_accept_offer',
+    kind,
     walletScriptPubkey: '0014' + '00'.repeat(20),
     offerTxid: item.txid,
     txHex: '00',
@@ -177,5 +185,145 @@ describe('offerActionState of a proposal', () => {
     const state = proposalState(item, 0, [unsentAcceptance(item)])
     expect(state.button).toBeNull()
     expect(state.note).toContain('Waiting for the chain tip.')
+  })
+})
+
+const CLAIM_TXID = '12'.repeat(32)
+const ACCEPT_TXID = '34'.repeat(32)
+
+function utxo(type: string, txid: string, vout: number, spentTxid: string | null = null) {
+  return {
+    utxo_type: type,
+    txid,
+    vout,
+    created_at_height: EXPIRY - 30 * 1440,
+    spent_txid: spentTxid,
+    spent_at_height: spentTxid === null ? null : EXPIRY - 29 * 1440,
+  }
+}
+
+/** The borrower's own offer in `status`, with the UTXOs the indexer lists for it. */
+function own(status: PrivateOfferStatus, utxos: ReturnType<typeof utxo>[]): OpenedOfferItem {
+  const item = pending(status)
+  return {
+    ...item,
+    role: 'borrower',
+    candidate: { ...item.candidate, status, utxos } as unknown as PrivateCandidateDetails,
+  }
+}
+
+const OPEN = [utxo('pending_offer', TXID, 3)]
+/** Accepted: the pending offer spent, the principal waiting at its lock. */
+const ACCEPTED = [
+  utxo('pending_offer', TXID, 3, ACCEPT_TXID),
+  utxo('active_offer', ACCEPT_TXID, 0),
+  utxo('principal', ACCEPT_TXID, 1),
+]
+/** Accepted, and the borrower received the principal. */
+const RECEIVED = [
+  utxo('pending_offer', TXID, 3, ACCEPT_TXID),
+  utxo('active_offer', ACCEPT_TXID, 0),
+  utxo('principal', ACCEPT_TXID, 1, CLAIM_TXID),
+]
+
+const AMOUNTS = { receive: '1,000 TEST', repay: '1,100.00 TEST' }
+
+/** My loans' state of `item` at `tip`, with `txs` saved in this browser. */
+function loanState(item: OpenedOfferItem, tip: number, txs: PrivateTxRecord[] = []) {
+  return offerActionState(txs, item, borrowerActions(AMOUNTS), opened => borrowerView(opened, tip))
+}
+
+describe("the borrower's loans", () => {
+  it('waits for the lender, with Cancel, while the proposal can be accepted', () => {
+    const item = own('pending', OPEN)
+    expect(borrowerStatus(item, EXPIRY - 1)).toEqual({ kind: 'waiting' })
+    expect(borrowerStatus(item, 0)).toEqual({ kind: 'waiting' })
+    expect(loanState(item, EXPIRY - 1).button).toMatchObject({
+      kind: 'open',
+      action: 'cancel',
+      label: 'Cancel',
+      variant: 'danger-soft',
+    })
+  })
+
+  it('says a proposal was not accepted in time, and still cancels it', () => {
+    const item = own('pending', OPEN)
+    expect(borrowerStatus(item, EXPIRY)).toEqual({ kind: 'notAccepted' })
+    const state = loanState(item, EXPIRY + 1)
+    expect(state.button).toMatchObject({ action: 'cancel', label: 'Cancel' })
+    expect(state.note).toContain('Cancel it to take your collateral back')
+  })
+
+  it('receives the principal once the lender accepted', () => {
+    const item = own('active', ACCEPTED)
+    expect(borrowerStatus(item, EXPIRY - 1)).toEqual({ kind: 'accepted' })
+    expect(loanState(item, EXPIRY - 1).button).toMatchObject({
+      action: 'claimPrincipal',
+      label: 'Receive 1,000 TEST',
+      variant: 'primary',
+    })
+  })
+
+  it('repays an active loan once the principal was received, with the days left', () => {
+    const item = own('active', RECEIVED)
+    expect(borrowerStatus(item, EXPIRY - 12 * 1440)).toEqual({
+      kind: 'active',
+      blocksLeft: 12 * 1440,
+    })
+    expect(borrowerStatus(item, 0)).toEqual({ kind: 'active', blocksLeft: null })
+    expect(loanState(item, EXPIRY - 1).button).toMatchObject({
+      action: 'repay',
+      label: 'Repay 1,100.00 TEST',
+    })
+    expect(loanState(item, EXPIRY + 1).note).toContain('may take your collateral')
+  })
+
+  it('never repays without evidence that the principal was received', () => {
+    // The indexer omits the principal: no claim is known, and a repayment would burn its key.
+    const item = own('active', ACCEPTED.slice(0, 2))
+    const state = loanState(item, EXPIRY - 1)
+    expect(state.button).toBeNull()
+    expect(state.note).toContain('cannot be repaid yet')
+  })
+
+  it('names how each loan ended', () => {
+    expect(borrowerStatus(own('repaid', []), EXPIRY)).toEqual({ kind: 'repaid' })
+    expect(borrowerStatus(own('cancelled', []), EXPIRY)).toEqual({ kind: 'cancelled' })
+    expect(borrowerStatus(own('liquidated', RECEIVED), EXPIRY)).toEqual({
+      kind: 'collateralTaken',
+    })
+  })
+
+  it('still receives the principal of a loan whose collateral was taken', () => {
+    const state = loanState(own('liquidated', ACCEPTED), EXPIRY + 1)
+    expect(state.button).toMatchObject({ action: 'claimPrincipal', label: 'Receive 1,000 TEST' })
+  })
+
+  it('broadcasts an unsent transaction again, whatever the tip', () => {
+    const item = own('pending', OPEN)
+    const record = unsent(item, 'private_cancel_offer')
+    for (const tip of [0, EXPIRY + 1]) {
+      expect(loanState(item, tip, [record]).button).toMatchObject({
+        kind: 'open',
+        action: 'cancel',
+        unsentTx: record,
+        label: 'Broadcast again',
+      })
+    }
+  })
+
+  it('offers nothing while its transaction waits for confirmation', () => {
+    const item = own('active', ACCEPTED)
+    const record = { ...unsent(item, 'private_claim_principal'), broadcastStatus: 'broadcast' }
+    const state = loanState(item, EXPIRY - 1, [record as PrivateTxRecord])
+    expect(state.isProcessing).toBe(true)
+    expect(state.button).toBeNull()
+  })
+
+  it('writes when a loan is due', () => {
+    expect(dueText(12 * 1440)).toBe('due in 12 days')
+    expect(dueText(90)).toBe('due in 1 h')
+    expect(dueText(0)).toBe('due now')
+    expect(dueText(-2 * 1440)).toBe('overdue by 2 days')
   })
 })

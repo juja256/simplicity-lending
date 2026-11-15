@@ -9,6 +9,7 @@ import {
 
 import BorrowerLayout from '@/areas/borrow/BorrowerLayout'
 import ChooseLenderPage from '@/areas/borrow/ChooseLenderPage'
+import MyLoansPage from '@/areas/borrow/MyLoansPage'
 import ProposalPage from '@/areas/borrow/ProposalPage'
 import LenderLayout from '@/areas/lend/LenderLayout'
 import LoanBookPage from '@/areas/lend/LoanBookPage'
@@ -22,7 +23,6 @@ import { initAnalytics, trackPageView } from '@/utils/analytics'
 
 import ErrorBoundary from './components/ErrorBoundary'
 import LandingPage from './pages/Landing'
-import PrivatePage from './pages/Private'
 
 function ProvidersLayout() {
   const { pathname } = useLocation()
@@ -54,13 +54,6 @@ function isAppPath(pathname: string) {
     area => pathname === area || pathname.startsWith(`${area}/`),
   )
 }
-
-// The Private page stands in for the borrower's loans until that page is built.
-const standIn = (
-  <WalletGate>
-    <PrivatePage />
-  </WalletGate>
-)
 
 const router = createBrowserRouter([
   {
@@ -122,7 +115,14 @@ const router = createBrowserRouter([
               </WalletGate>
             ),
           },
-          { path: RoutePath.BorrowLoans, element: standIn },
+          {
+            path: RoutePath.BorrowLoans,
+            element: (
+              <WalletGate>
+                <MyLoansPage />
+              </WalletGate>
+            ),
+          },
           {
             path: RoutePath.BorrowLender,
             element: (

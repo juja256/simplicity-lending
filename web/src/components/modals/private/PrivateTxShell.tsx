@@ -90,7 +90,7 @@ export default function PrivateTxShell({
   const action: OfferAction =
     unsent !== null
       ? {
-          label: 'Broadcast Again',
+          label: 'Broadcast again',
           eyebrow,
           summary,
           status: retryStatus,
@@ -144,7 +144,7 @@ export default function PrivateTxShell({
                 close()
               }}
             >
-              Discard It
+              Discard
             </UiButton>
           </Notice>
         ) : (

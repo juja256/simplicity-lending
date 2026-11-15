@@ -95,10 +95,16 @@ function OfferDetails({
 
   const rows = useMemo<DetailRow[]>(() => {
     const counterparty = counterpartyOf(item)
-    return [
-      { label: 'Offer', value: truncateAddress(item.txid), copyValue: item.txid },
+    // The borrower app says "proposal" and "lender key"; its loans list shows the status.
+    const isBorrower = counterparty.role === 'lender'
+    const rows: DetailRow[] = [
       {
-        label: counterparty.role === 'borrower' ? 'Borrower' : 'Lender',
+        label: isBorrower ? 'Proposal' : 'Offer',
+        value: truncateAddress(item.txid),
+        copyValue: item.txid,
+      },
+      {
+        label: isBorrower ? 'Lender key' : 'Borrower',
         value: <KeyFingerprint fingerprint={counterparty.fingerprint} name={counterpartyName} />,
       },
       { label: 'Collateral', value: formatCollateralDisplay(terms.collateralAmount) },
@@ -109,9 +115,14 @@ function OfferDetails({
         value: formatPrincipalAmount(terms.interest),
         tooltip: 'The repayment minus the principal.',
       },
-      { label: 'Expiry Block', value: expiryLabel(terms.loanExpirationTime, status, tipHeight) },
-      { label: 'Status', value: <OfferStatusChip status={status} /> },
+      {
+        label: isBorrower ? 'Term ends at block' : 'Expiry block',
+        value: expiryLabel(terms.loanExpirationTime, status, tipHeight),
+      },
     ]
+    return isBorrower
+      ? rows
+      : [...rows, { label: 'Status', value: <OfferStatusChip status={status} /> }]
   }, [
     item,
     terms,
@@ -160,7 +171,8 @@ export default function PrivateOfferActionShell<TSummary>({
           const utxo = unspentUtxo(candidate, requires)
           if (!utxo) {
             throw new Error(
-              `The indexer lists no unspent ${PRIVATE_UTXO_LABEL[requires]} for this offer`,
+              `The indexer no longer lists this ${PRIVATE_UTXO_LABEL[requires]} as open: it ` +
+                'may have changed since the page loaded.',
             )
           }
           const deps = await getDeps()
