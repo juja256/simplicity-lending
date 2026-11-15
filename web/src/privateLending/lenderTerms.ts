@@ -187,6 +187,15 @@ export function proposalExpiry(tipHeight: number, days: number): number {
 }
 
 /**
+ * Whether a proposal of `days` with `expiry` set at an earlier tip would get a later expiry at
+ * `tipHeight`: the chain moved on since it was reviewed, so it is not sent with the term the
+ * borrower saw. The creation checks it with the tip it reads before building.
+ */
+export function proposalExpiryIsStale(expiry: number, tipHeight: number, days: number): boolean {
+  return proposalExpiry(tipHeight, days) > expiry
+}
+
+/**
  * The term of a proposal, the term rule: the whole days from the block its creation confirmed in
  * to its expiry, in blocks, `floor((expiry − createdAtHeight) / BLOCKS_PER_DAY) · BLOCKS_PER_DAY`;
  * 0 when the expiry is not after the creation block. The borrower's form, the lender's console and

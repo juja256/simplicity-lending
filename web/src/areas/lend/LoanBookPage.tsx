@@ -6,6 +6,7 @@ import KeyFingerprint from '@/components/KeyFingerprint'
 import ClaimRepaymentModal from '@/components/modals/private/ClaimRepaymentModal'
 import LiquidatePrivateOfferModal from '@/components/modals/private/LiquidatePrivateOfferModal'
 import { OfferStatusChip } from '@/components/OfferStatusChip'
+import { ScanNote } from '@/components/ScanNote'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { useKeyedModal } from '@/hooks/useKeyedModal'
 import { useDirectory } from '@/privateLending/hooks/useDirectory'
@@ -27,7 +28,7 @@ import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
 import { usePendingTransactions } from '@/providers/pendingTransactions/usePendingTransactions'
 import { formatBlockSpan } from '@/utils/format'
 
-import LedgerTable, { ActionCell, Cell, type LedgerColumn, ScanNote } from './LedgerTable'
+import LedgerTable, { ActionCell, Cell, type LedgerColumn } from './LedgerTable'
 
 /** A loan is claimed or liquidated here; proposals are accepted on their own page. */
 const LOAN_ACTIONS: OfferActions<

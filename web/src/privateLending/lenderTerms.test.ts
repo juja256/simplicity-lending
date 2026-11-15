@@ -5,6 +5,7 @@ import {
   type LenderTermsInput,
   type PairTermsInput,
   proposalExpiry,
+  proposalExpiryIsStale,
   TERM_MARGIN_BLOCKS,
   termBlocksOf,
   type TermsPair,
@@ -42,6 +43,16 @@ describe('the term rule', () => {
   it('counts no term for an expiry less than a day after the creation block', () => {
     expect(termBlocksOf(expiry, expiry - BLOCKS_PER_DAY + 1)).toBe(0)
     expect(termBlocksOf(expiry, expiry - BLOCKS_PER_DAY)).toBe(BLOCKS_PER_DAY)
+  })
+
+  it('keeps an expiry while the tip it was set at is the latest', () => {
+    expect(proposalExpiryIsStale(expiry, tip, days)).toBe(false)
+    expect(proposalExpiryIsStale(expiry, tip - 1, days)).toBe(false)
+  })
+
+  it('refuses an expiry once the chain moved past the tip it was set at', () => {
+    expect(proposalExpiryIsStale(expiry, tip + 1, days)).toBe(true)
+    expect(proposalExpiryIsStale(expiry, tip + TERM_MARGIN_BLOCKS, days)).toBe(true)
   })
 })
 

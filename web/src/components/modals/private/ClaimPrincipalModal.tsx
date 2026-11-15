@@ -1,10 +1,13 @@
 import { Chip } from '@heroui/react'
 import { useMemo } from 'react'
 
+import { loanAmounts } from '@/areas/borrow/proposalForm'
+import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { borrowerNftOutpoint, utxoOutpoint } from '@/privateLending/candidate'
 import { buildPrincipalClaim } from '@/privateLending/flows/claimPrincipal'
+import { borrowerActions } from '@/privateLending/offerView'
 import { selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
 import { ASSET_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/asset-auth/witness'
 
@@ -19,7 +22,8 @@ const CLAIM_WEIGHT_UNITS =
 
 /**
  * The borrower claims the principal the lender paid at acceptance. The borrower NFT unlocks it and
- * comes back to the wallet.
+ * comes back to the wallet. The borrower app calls it receiving the principal, and the action keeps
+ * the name of its button in My loans: "Receive 20,000 TEST".
  */
 export default function ClaimPrincipalModal(props: PrivateOfferActionModalProps) {
   const { item } = props
@@ -44,23 +48,26 @@ export default function ClaimPrincipalModal(props: PrivateOfferActionModalProps)
   }
 
   const summary = useMemo(
-    () => [{ label: 'Principal', value: formatPrincipalAmount(terms.principalAmount) }],
+    () => [{ label: 'You receive', value: formatPrincipalAmount(terms.principalAmount) }],
     [terms, formatPrincipalAmount],
   )
+  const label = borrowerActions(
+    loanAmounts(terms.principalAmount, terms.repaymentAmount, NETWORK_CONFIG.principalAsset),
+  ).labels.claimPrincipal
 
   return (
     <PrivateOfferActionShell
       {...props}
       kind='private_claim_principal'
       requires='principal'
-      title='Claim Principal'
+      title='Receive your principal'
       chip={
         <Chip color='accent' variant='soft' size='sm'>
-          Claim
+          {item.candidate.status === 'liquidated' ? 'Collateral taken' : 'Accepted'}
         </Chip>
       }
-      label='Claim Principal'
-      eyebrow='Claim Principal'
+      label={label}
+      eyebrow={label}
       summary={summary}
       build={build}
     />

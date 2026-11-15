@@ -6,7 +6,7 @@ type ChipColor = 'success' | 'warning' | 'accent' | 'danger' | 'default'
 
 const OFFER_STATUS_CHIP_CONFIG: Record<OfferStatus, { color: ChipColor; label: string }> = {
   active: { color: 'success', label: 'Active' },
-  pending: { color: 'warning', label: 'Open Offer' },
+  pending: { color: 'warning', label: 'Open proposal' },
   repaid: { color: 'accent', label: 'Repaid' },
   liquidated: { color: 'danger', label: 'Liquidated' },
   cancelled: { color: 'default', label: 'Cancelled' },

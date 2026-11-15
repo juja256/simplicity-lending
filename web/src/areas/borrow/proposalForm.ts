@@ -2,6 +2,7 @@
 // and the proposal it makes once every field is within the lender's terms; with the words the
 // borrower app writes amounts, dates and ages in. This module is pure (no React, no
 // `import.meta.env`), so tests import it.
+import type { PairAsset } from '@/constants/resolve-network-config'
 import {
   type PairTermsInput,
   PERCENT_DECIMALS,
@@ -182,6 +183,22 @@ export function amountText(units: bigint, decimals: number, minFraction = 0): st
   const padded = fraction.padEnd(Math.min(minFraction, decimals), '0')
   const grouped = BigInt(whole).toLocaleString('en-US')
   return padded === '' ? grouped : `${grouped}.${padded}`
+}
+
+/**
+ * What a loan pays the borrower and what the borrower repays, as its buttons name them: the
+ * principal as `amountText` writes it, the repayment with at least 2 decimals, as the summary
+ * sentence writes it ("Receive 20,000 TEST", "Repay 3,021.40 TEST").
+ */
+export function loanAmounts(
+  principal: bigint,
+  repayment: bigint,
+  asset: Pick<PairAsset, 'decimals' | 'symbol'>,
+): { receive: string; repay: string } {
+  return {
+    receive: `${amountText(principal, asset.decimals)} ${asset.symbol}`,
+    repay: `${amountText(repayment, asset.decimals, 2)} ${asset.symbol}`,
+  }
 }
 
 /** About when a block `blocksAhead` of the tip comes, at Liquid's minute a block. */

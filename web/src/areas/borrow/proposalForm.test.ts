@@ -14,6 +14,7 @@ import {
   dateAfterBlocks,
   editProposalForm,
   formatDay,
+  loanAmounts,
   openProposalForm,
   type ProposalFormState,
   proposalOfForm,
@@ -157,6 +158,13 @@ describe('the words of the summary', () => {
     expect(amountText(508_630_136_986n, 8, 2)).toBe('5,086.30136986')
     expect(amountText(8_500_000n, 8)).toBe('0.085')
     expect(amountText(500_000n, 0, 2)).toBe('500,000')
+  })
+
+  it('names what a loan pays out and what it repays, the repayment with cents', () => {
+    expect(loanAmounts(2_000_000_000_000n, 302_140_000_000n, PAIR_INFO.principal)).toEqual({
+      receive: '20,000 TEST',
+      repay: '3,021.40 TEST',
+    })
   })
 
   it('dates the end of a term the days and the margin after now', () => {

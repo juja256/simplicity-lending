@@ -142,6 +142,7 @@ function ProposalFormView({ lender, wasm }: ProposalFormViewProps) {
       collateralAmount: proposal.collateral,
       principalAmount: proposal.principal,
       repaymentAmount: proposal.repayment,
+      termDays: proposal.days,
       loanExpirationTime: proposalExpiry(tipHeight, proposal.days),
     })
   }
