@@ -187,12 +187,13 @@ export function proposalExpiry(tipHeight: number, days: number): number {
 }
 
 /**
- * Whether a proposal of `days` with `expiry` set at an earlier tip would get a later expiry at
- * `tipHeight`: the chain moved on since it was reviewed, so it is not sent with the term the
- * borrower saw. The creation checks it with the tip it reads before building.
+ * Whether a proposal of `days` with `expiry` can no longer count those days: a creation confirmed
+ * in the block after `tipHeight`, the earliest it can confirm, would count fewer by the term rule.
+ * `TERM_MARGIN_BLOCKS` absorbs the blocks found while the borrower reviews and signs; only a
+ * proposal held past it is stale. The creation checks it with the tip it reads before building.
  */
 export function proposalExpiryIsStale(expiry: number, tipHeight: number, days: number): boolean {
-  return proposalExpiry(tipHeight, days) > expiry
+  return termBlocksOf(expiry, tipHeight + 1) < days * BLOCKS_PER_DAY
 }
 
 /**

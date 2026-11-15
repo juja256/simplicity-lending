@@ -36,7 +36,8 @@ export interface PrivateOfferDraft {
   termDays: number
   /**
    * A block height: `proposalExpiry` of the tip when "Lock collateral and send" was pressed and
-   * `termDays`. It is fixed then: a chain that moved on by the build refuses it.
+   * `termDays`. It is fixed then: the build refuses it once a creation could no longer count
+   * `termDays` (`proposalExpiryIsStale`).
    */
   loanExpirationTime: number
 }

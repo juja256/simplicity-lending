@@ -45,14 +45,16 @@ describe('the term rule', () => {
     expect(termBlocksOf(expiry, expiry - BLOCKS_PER_DAY)).toBe(BLOCKS_PER_DAY)
   })
 
-  it('keeps an expiry while the tip it was set at is the latest', () => {
+  it('keeps an expiry while a creation in the next block counts the chosen days', () => {
     expect(proposalExpiryIsStale(expiry, tip, days)).toBe(false)
-    expect(proposalExpiryIsStale(expiry, tip - 1, days)).toBe(false)
+    expect(proposalExpiryIsStale(expiry, tip + 1, days)).toBe(false)
+    // The last tip whose next block is within the margin: tip + 59, confirming at tip + 60.
+    expect(proposalExpiryIsStale(expiry, tip + TERM_MARGIN_BLOCKS - 1, days)).toBe(false)
   })
 
-  it('refuses an expiry once the chain moved past the tip it was set at', () => {
-    expect(proposalExpiryIsStale(expiry, tip + 1, days)).toBe(true)
+  it('refuses an expiry once a creation in the next block would count a day less', () => {
     expect(proposalExpiryIsStale(expiry, tip + TERM_MARGIN_BLOCKS, days)).toBe(true)
+    expect(proposalExpiryIsStale(expiry, tip + BLOCKS_PER_DAY, days)).toBe(true)
   })
 })
 
