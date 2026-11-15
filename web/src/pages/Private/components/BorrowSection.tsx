@@ -14,14 +14,17 @@ import RepayPrivateOfferModal from '@/components/modals/private/RepayPrivateOffe
 import { OffersLoadError } from '@/components/OffersLoadError'
 import { OfferStatusChip } from '@/components/OfferStatusChip'
 import { UiButton } from '@/components/ui/UiButton'
+import { useKeyedModal } from '@/hooks/useKeyedModal'
 import { repaymentBorrowerNftOutpoint, unspentUtxo } from '@/privateLending/candidate'
 import { useDirectory } from '@/privateLending/hooks/useDirectory'
 import { useFingerprintOf } from '@/privateLending/hooks/useFingerprintOf'
 import { type PrivateOfferItem, usePrivateOffers } from '@/privateLending/hooks/usePrivateOffers'
 import {
   isPastExpiry,
+  type OfferActions,
   type OfferTxState,
   offerTxState,
+  type OfferView,
   type OpenedOfferItem,
 } from '@/privateLending/offerView'
 import type { PrivateTxKind, PrivateTxRecord } from '@/providers/pendingTransactions/types'
@@ -30,9 +33,8 @@ import { truncateAddress } from '@/utils/format'
 
 import CreatePrivateOfferForm from './CreatePrivateOfferForm'
 import PairTermsSummary from './PairTermsSummary'
-import PrivateOfferActionRow, { type OfferActions, type OfferView } from './PrivateOfferActionRow'
+import PrivateOfferActionRow from './PrivateOfferActionRow'
 import PrivateOfferList, { ScanHeight } from './PrivateOfferList'
-import { useKeyedModal } from './useKeyedModal'
 
 type BorrowerAction = 'cancel' | 'claimPrincipal' | 'repay'
 
