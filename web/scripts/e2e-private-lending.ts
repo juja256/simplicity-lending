@@ -115,6 +115,7 @@ import {
   loadEnv,
   type Need,
   needsNothing,
+  ON_REQUEST_STAGES,
   PRINCIPAL,
   REPAYMENT,
   SPLITS,
@@ -192,11 +193,15 @@ function shortfalls(ctx: Context, needs: Record<Wallet, Need>): string[] {
 /**
  * Exits 1 unless the wallets cover every stage without a `confirmed` record: a `built` or
  * `broadcast` one still counts, as its coins are not spent until it confirms. A stage that needs
- * nothing (`scan`, which never has a record) is never left.
+ * nothing (`scan`, which never has a record) is never left, nor one that runs only when named
+ * (`ON_REQUEST_STAGES`) unless `requested` names it.
  */
-function requireFunding(ctx: Context): void {
+function requireFunding(ctx: Context, requested: readonly string[]): void {
   const remaining = STAGE_NAMES.filter(
-    stage => !needsNothing(stage) && getRecord(stage)?.status !== 'confirmed',
+    stage =>
+      !needsNothing(stage) &&
+      getRecord(stage)?.status !== 'confirmed' &&
+      (!ON_REQUEST_STAGES.includes(stage) || requested.includes(stage)),
   )
   const short = shortfalls(ctx, sumNeeds(remaining))
   if (short.length > 0) {
@@ -611,9 +616,20 @@ const CREATION_STAGES = {
   create: 'create',
   'cancel-create': 'cancel',
   'liquidate-create': 'liquidate',
+  'short-proposal': 'short-proposal',
 } as const
 
 type CreationRecord = keyof typeof CREATION_STAGES
+
+/**
+ * The creations the `scan` stage finds: every one but `short-proposal`, which runs only when named
+ * and goes on in the testnet demo.
+ */
+const SCANNED_CREATIONS = [
+  'create',
+  'cancel-create',
+  'liquidate-create',
+] as const satisfies readonly CreationRecord[]
 
 /** The `create` offer, fetched from chain and opened through the gate as `role`. */
 async function loadCreatedOffer(ctx: Context, role: Wallet): Promise<VerifiedOffer> {
@@ -2025,6 +2041,44 @@ async function liquidateDryStage(ctx: Context): Promise<void> {
   out(`\nliquidate-dry: ok (${txid} finalized at tip ${tip}, not saved or broadcast)`)
 }
 
+/** Blocks from the tip to the `short-proposal` offer's loan expiration: less than a day. */
+const SHORT_PROPOSAL_BLOCKS = 15
+
+/**
+ * A new offer from the borrower to the lender that expires 15 blocks after the tip, for the
+ * testnet demo (`pnpm demo:testnet`), and nothing more: the demo's lender sees it outside its
+ * terms, accepts it after the warning and liquidates it once it expired. Counted by the term rule
+ * from the block its creation confirmed in, its term is under a day, so against the `directory`
+ * stage's terms it breaks the shortest term only.
+ */
+async function shortProposalStage(ctx: Context): Promise<void> {
+  const txid = await submitCreation(
+    ctx,
+    'short-proposal',
+    'short-proposal',
+    tip => tip + SHORT_PROPOSAL_BLOCKS,
+  )
+  await lenderView(ctx, txid)
+  const offer = await loadOffer(ctx, 'short-proposal', 'lender')
+  const { blockHeight } = await ctx.chain.fetchTimelock(txid)
+  if (blockHeight === null) throw new Error(`the creation ${txid} is not confirmed`)
+  const expiry = offer.opened.loanExpirationTime()
+  const termBlocks = termBlocksOf(expiry, blockHeight)
+  out(`term: created at block ${blockHeight}, expires at ${expiry}: ${termBlocks} blocks`)
+  const breaches = wasm.checkProposal(
+    JSON.stringify(e2eTerms()),
+    JSON.stringify(createProposal(termBlocks)),
+  )
+  if (!isDeepStrictEqual(breaches, ['TermBelowRange'])) {
+    throw new Error(
+      `against the e2e terms the short proposal breaks ${JSON.stringify(breaches)}, ` +
+        'not the shortest term only',
+    )
+  }
+  out("against the e2e lender's terms it breaks the shortest term only")
+  out('\nshort-proposal: ok')
+}
+
 /** An e2e offer, which the borrower created for the lender. */
 interface Creation {
   stage: CreationRecord
@@ -2648,7 +2702,7 @@ async function directoryStage(ctx: Context): Promise<void> {
  * offers, and a hostile indexer cannot get an offer verified. Nothing is broadcast.
  */
 async function scanStage(ctx: Context): Promise<void> {
-  const creations: Creation[] = (Object.keys(CREATION_STAGES) as CreationRecord[]).map(stage => {
+  const creations: Creation[] = SCANNED_CREATIONS.map(stage => {
     const record = getRecord(stage)
     if (record?.status !== 'confirmed') {
       throw new Error(`no confirmed ${stage}: run the ${CREATION_STAGES[stage]} stage`)
@@ -2705,13 +2759,17 @@ const STAGES: Record<string, (ctx: Context) => Promise<void>> = {
   liquidate: liquidateStage,
   scan: scanStage,
   directory: directoryStage,
+  'short-proposal': shortProposalStage,
 }
 
 /**
  * The stages run when none is named: the real ones. The dry ones (`*-dry`) only rebuild and check
- * a stage's transaction, from whatever coins the wallets hold now, so they run only by name.
+ * a stage's transaction, from whatever coins the wallets hold now, so they run only by name, as
+ * do the stages for the testnet demo (`ON_REQUEST_STAGES`).
  */
-const DEFAULT_STAGES = Object.keys(STAGES).filter(name => !name.endsWith('-dry'))
+const DEFAULT_STAGES = Object.keys(STAGES).filter(
+  name => !name.endsWith('-dry') && !(ON_REQUEST_STAGES as readonly string[]).includes(name),
+)
 
 async function main(): Promise<void> {
   const requested = process.argv.slice(2)
@@ -2733,7 +2791,7 @@ async function main(): Promise<void> {
   }
   await ctx.wallets.borrower.sync()
   await ctx.wallets.lender.sync()
-  requireFunding(ctx)
+  requireFunding(ctx, names)
   for (const name of names) {
     out(`== ${name}`)
     if (name !== 'wallets') checkWalletIdentities(ctx, false)
