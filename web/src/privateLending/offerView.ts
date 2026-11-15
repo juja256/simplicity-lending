@@ -1,13 +1,17 @@
-// Display and gating rules of the private offers, shared by the private page and its modals. The
-// indexer's candidate (status, UTXOs) is untrusted: it only decides what to show and which action
-// to offer. Every action loads its offer fresh through the gate, and its builder checks every
-// outpoint it is given. The rules that read outpoints from the candidate are in `./candidate`.
+// Display and gating rules of the private offers, shared by the lender console, the private page
+// and their modals. The indexer's candidate (status, UTXOs) is untrusted: it only decides what to
+// show and which action to offer. Every action loads its offer fresh through the gate, and its
+// builder checks every outpoint it is given. The rules that read outpoints from the candidate are
+// in `./candidate`.
+import type { ReactNode } from 'react'
+
 import type {
   PrivateCandidateDetails,
   PrivateOfferStatus,
   PrivateUtxoType,
 } from '@/api/indexer/private'
 import { NETWORK_CONFIG } from '@/constants/network-config'
+import { unspentUtxo } from '@/privateLending/candidate'
 import type { PrivateOfferItem, PrivateOfferTerms } from '@/privateLending/hooks/usePrivateOffers'
 import type { PrivateTxKind, PrivateTxRecord } from '@/providers/pendingTransactions/types'
 import { formatTermLeft } from '@/utils/format'
@@ -155,4 +159,130 @@ export function offerTxState<K extends PrivateTxKind>(
       record.confirmationStatus === 'processing' || record.confirmationStatus === 'confirmed',
   )
   return processing ? { state: 'processing', record: processing } : null
+}
+
+/** What the session may do with an opened offer, from the indexer's view of it (untrusted). */
+export interface OfferView<A extends string> {
+  action?: A
+  note?: ReactNode
+}
+
+/** One side's actions on its offers. */
+export interface OfferActions<A extends string, K extends PrivateTxKind> {
+  labels: Record<A, string>
+  /** The action shown as a danger button. */
+  danger: A
+  /** The action of each transaction kind: its modal broadcasts a saved one again. */
+  actionOfKind: Record<K, A>
+}
+
+/** The button an offer gets: its action, on `item`, with the saved transaction to send again. */
+export interface OfferActionButton<A extends string> {
+  action: A
+  item: OpenedOfferItem
+  unsentTx?: PrivateTxRecord
+  label: string
+  variant: 'primary' | 'secondary' | 'danger-soft'
+}
+
+/** An offer's action and note, as both sides show them. */
+export interface OfferActionState<A extends string> {
+  note: ReactNode
+  /** A transaction of this browser for the offer waits for its confirmation. */
+  isProcessing: boolean
+  button: OfferActionButton<A> | null
+}
+
+/**
+ * An offer's action, by the same rules on both sides. This browser's own transaction for the
+ * offer, which the indexer may not show yet, comes first:
+ * - one saved but not broadcast gets only "Broadcast again", which opens its action's modal on the
+ *   saved transaction: a retry never rebuilds, and no new build is offered meanwhile;
+ * - one broadcast and not yet final gets no action until it is.
+ *
+ * Otherwise the offer gets the side's `viewOf` when it can be acted on at all, and only the note
+ * why when it cannot (`blockedNote`).
+ */
+export function offerActionState<A extends string, K extends PrivateTxKind>(
+  privateTxs: PrivateTxRecord[],
+  item: PrivateOfferItem,
+  actions: OfferActions<A, K>,
+  viewOf: (item: OpenedOfferItem) => OfferView<A>,
+): OfferActionState<A> {
+  const kinds = Object.keys(actions.actionOfKind) as K[]
+  const txState = offerTxState(privateTxs, item.txid, kinds)
+  const opened = isOpenedOffer(item) ? item : null
+  if (txState?.state === 'unsent') {
+    const { record } = txState
+    return {
+      note: 'Your transaction was signed but not broadcast.',
+      isProcessing: false,
+      button: opened && {
+        action: actions.actionOfKind[record.kind],
+        item: opened,
+        unsentTx: record,
+        label: 'Broadcast again',
+        variant: 'secondary',
+      },
+    }
+  }
+  if (txState?.state === 'processing') {
+    return {
+      note: 'Your transaction waits for its confirmation.',
+      isProcessing: true,
+      button: null,
+    }
+  }
+  const view: OfferView<A> = opened ? viewOf(opened) : { note: blockedNote(item) }
+  const action = view.action
+  return {
+    note: view.note,
+    isProcessing: false,
+    button:
+      opened && action !== undefined
+        ? {
+            action,
+            item: opened,
+            label: actions.labels[action],
+            variant: action === actions.danger ? 'danger-soft' : 'primary',
+          }
+        : null,
+  }
+}
+
+export type LenderAction = 'accept' | 'claim' | 'liquidate'
+
+/**
+ * The names of the lender's actions in the console, where "Review" opens the acceptance. Each page
+ * tracks only the transactions of the actions it shows (`OfferActions.actionOfKind`).
+ */
+export const LENDER_ACTION_LABELS: Record<LenderAction, string> = {
+  accept: 'Review',
+  claim: 'Claim',
+  liquidate: 'Liquidate',
+}
+
+/**
+ * What the lender can do with an offer, from the indexer's view of it (untrusted: the action's
+ * builder checks every outpoint): accept a pending offer before its expiry, claim an unspent
+ * repayment, liquidate an active loan once the tip is past its expiry.
+ */
+export function lenderView(item: OpenedOfferItem, tipHeight: number): OfferView<LenderAction> {
+  const { candidate, terms } = item
+  const expired = isPastExpiry(terms, tipHeight)
+  switch (candidate.status) {
+    case 'pending':
+      return expired ? { note: 'Its term has passed.' } : { action: 'accept' }
+    case 'active':
+      if (unspentUtxo(candidate, 'active_offer') === undefined) return {}
+      return expired
+        ? { action: 'liquidate', note: 'The loan has expired unpaid.' }
+        : { note: `Liquidation opens after block #${terms.loanExpirationTime}.` }
+    case 'repaid':
+      return unspentUtxo(candidate, 'repayment') !== undefined
+        ? { action: 'claim', note: 'The borrower repaid the loan.' }
+        : {}
+    default:
+      return {}
+  }
 }

@@ -9,7 +9,6 @@ import { ErrorHandler } from '@/utils/errorHandler'
 
 import BorrowSection from './components/BorrowSection'
 import DirectorySection from './components/DirectorySection'
-import LendSection from './components/LendSection'
 import PrivateLoansCard from './components/PrivateLoansCard'
 
 /** The session's lending key: its fingerprint, its directory name, and the key to share. */
@@ -62,7 +61,6 @@ export default function PrivatePage() {
         <LendingKeyCard />
         <DirectorySection />
         <BorrowSection />
-        <LendSection />
       </div>
     </div>
   )

@@ -9,6 +9,8 @@ import {
 
 import BorrowerLayout from '@/areas/borrow/BorrowerLayout'
 import LenderLayout from '@/areas/lend/LenderLayout'
+import LoanBookPage from '@/areas/lend/LoanBookPage'
+import ProposalsPage from '@/areas/lend/ProposalsPage'
 import { WalletGate } from '@/areas/WalletGate'
 import { RoutePath } from '@/constants/routes'
 import { AppProviders } from '@/providers/AppProviders'
@@ -70,8 +72,22 @@ const router = createBrowserRouter([
         element: <LenderLayout />,
         children: [
           { index: true, element: <Navigate to={RoutePath.LendProposals} replace /> },
-          { path: RoutePath.LendProposals, element: standIn },
-          { path: RoutePath.LendLoans, element: standIn },
+          {
+            path: RoutePath.LendProposals,
+            element: (
+              <WalletGate>
+                <ProposalsPage />
+              </WalletGate>
+            ),
+          },
+          {
+            path: RoutePath.LendLoans,
+            element: (
+              <WalletGate>
+                <LoanBookPage />
+              </WalletGate>
+            ),
+          },
           { path: RoutePath.LendTerms, element: standIn },
           { path: RoutePath.LendProfile, element: standIn },
         ],
