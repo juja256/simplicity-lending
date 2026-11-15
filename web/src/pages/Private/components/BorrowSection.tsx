@@ -1,24 +1,17 @@
-import { Chip, Skeleton } from '@heroui/react'
-import { useState } from 'react'
+import { Chip } from '@heroui/react'
 
 import { useBlockHeight } from '@/api/esplora/hooks'
 import { getTxExplorerUrl } from '@/api/esplora/utils'
 import CoinsIcon from '@/components/icons/CoinsIcon'
-import KeyFingerprint from '@/components/KeyFingerprint'
 import CancelPrivateOfferModal from '@/components/modals/private/CancelPrivateOfferModal'
 import ClaimPrincipalModal from '@/components/modals/private/ClaimPrincipalModal'
-import CreatePrivateOfferModal, {
-  type PrivateOfferDraft,
-} from '@/components/modals/private/CreatePrivateOfferModal'
+import CreatePrivateOfferModal from '@/components/modals/private/CreatePrivateOfferModal'
 import RepayPrivateOfferModal from '@/components/modals/private/RepayPrivateOfferModal'
-import { OffersLoadError } from '@/components/OffersLoadError'
 import { OfferStatusChip } from '@/components/OfferStatusChip'
-import PairTermsSummary from '@/components/PairTermsSummary'
 import { UiButton } from '@/components/ui/UiButton'
 import { useKeyedModal } from '@/hooks/useKeyedModal'
 import { repaymentBorrowerNftOutpoint, unspentUtxo } from '@/privateLending/candidate'
 import { useDirectory } from '@/privateLending/hooks/useDirectory'
-import { useFingerprintOf } from '@/privateLending/hooks/useFingerprintOf'
 import { type PrivateOfferItem, usePrivateOffers } from '@/privateLending/hooks/usePrivateOffers'
 import {
   isPastExpiry,
@@ -32,7 +25,6 @@ import type { PrivateTxKind, PrivateTxRecord } from '@/providers/pendingTransact
 import { usePendingTransactions } from '@/providers/pendingTransactions/usePendingTransactions'
 import { truncateAddress } from '@/utils/format'
 
-import CreatePrivateOfferForm from './CreatePrivateOfferForm'
 import PrivateOfferActionRow from './PrivateOfferActionRow'
 import PrivateOfferList, { ScanHeight } from './PrivateOfferList'
 
@@ -150,72 +142,20 @@ function PendingCreationRow({
   )
 }
 
-/**
- * The lenders of the directory whose entries verified, with their terms and when they published
- * them, to choose a lender by; never the wallet's own entry, nor a key that is not valid. Entries
- * that did not verify are only counted.
- */
-function ListedLenders({ directory }: { directory: ReturnType<typeof useDirectory> }) {
-  const fingerprintOf = useFingerprintOf()
-  const { identity, hiddenCount } = directory
-  const lenders = directory.lenders.flatMap(lender => {
-    const fingerprint = fingerprintOf(lender.entry.pubkey)
-    return fingerprint && lender.entry.pubkey !== identity?.pubkey
-      ? [{ ...lender, fingerprint }]
-      : []
-  })
-
-  return (
-    <div className='flex flex-col gap-3'>
-      <h3 className='text-foreground text-sm font-semibold'>
-        Lenders&apos; terms{directory.directory.isSuccess ? ` (${lenders.length})` : ''}
-      </h3>
-      {directory.directory.isPending ? (
-        <Skeleton className='h-24 w-full rounded' />
-      ) : directory.directory.isError ? (
-        <OffersLoadError
-          error={directory.directory.error}
-          onRetry={() => void directory.directory.refetch()}
-        />
-      ) : lenders.length === 0 ? (
-        <div className='bg-surface border-muted flex h-14 items-center rounded border border-dashed px-4 opacity-50'>
-          <span className='text-foreground text-sm font-medium'>No lender is listed yet.</span>
-        </div>
-      ) : (
-        <ul className='flex max-h-96 flex-col gap-2 overflow-y-auto'>
-          {lenders.map(({ entry, terms, fingerprint }) => (
-            <li key={entry.pubkey} className='bg-surface flex flex-col gap-2 rounded-2xl p-4'>
-              <KeyFingerprint fingerprint={fingerprint} name={entry.display_name} />
-              <PairTermsSummary verifiedTerms={terms} publishedAt={entry.terms_published_at} />
-            </li>
-          ))}
-        </ul>
-      )}
-      {directory.directory.isSuccess && hiddenCount > 0 && (
-        <p className='text-muted text-xs'>
-          {hiddenCount === 1
-            ? 'One more lender is not shown: its terms could not be verified.'
-            : `${hiddenCount} more lenders are not shown: their terms could not be verified.`}
-        </p>
-      )}
-    </div>
-  )
-}
-
 type ModalRequest =
   | { kind: 'action'; action: BorrowerAction; item: OpenedOfferItem; unsentTx?: PrivateTxRecord }
-  | { kind: 'create'; draft?: PrivateOfferDraft; unsentTx?: PrivateTxRecord }
+  | { kind: 'create'; unsentTx: PrivateTxRecord }
 
-/** The borrower's own offers, found by scanning, and the form for a new one. */
+/**
+ * The borrower's own offers, found by scanning. New ones are proposed from the borrower app's
+ * proposal page.
+ */
 export default function BorrowSection() {
   const offers = usePrivateOffers()
-  const directory = useDirectory()
-  const { lookup } = directory
+  const { lookup } = useDirectory()
   const { data: tipHeight } = useBlockHeight()
   const { privateTxs } = usePendingTransactions()
   const { modal, isOpen, open, close } = useKeyedModal<ModalRequest>()
-  // A new form after each creation: empty fields, and the wallet's coins read again.
-  const [formKey, setFormKey] = useState(0)
 
   const items = offers.data?.borrowing ?? []
   const lenderName = (item: PrivateOfferItem) =>
@@ -232,7 +172,6 @@ export default function BorrowSection() {
       const txState = offerTxState(privateTxs, record.txid, CREATE_TX_KINDS)
       return txState ? [txState] : []
     })
-  const hasUnsentCreation = pendingCreations.some(txState => txState.state === 'unsent')
 
   const renderModal = () => {
     if (modal === null) return null
@@ -242,10 +181,8 @@ export default function BorrowSection() {
         <CreatePrivateOfferModal
           key={key}
           isOpen={isOpen}
-          draft={request.draft}
           unsentTx={request.unsentTx}
           onClose={close}
-          onCreated={() => setFormKey(formKey => formKey + 1)}
         />
       )
     }
@@ -282,14 +219,6 @@ export default function BorrowSection() {
         </div>
         <ScanHeight offers={offers} />
       </header>
-
-      <ListedLenders directory={directory} />
-
-      <CreatePrivateOfferForm
-        key={formKey}
-        hasUnsentCreation={hasUnsentCreation}
-        onReview={draft => open({ kind: 'create', draft })}
-      />
 
       {pendingCreations.length > 0 && (
         <ul className='flex flex-col gap-2'>

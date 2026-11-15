@@ -91,9 +91,10 @@ export function pickCreationCoins<T>(
   const [first, second, ...rest] = sorted
   if (first === undefined || second === undefined || rest.length === 0) {
     throw new Error(
-      `A private offer needs at least ${CREATION_MIN_COINS} confirmed ${symbol} coins: two ` +
-        `issue its NFTs and the others pay the collateral and the fee. Your wallet has ` +
-        `${sorted.length}. Send part of your balance to your own address to split it.`,
+      `A proposal needs at least ${CREATION_MIN_COINS} confirmed ${symbol} coins: two issue ` +
+        `its tokens, one for you and one for the lender, and the others pay the collateral and ` +
+        `the fee. Your wallet has ${sorted.length}. Send part of your balance to your own ` +
+        `address to split it.`,
     )
   }
   const picked: typeof sorted = []
@@ -111,7 +112,7 @@ export function pickCreationCoins<T>(
     throw new Error(
       `Your confirmed ${symbol} coins cannot pay this collateral and a fee reserve of ` +
         `${formatFeeReserve(creationFeeBudgetSats(2 + picked.length, feeRate))}: the two ` +
-        `smallest issue the offer's NFTs, and the others must hold the collateral.`,
+        `smallest issue the proposal's tokens, and the others must hold the collateral.`,
     )
   }
   return {

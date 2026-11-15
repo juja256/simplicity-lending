@@ -14,8 +14,11 @@ interface PairTermsSummaryProps {
    * verify, and when it has no terms.
    */
   verifiedTerms: LenderTermsInput | null
-  /** The entry's `terms_published_at`: unix seconds, null when it has no terms. */
-  publishedAt: number | null
+  /**
+   * The entry's `terms_published_at`: unix seconds, null when it has no terms. Leave it out to
+   * show the terms without when they were published.
+   */
+  publishedAt?: number | null
 }
 
 /**
@@ -55,8 +58,10 @@ export default function PairTermsSummary({ verifiedTerms, publishedAt }: PairTer
         principal.decimals,
       )} ${principal.symbol}`,
     ],
-    ['Published', publishedAt === null ? '—' : formatPublishedAt(publishedAt)],
   ]
+  if (publishedAt !== undefined) {
+    rows.push(['Published', publishedAt === null ? '—' : formatPublishedAt(publishedAt)])
+  }
   return (
     <dl className='grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs'>
       {rows.map(([label, value]) => (

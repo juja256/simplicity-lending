@@ -8,6 +8,8 @@ import {
 } from 'react-router-dom'
 
 import BorrowerLayout from '@/areas/borrow/BorrowerLayout'
+import ChooseLenderPage from '@/areas/borrow/ChooseLenderPage'
+import ProposalPage from '@/areas/borrow/ProposalPage'
 import LenderLayout from '@/areas/lend/LenderLayout'
 import LoanBookPage from '@/areas/lend/LoanBookPage'
 import ProfilePage from '@/areas/lend/ProfilePage'
@@ -53,7 +55,7 @@ function isAppPath(pathname: string) {
   )
 }
 
-// The Private page stands in for each area page until that page is built.
+// The Private page stands in for the borrower's loans until that page is built.
 const standIn = (
   <WalletGate>
     <PrivatePage />
@@ -112,9 +114,23 @@ const router = createBrowserRouter([
         path: RoutePath.Borrow,
         element: <BorrowerLayout />,
         children: [
-          { index: true, element: standIn },
+          {
+            index: true,
+            element: (
+              <WalletGate>
+                <ChooseLenderPage />
+              </WalletGate>
+            ),
+          },
           { path: RoutePath.BorrowLoans, element: standIn },
-          { path: RoutePath.BorrowLender, element: standIn },
+          {
+            path: RoutePath.BorrowLender,
+            element: (
+              <WalletGate>
+                <ProposalPage />
+              </WalletGate>
+            ),
+          },
         ],
       },
       // The old single app: `/app` and its pages lead to the landing page and its two entrances.
