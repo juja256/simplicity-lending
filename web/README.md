@@ -365,8 +365,11 @@ It needs:
 The demo starts its own dev server, `pnpm dev --mode demo` on port 5199, proxying the indexer
 under `/api`. A `short-proposal` record that an earlier run left confirmed is removed first, so
 the stage makes a new proposal. Screenshots and the e2e stages' output go to `.demo-output/`, and
-Playwright's output (the page snapshot of a failure) to `test-results/`, both git-ignored. There is
-no trace or report, which could keep the seed phrases typed into the app. The demo's proposals
+Playwright's output (a failure's `error-context.md`) to `test-results/`, both git-ignored. Nothing
+there may keep the seed phrases typed into the connect modal: the demo takes no trace, report,
+screenshot or video, turns off the page snapshot of a failure (`PLAYWRIGHT_NO_COPY_PROMPT`),
+connects without locator assertions, which would attach a snapshot of the page, and clears the
+phrase from the fields when a connection fails. The demo's proposals
 are addressed to the e2e lender, so a `scan` whose indexed range covers a demo finds them too.
 
 ## Run

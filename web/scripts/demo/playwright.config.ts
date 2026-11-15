@@ -6,6 +6,10 @@ import { fileURLToPath } from 'node:url'
 
 import { defineConfig } from '@playwright/test'
 
+// No page snapshot in a failure's `error-context.md`: it would show the seed phrases typed into
+// the connect modal's fields (Playwright 1.65 checks this setting before taking it).
+process.env.PLAYWRIGHT_NO_COPY_PROMPT = '1'
+
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 
 /** The dev server's port, apart from `pnpm dev`'s default so that both can run. */
@@ -31,7 +35,8 @@ export default defineConfig({
   expect: { timeout: 30_000 },
   workers: 1,
   retries: 0,
-  // The list of steps only: a trace or a report could keep the seed phrases typed into the app.
+  // The list of steps only, and no trace, screenshot or video: each could keep the seed phrases
+  // typed into the app.
   reporter: 'list',
   use: {
     baseURL: `http://localhost:${PORT}`,
