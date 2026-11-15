@@ -82,7 +82,6 @@ function NameForm({ name: publishedName, terms, register }: NameFormProps) {
   return (
     <form className='flex flex-col gap-3' onSubmit={submit}>
       <UiTextField
-        aria-label='Display name'
         label='Display name'
         value={name}
         onChange={setName}

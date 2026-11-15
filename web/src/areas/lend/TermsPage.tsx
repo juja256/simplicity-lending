@@ -133,7 +133,6 @@ function TermsEditor({ own, register }: TermsEditorProps) {
 
         {verifiedName === undefined && (
           <UiTextField
-            aria-label='Display name'
             label='Display name'
             placeholder='Your name in the directory'
             value={name}
@@ -152,7 +151,6 @@ function TermsEditor({ own, register }: TermsEditorProps) {
             {TERMS_FIELDS.map(({ field, label, placeholder, unit }) => (
               <UiTextField
                 key={field}
-                aria-label={label}
                 label={label}
                 placeholder={placeholder}
                 value={termsForm[field]}

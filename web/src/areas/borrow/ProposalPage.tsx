@@ -162,7 +162,6 @@ function ProposalFormView({ lender, wasm }: ProposalFormViewProps) {
             {FIELDS.map(({ field, label, unit, inputMode }) => (
               <UiTextField
                 key={field}
-                aria-label={label}
                 label={label}
                 inputMode={inputMode}
                 autoComplete='off'
