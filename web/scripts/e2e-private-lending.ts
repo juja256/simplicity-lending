@@ -131,6 +131,7 @@ import {
   getNftReceivers,
   getRecord,
   getWalletIdentity,
+  removeRecord,
   saveNftReceiver,
   saveWalletIdentity,
 } from './e2e/state'
@@ -263,14 +264,20 @@ async function walletsStage(ctx: Context): Promise<void> {
     const stage = `wallets-split-${name}`
     const { coins: target, amount } = SPLITS[name]
     const coins = confirmedLbtcCoins(wallet)
-    const recorded = await resumeRecorded(ctx, stage)
-    if (recorded) {
+    // A split not yet confirmed is resumed; a confirmed one counts only while its coins last.
+    const record = getRecord(stage)
+    if (record !== undefined && record.status !== 'confirmed') {
+      await resumeRecorded(ctx, stage)
       await wallet.sync()
       continue
     }
     if (coins >= target) {
       out(`${name}: ${coins} confirmed tL-BTC coins, no split needed`)
       continue
+    }
+    if (record !== undefined) {
+      out(`${name}: the split ${record.txid} was spent since; splitting again`)
+      removeRecord(stage)
     }
     const needed = BigInt(target) * amount + FEE_BUDGET
     const have = confirmedBalance(wallet, TESTNET_ASSETS.policy)

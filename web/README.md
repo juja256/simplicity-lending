@@ -165,7 +165,8 @@ With no stage named, every stage below runs in this order.
 
 - `wallets`: prints each wallet's address, confirmed balances and lending-key fingerprint. A
   wallet with too few confirmed tL-BTC coins is split into 6 × 15 000 tL-sats (borrower) or
-  3 × 5 000 (lender).
+  3 × 5 000 (lender), again once an earlier split was spent (its record `wallets-split-<wallet>`
+  is replaced).
 - `create`: the borrower creates an offer to the lender of a 1-day term, as the borrower's form
   sets it: it expires 1 440 + 60 blocks after the tip (`proposalExpiry`). It builds twice from the
   same coins and checks that the NFTs and the output 3 nonce differ, runs its self-check and
