@@ -13,6 +13,7 @@ import CreatePrivateOfferModal, {
 import RepayPrivateOfferModal from '@/components/modals/private/RepayPrivateOfferModal'
 import { OffersLoadError } from '@/components/OffersLoadError'
 import { OfferStatusChip } from '@/components/OfferStatusChip'
+import PairTermsSummary from '@/components/PairTermsSummary'
 import { UiButton } from '@/components/ui/UiButton'
 import { useKeyedModal } from '@/hooks/useKeyedModal'
 import { repaymentBorrowerNftOutpoint, unspentUtxo } from '@/privateLending/candidate'
@@ -32,7 +33,6 @@ import { usePendingTransactions } from '@/providers/pendingTransactions/usePendi
 import { truncateAddress } from '@/utils/format'
 
 import CreatePrivateOfferForm from './CreatePrivateOfferForm'
-import PairTermsSummary from './PairTermsSummary'
 import PrivateOfferActionRow from './PrivateOfferActionRow'
 import PrivateOfferList, { ScanHeight } from './PrivateOfferList'
 

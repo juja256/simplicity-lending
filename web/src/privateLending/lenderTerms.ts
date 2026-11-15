@@ -356,9 +356,8 @@ export function pairTermsFromForm(
 }
 
 /**
- * The terms a lender publishes from the form: the configured pair alone. It takes nothing from the
- * entry the indexer serves, whose terms carry no signature the app can check: carrying its other
- * pairs into a new signature would sign whatever the indexer injected.
+ * The terms of the form: the configured pair alone. It takes nothing from the entry the indexer
+ * serves; `termsToPublish` adds the other pairs the lender's key signed, once they verified.
  */
 export function lenderTermsFromForm(
   form: PairTermsForm,
@@ -368,12 +367,26 @@ export function lenderTermsFromForm(
   return parsed.terms === null ? parsed : { terms: { pairs: [parsed.terms] }, errors: null }
 }
 
-/** The pairs of served terms for assets other than the configured pair, which a save drops. */
+/** The pairs of `terms` for assets other than the configured pair. */
 export function otherPairs(
   terms: LenderTermsInput | null | undefined,
   pair: TermsPair,
 ): PairTermsInput[] {
   return (terms?.pairs ?? []).filter(other => findPairTerms({ pairs: [other] }, pair) === undefined)
+}
+
+/**
+ * The terms a lender publishes: `formTerms` (from `lenderTermsFromForm`, the configured pair) and
+ * the other pairs of `verifiedTerms`, the terms its key signed before as `checkDirectoryEntry`
+ * verified them. Pass null when the served entry did not verify: its pairs carry no signature the
+ * app can check, so signing them again would sign whatever the indexer injected.
+ */
+export function termsToPublish(
+  formTerms: LenderTermsInput,
+  verifiedTerms: LenderTermsInput | null,
+  pair: TermsPair,
+): LenderTermsInput {
+  return { pairs: [...formTerms.pairs, ...otherPairs(verifiedTerms, pair)] }
 }
 
 /** The form of published terms, to edit them: the inverse of `pairTermsFromForm`. */

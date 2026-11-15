@@ -542,19 +542,19 @@ function checkTermsConversion(): void {
       APR_FORMAT_ERROR,
     )
   }
-  // A served entry with a pair for other assets (as a hostile indexer could add): the lender
-  // publishes, and so signs, the form's pair alone.
+  // A served entry with a pair for other assets (as a hostile indexer could add): the form gives
+  // its pair alone, and `termsToPublish` adds other pairs only from verified terms.
   if (parsed.terms !== null) {
     const injected = { ...parsed.terms, principal_asset: 'ab'.repeat(32) }
     const served = { pairs: [parsed.terms, injected] }
     const published = lenderTermsFromForm(form, pair)
     check(
-      "terms form: the published terms are the form's pair alone",
+      "terms form: the form's terms are its pair alone",
       isDeepStrictEqual(published.terms, { pairs: [parsed.terms] }),
       JSON.stringify(published),
     )
     check(
-      'terms form: a served pair for other assets is found, to be dropped',
+      'terms form: a served pair for other assets is found',
       isDeepStrictEqual(otherPairs(served, pair), [injected]) &&
         otherPairs({ pairs: [parsed.terms] }, pair).length === 0 &&
         otherPairs(null, pair).length === 0,
