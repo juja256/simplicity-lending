@@ -8,6 +8,7 @@ import { UiButton } from '@/components/ui/UiButton'
 import type { PrivateOffers } from '@/privateLending/hooks/usePrivateOffers'
 import type { OfferActionState, OpenedOfferItem } from '@/privateLending/offerView'
 import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
+import { usePendingTransactions } from '@/providers/pendingTransactions/usePendingTransactions'
 import { ErrorHandler } from '@/utils/errorHandler'
 
 type OffersQuery = UseQueryResult<PrivateOffers>
@@ -58,9 +59,13 @@ interface ActionCellProps<A extends string> {
   onOpen: (action: A, item: OpenedOfferItem, unsentTx?: PrivateTxRecord) => void
 }
 
-/** A row's action (`offerActionState`): its button, with the note why or what it waits for. */
+/**
+ * A row's action (`offerActionState`): its button, which opens the action's modal or discards a
+ * saved transaction, with the note why or what it waits for.
+ */
 export function ActionCell<A extends string>({ state, isDisabled, onOpen }: ActionCellProps<A>) {
   const { note, button } = state
+  const { removePrivateTx } = usePendingTransactions()
   return (
     <td className='px-3 py-2.5 text-right align-middle'>
       <div className='flex flex-col items-end gap-1'>
@@ -68,8 +73,13 @@ export function ActionCell<A extends string>({ state, isDisabled, onOpen }: Acti
           <UiButton
             size='sm'
             variant={button.variant}
-            isDisabled={isDisabled}
-            onPress={() => onOpen(button.action, button.item, button.unsentTx)}
+            // Discarding drops a transaction that can no longer be sent: it waits for nothing.
+            isDisabled={button.kind === 'open' && isDisabled}
+            onPress={() =>
+              button.kind === 'open'
+                ? onOpen(button.action, button.item, button.unsentTx)
+                : void removePrivateTx(button.record.txid)
+            }
           >
             {button.label}
           </UiButton>

@@ -23,6 +23,7 @@ import {
   isOpenedOffer,
   LENDER_ACTION_LABELS,
   type LenderAction,
+  lenderSendable,
   lenderView,
   type OfferActions,
   type OfferActionState,
@@ -275,8 +276,12 @@ export default function ProposalsPage() {
             borrowerName={borrowerName(item)}
             tipHeight={tipHeight}
             ownFailed={ownFailed}
-            state={offerActionState(privateTxs, item, PROPOSAL_ACTIONS, opened =>
-              lenderView(opened, tipHeight),
+            state={offerActionState(
+              privateTxs,
+              item,
+              PROPOSAL_ACTIONS,
+              opened => lenderView(opened, tipHeight),
+              lenderSendable(tipHeight),
             )}
             onOpen={(action, opened, unsentTx) => {
               const verdict = figures.get(opened.txid)?.verdict

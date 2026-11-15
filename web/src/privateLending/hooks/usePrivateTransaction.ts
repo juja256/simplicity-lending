@@ -57,14 +57,20 @@ export interface PrivateTransaction {
   /**
    * Builds, signs (through the wallet), finalizes (awaiting an async finalize such as the
    * creation's self-check), saves, then broadcasts. Nothing is broadcast unless the finalized
-   * transaction was saved. Throws `PrivateBroadcastError` if only the broadcast failed.
+   * transaction was saved, and `beforeBroadcast` (if given) resolved just before: when it throws,
+   * the transaction stays saved and unsent. Throws `PrivateBroadcastError` if only the broadcast
+   * failed.
    */
   run: <TSummary>(
     target: PrivateTransactionTarget,
     build: () => Promise<UpdatedPset<TSummary> | AsyncUpdatedPset<TSummary>>,
+    beforeBroadcast?: () => Promise<void>,
   ) => Promise<PrivateTransactionResult<TSummary>>
-  /** Broadcasts the saved transaction `txid` again, as saved. Resolves to `txid`. */
-  retryBroadcast: (txid: string) => Promise<string>
+  /**
+   * Broadcasts the saved transaction `txid` again, as saved, once `beforeBroadcast` (if given)
+   * resolved. Resolves to `txid`.
+   */
+  retryBroadcast: (txid: string, beforeBroadcast?: () => Promise<void>) => Promise<string>
 }
 
 export function usePrivateTransaction(): PrivateTransaction {
@@ -96,7 +102,7 @@ export function usePrivateTransaction(): PrivateTransaction {
   )
 
   const run = useCallback<PrivateTransaction['run']>(
-    async (target, build) => {
+    async (target, build, beforeBroadcast) => {
       try {
         const advance = startTxProgress(getStandardTransactionSteps(signerType))
         const { pset, finalize } = await build()
@@ -122,6 +128,7 @@ export function usePrivateTransaction(): PrivateTransaction {
           )
         }
 
+        await beforeBroadcast?.()
         await advance('broadcasting')
         await broadcastSaved(txid, finalizedTx, txHex)
         return { txid, summary }
@@ -134,7 +141,7 @@ export function usePrivateTransaction(): PrivateTransaction {
   )
 
   const retryBroadcast = useCallback(
-    async (txid: string): Promise<string> => {
+    async (txid: string, beforeBroadcast?: () => Promise<void>): Promise<string> => {
       try {
         startTxProgress(
           getStandardTransactionSteps(signerType).filter(step => step.id === 'broadcasting'),
@@ -143,6 +150,7 @@ export function usePrivateTransaction(): PrivateTransaction {
         if (!record) throw new Error(`No saved transaction ${txid} for this wallet`)
         const tx = Transaction.fromString(record.txHex)
         if (tx.txid().toString() !== txid) throw new Error(`The saved transaction is not ${txid}`)
+        await beforeBroadcast?.()
         await broadcastSaved(txid, tx, record.txHex)
         return txid
       } catch (error) {

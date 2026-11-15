@@ -1,11 +1,13 @@
 import { Checkbox } from '@heroui/react'
 import { useId, useMemo, useState } from 'react'
 
+import { fetchLatestBlockHeight } from '@/api/esplora/methods'
 import Notice from '@/components/Notice'
 import { OfferStatusChip } from '@/components/OfferStatusChip'
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { buildPrivateAcceptance } from '@/privateLending/flows/acceptance'
+import { checkStillAcceptable } from '@/privateLending/offerView'
 import type { TermsVerdict } from '@/privateLending/proposalCheck'
 import { selectAssetCoins, selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
 import { useWallet } from '@/providers/wallet/useWallet'
@@ -100,9 +102,14 @@ export default function AcceptPrivateOfferModal({
     BigInt(confirmedBalances[principalAsset.id] ?? 0) < terms.principalAmount
   const needsTick = verdict.kind !== 'within' && !acceptOutside
 
+  // The acceptance sets no lock time and the covenant does not check the expiry: the tip, read
+  // fresh, is checked before the build and again before any broadcast, a retry's included.
+  const checkTerm = async () => checkStillAcceptable(terms, await fetchLatestBlockHeight())
+
   // The indexer must still list the pending offer unspent (`requires`); the builder spends output
   // 3 of the creation the gate verified.
   const build = async ({ deps, offer }: FreshOffer) => {
+    await checkTerm()
     if (offer.opened.principalAsset() !== principalAsset.id) {
       throw new Error(`The offer's principal is not ${principalAsset.symbol}`)
     }
@@ -164,6 +171,7 @@ export default function AcceptPrivateOfferModal({
         </div>
       }
       build={build}
+      beforeBroadcast={checkTerm}
     />
   )
 }

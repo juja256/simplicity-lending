@@ -32,7 +32,7 @@ export default function PrivateOfferActionRow<A extends string, K extends Privat
   viewOf,
   onOpen,
 }: PrivateOfferActionRowProps<A, K>) {
-  const { privateTxs } = usePendingTransactions()
+  const { privateTxs, removePrivateTx } = usePendingTransactions()
   const { note, isProcessing, button } = offerActionState(privateTxs, item, actions, viewOf)
 
   return (
@@ -47,7 +47,11 @@ export default function PrivateOfferActionRow<A extends string, K extends Privat
           <UiButton
             size='sm'
             variant={button.variant}
-            onPress={() => onOpen(button.action, button.item, button.unsentTx)}
+            onPress={() =>
+              button.kind === 'open'
+                ? onOpen(button.action, button.item, button.unsentTx)
+                : void removePrivateTx(button.record.txid)
+            }
           >
             {button.label}
           </UiButton>
