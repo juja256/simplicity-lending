@@ -15,8 +15,9 @@ and explicit test-seed login. No recovery phrase is embedded. Builds reject `VIT
 and mainnet demo mode. The developer Demo/System pages and debug overlays have been removed;
 run `pnpm lint` and `pnpm exec tsc -b` in the terminal for diagnostics.
 
-The app has private loans only: `/app` opens `/app/private`, and the summary card on that page
-counts the connected wallet's verified private offers. The public market is in the git tag
+The app has private loans only, in two areas: the lender console at `/lend` (proposals, loan book,
+terms and profile) and the borrower app at `/borrow` (choose a lender, propose, my loans). The
+landing page at `/` opens both, and `/app` redirects to it. The public market is in the git tag
 `public-lending-last`. See the [private-loan user guide](../docs/docs/private-loans/guide.md)
 for wallet setup, the borrower/lender workflow and recovery, and the
 [protocol notes](../docs/docs/private-loans/protocol.md) for privacy and verification boundaries.

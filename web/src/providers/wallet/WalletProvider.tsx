@@ -391,10 +391,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         }
         const { total: balances, confirmed: confirmedBalances, pending: pendingBalances } = loaded
 
-        // The receive address is a fresh one; the session's `scriptPubkey` is the wallet's
-        // identity, address 0, which keys its saved private transactions and is never a receiver.
-        const receiveAddress =
-          connector.receiveAddress?.() ?? wollet.address(null).address().toString()
+        // The session's `scriptPubkey` is the wallet's identity, address 0, which keys its saved
+        // private transactions and is never a receiver.
         const scriptPubkey = walletIdentityScript(wollet)
 
         setState(s => ({
@@ -406,7 +404,6 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
           balances,
           confirmedBalances,
           pendingBalances,
-          receiveAddress,
           scriptPubkey,
         }))
       } catch (err) {
@@ -552,7 +549,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     [withAssetContracts],
   )
 
-  const getReceiveAddress = useCallback(async (): Promise<string | null> => {
+  const currentReceiveAddress = useCallback((): string | null => {
     const session = sessionRef.current
     if (!session) return null
     return session.connector.receiveAddress?.() ?? session.wollet.address(null).address().toString()
@@ -564,20 +561,6 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     const walletAddress = session.connector.receiveAddress?.()
     return walletAddress ? new Address(walletAddress) : session.wollet.change().address()
   }, [])
-
-  const verifyReceiveAddress = useCallback(async (): Promise<string> => {
-    const session = sessionRef.current
-    if (!session) throw new Error('WalletProvider: not connected')
-    if (session.connector.receiveAddress) return getReceiveAddress().then(String)
-    if (!session.connector.getVerifiedReceiveAddress) {
-      return session.wollet.address(null).address().toString()
-    }
-
-    return session.connector.getVerifiedReceiveAddress(
-      state.walletType ?? DEFAULT_WALLET_TYPE,
-      session.wollet,
-    )
-  }, [state.walletType, getReceiveAddress])
 
   const getBlindedWalletUtxos = useCallback(async () => {
     const session = sessionRef.current
@@ -625,9 +608,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         syncWallet: sync,
         applyBroadcastTransaction: applyBroadcastTx,
         signPset,
-        getReceiveAddress,
         getChangeAddress,
-        verifyReceiveAddress,
+        currentReceiveAddress,
         getWollet,
         getBlindedWalletUtxos,
         privateCapable: isPrivateCapable(state.signerType),

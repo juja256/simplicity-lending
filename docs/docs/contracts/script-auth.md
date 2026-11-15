@@ -4,11 +4,16 @@ description: Holds an output until a transaction also spends one specific other 
 
 # Script auth
 
-Script auth holds an output until the transaction that spends it also spends an output of one chosen script. A key is not enough. The chosen script has to be present as an input.
+Script auth holds an output until the transaction that spends it also spends an output of one chosen
+script. A key is not enough. The chosen script has to be present as an input.
 
 ## Where it is spent
 
-Creating a private offer places the lender NFT under script auth bound to the script of the pending offer. The NFT stays there until the offer is accepted or cancelled, as [Protocol and privacy](../private-loans/protocol.md#state-transitions-and-role-tokens) describes. Both of those transactions spend the pending offer and this output together, which is why the borrower can cancel without a lender, and why the lender NFT cannot be taken without the offer.
+Creating a private offer places the lender NFT under script auth bound to the script of the pending
+offer. The NFT stays there until the offer is accepted or cancelled, as [Protocol and
+privacy](../private-loans/protocol.md#state-transitions-and-role-tokens) describes. Both of those
+transactions spend the pending offer and this output together, which is why the borrower can cancel
+without a lender, and why the lender NFT cannot be taken without the offer.
 
 ## Parameters
 
