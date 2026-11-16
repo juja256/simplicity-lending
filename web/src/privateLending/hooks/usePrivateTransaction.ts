@@ -10,15 +10,18 @@ import { broadcastTx } from '@/api/esplora/methods'
 import { getStandardTransactionSteps } from '@/components/TransactionStepper/transactionSteps'
 import { useLatestRef } from '@/hooks/useLatestRef'
 import type { AsyncUpdatedPset, UpdatedPset } from '@/lwk/transaction'
-import type { PrivateTxKind } from '@/providers/pendingTransactions/types'
+import type { CreationTerm, PrivateTxKind } from '@/providers/pendingTransactions/types'
 import { usePendingTransactions } from '@/providers/pendingTransactions/usePendingTransactions'
 import { useTxProgress } from '@/providers/txProgress/useTxProgress'
 import { useWallet } from '@/providers/wallet/useWallet'
 import { ErrorHandler } from '@/utils/errorHandler'
 
-/** What the transaction acts on: a creation is its own offer; every other flow names one. */
+/**
+ * What the transaction acts on: a creation is its own offer, saved with the term the borrower
+ * chose; every other flow names one.
+ */
 export type PrivateTransactionTarget =
-  | { kind: 'private_create_offer' }
+  | { kind: 'private_create_offer'; creationTerm: CreationTerm }
   | { kind: Exclude<PrivateTxKind, 'private_create_offer'>; offerTxid: string }
 
 export interface PrivateTransactionResult<TSummary> {
@@ -118,8 +121,10 @@ export function usePrivateTransaction(): PrivateTransaction {
           await savePrivateTx({
             txid,
             kind: target.kind,
-            offerTxid: target.kind === 'private_create_offer' ? txid : target.offerTxid,
             txHex,
+            ...(target.kind === 'private_create_offer'
+              ? { offerTxid: txid, creationTerm: target.creationTerm }
+              : { offerTxid: target.offerTxid }),
           })
         } catch (error) {
           throw new Error(

@@ -4,12 +4,16 @@ import type { PrivateCandidateDetails, PrivateOfferStatus } from '@/api/indexer/
 import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
 
 import type { PrivateOfferItem } from './hooks/usePrivateOffers'
+import { proposalExpiry, TERM_MARGIN_BLOCKS } from './lenderTerms'
 import {
   borrowerActions,
   borrowerStatus,
   borrowerView,
   canStillAccept,
+  checkCreationSendable,
   checkStillAcceptable,
+  creationExpiredNote,
+  creationSendable,
   dueText,
   LENDER_ACTION_LABELS,
   type LenderAction,
@@ -325,5 +329,40 @@ describe("the borrower's loans", () => {
     expect(dueText(90)).toBe('due in 1 h')
     expect(dueText(0)).toBe('due now')
     expect(dueText(-2 * 1440)).toBe('overdue by 2 days')
+  })
+})
+
+describe("the borrower's saved creation", () => {
+  const tip = 2_000_000
+  const termDays = 30
+  const term = { loanExpirationTime: proposalExpiry(tip, termDays), termDays }
+
+  it('is sent while a confirmation in the next block counts the days chosen', () => {
+    expect(creationSendable(term, tip)).toBe('yes')
+    // The last tip whose next block is within the margin.
+    expect(creationSendable(term, tip + TERM_MARGIN_BLOCKS - 1)).toBe('yes')
+    expect(() => checkCreationSendable(term, tip + TERM_MARGIN_BLOCKS - 1)).not.toThrow()
+  })
+
+  it('is refused once it would count a day less, and past its expiry', () => {
+    expect(creationSendable(term, tip + TERM_MARGIN_BLOCKS)).toBe('expired')
+    expect(creationSendable(term, term.loanExpirationTime + 1)).toBe('expired')
+    expect(() => checkCreationSendable(term, tip + TERM_MARGIN_BLOCKS)).toThrow(
+      'Not sent. The chain moved on since it was signed: sent now, it would run fewer days than ' +
+        'you chose. Discard it and propose again.',
+    )
+  })
+
+  it('is refused without its term, which cannot be checked', () => {
+    expect(creationSendable(undefined, tip)).toBe('expired')
+    expect(creationExpiredNote(undefined)).toBe(
+      'It was saved without its term, so it cannot be checked before it is sent.',
+    )
+    expect(() => checkCreationSendable(undefined, tip)).toThrow('saved without its term')
+  })
+
+  it('waits while the tip is unknown', () => {
+    expect(creationSendable(term, 0)).toBe('unknown')
+    expect(() => checkCreationSendable(term, 0)).toThrow('The chain tip is not known')
   })
 })

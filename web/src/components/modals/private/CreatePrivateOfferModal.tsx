@@ -12,9 +12,14 @@ import { usePrivateFlowDeps } from '@/privateLending/hooks/usePrivateFlowDeps'
 import { usePrivateTransaction } from '@/privateLending/hooks/usePrivateTransaction'
 import { proposalExpiryIsStale } from '@/privateLending/lenderTerms'
 import { syncInSession } from '@/privateLending/lendingKeyHolder'
-import { expiryLabel } from '@/privateLending/offerView'
+import {
+  checkCreationSendable,
+  creationExpiredNote,
+  creationSendable,
+  expiryLabel,
+} from '@/privateLending/offerView'
 import { selectCreationCoins, walletReceiver } from '@/privateLending/wallet'
-import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
+import type { CreationTerm, PrivateTxRecord } from '@/providers/pendingTransactions/types'
 import { useWallet } from '@/providers/wallet/useWallet'
 import { truncateAddress } from '@/utils/format'
 
@@ -37,7 +42,7 @@ export interface PrivateOfferDraft {
   /**
    * A block height: `proposalExpiry` of the tip when "Lock collateral and send" was pressed and
    * `termDays`. It is fixed then: the build refuses it once a creation could no longer count
-   * `termDays` (`proposalExpiryIsStale`).
+   * `termDays` (`proposalExpiryIsStale`), and so does every broadcast (`checkCreationSendable`).
    */
   loanExpirationTime: number
 }
@@ -57,8 +62,11 @@ interface CreatePrivateOfferModalProps {
  * The borrower creates a private offer from a reviewed draft: the wallet's coins and a fresh
  * pair of NFTs, built at confirm time, then the borrower's self-check before it is saved and
  * broadcast. A failed broadcast is retried from the saved transaction, never rebuilt: a rebuild
- * would be another offer. The borrower app calls the offer a proposal and never names the NFTs or
- * the lending key, so neither does anything this modal shows.
+ * would be another offer. The creation is saved with its term, and the term is checked against a
+ * fresh tip before the build and before every broadcast, a retry's included: one signed slowly or
+ * retried late could confirm short of the days chosen, or past its expiry, and the lender could
+ * refuse it. Such a creation can only be discarded. The borrower app calls the offer a proposal
+ * and never names the NFTs or the lending key, so neither does anything this modal shows.
  */
 export default function CreatePrivateOfferModal({
   isOpen,
@@ -73,34 +81,47 @@ export default function CreatePrivateOfferModal({
   const { data: tipHeight } = useBlockHeight()
   const { formatCollateralDisplay, formatPrincipalAmount } = useFormatAmount()
 
+  // The draft's term on a first send; the saved creation's on a retry from the loans page.
+  const term: CreationTerm | undefined = draft
+    ? { loanExpirationTime: draft.loanExpirationTime, termDays: draft.termDays }
+    : unsentTx?.creationTerm
+  const beforeBroadcast = async () => checkCreationSendable(term, await fetchLatestBlockHeight())
+  const unsentBlockedNote =
+    creationSendable(term, tipHeight) === 'expired' ? creationExpiredNote(term) : null
+
   const execute = async () => {
-    if (!draft) throw new Error('There is no proposal to send')
-    return run({ kind: 'private_create_offer' }, async () => {
-      const borrower = await syncInSession(getLendingKey, syncWallet)
-      const [deps, tip] = await Promise.all([getDeps(), fetchLatestBlockHeight()])
-      if (draft.lender.pubkey === borrower.xOnlyPublicKey()) {
-        throw new Error('The lender key is your own')
-      }
-      if (proposalExpiryIsStale(draft.loanExpirationTime, tip, draft.termDays)) {
-        throw new Error('Review the proposal again: the chain moved on.')
-      }
-      const coins = selectCreationCoins(
-        await getWalletTxOuts(),
-        deps.assets,
-        draft.collateralAmount,
-        deps.feeRate,
-      )
-      return buildPrivateCreation(deps, {
-        borrower,
-        lender: draft.lender.pubkey,
-        ...coins,
-        collateralAmount: draft.collateralAmount,
-        principalAmount: draft.principalAmount,
-        repaymentAmount: draft.repaymentAmount,
-        loanExpirationTime: draft.loanExpirationTime,
-        borrowerNftReceiver: walletReceiver(deps),
-      })
-    })
+    if (!draft || !term) throw new Error('There is no proposal to send')
+    const target = { kind: 'private_create_offer', creationTerm: term } as const
+    return run(
+      target,
+      async () => {
+        const borrower = await syncInSession(getLendingKey, syncWallet)
+        const [deps, tip] = await Promise.all([getDeps(), fetchLatestBlockHeight()])
+        if (draft.lender.pubkey === borrower.xOnlyPublicKey()) {
+          throw new Error('The lender key is your own')
+        }
+        if (proposalExpiryIsStale(draft.loanExpirationTime, tip, draft.termDays)) {
+          throw new Error('Review the proposal again: the chain moved on.')
+        }
+        const coins = selectCreationCoins(
+          await getWalletTxOuts(),
+          deps.assets,
+          draft.collateralAmount,
+          deps.feeRate,
+        )
+        return buildPrivateCreation(deps, {
+          borrower,
+          lender: draft.lender.pubkey,
+          ...coins,
+          collateralAmount: draft.collateralAmount,
+          principalAmount: draft.principalAmount,
+          repaymentAmount: draft.repaymentAmount,
+          loanExpirationTime: draft.loanExpirationTime,
+          borrowerNftReceiver: walletReceiver(deps),
+        })
+      },
+      beforeBroadcast,
+    )
   }
 
   const rows = useMemo<DetailRow[]>(() => {
@@ -155,6 +176,8 @@ export default function CreatePrivateOfferModal({
       summary={summary}
       unsentTx={unsentTx}
       execute={execute}
+      beforeBroadcast={beforeBroadcast}
+      unsentBlockedNote={unsentBlockedNote}
       onClose={onClose}
       onSuccess={onCreated}
       notice={
