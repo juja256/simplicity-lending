@@ -53,7 +53,7 @@ export default function LiquidatePrivateOfferModal(props: PrivateOfferActionModa
   const summary = useMemo(
     () => [
       { label: 'Collateral', value: formatCollateralDisplay(terms.collateralAmount) },
-      { label: 'Expiration Block', value: `#${terms.loanExpirationTime}` },
+      { label: 'Expiration block', value: `#${terms.loanExpirationTime}` },
     ],
     [terms, formatCollateralDisplay],
   )
@@ -63,15 +63,15 @@ export default function LiquidatePrivateOfferModal(props: PrivateOfferActionModa
       {...props}
       kind='private_liquidate_offer'
       requires='active_offer'
-      title='Liquidate Private Offer'
+      title='Liquidate private offer'
       chip={
         <Chip color='danger' variant='soft' size='sm'>
           Liquidate
         </Chip>
       }
-      label='Liquidate & Claim Collateral'
+      label='Liquidate and claim collateral'
       variant='danger-soft'
-      eyebrow='Liquidate Private Offer'
+      eyebrow='Liquidate private offer'
       summary={summary}
       disabled={!isExpired}
       notice={

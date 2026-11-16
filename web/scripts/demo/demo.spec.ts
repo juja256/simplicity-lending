@@ -375,7 +375,7 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     const claim = lender.getByRole('main').getByRole('button', { name: 'Claim', exact: true })
     await expect(claim).toBeVisible({ timeout: CHAIN_TIMEOUT })
     await claim.click()
-    await confirmTransaction(lender, 'Claim Repayment')
+    await confirmTransaction(lender, 'Claim repayment')
     await expect(tableRow('Claimed')).toBeVisible({ timeout: CHAIN_TIMEOUT })
   })
 
@@ -384,7 +384,7 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     await expect(liquidate).toBeVisible({ timeout: 3 * CHAIN_TIMEOUT })
     await expect(tableRow('Overdue')).toBeVisible()
     await liquidate.click()
-    await confirmTransaction(lender, 'Liquidate & Claim Collateral')
+    await confirmTransaction(lender, 'Liquidate and claim collateral')
     await expect(tableRow('Liquidated')).toBeVisible({ timeout: CHAIN_TIMEOUT })
     await shot(lender, 'lend-loans-liquidated')
 

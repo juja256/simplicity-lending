@@ -79,6 +79,8 @@ interface PrivateOfferActionShellProps<TSummary> extends PrivateOfferActionModal
    * check of the tip: when it throws, nothing is broadcast.
    */
   beforeBroadcast?: () => Promise<void>
+  /** Why a saved transaction can no longer be broadcast: the modal offers only "Discard". */
+  unsentBlockedNote?: string | null
 }
 
 function OfferDetails({
