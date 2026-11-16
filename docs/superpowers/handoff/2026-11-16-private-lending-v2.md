@@ -7,8 +7,9 @@ console and the borrower app").
 
 ## Where things stand
 
-- **Branches.** v2 integrates on `v2/main` (`8cb057f`, phases 1 to 3 merged). Phase 4 is on
-  `v2/phase-4-two-areas`, pushed to the user's fork and not merged into `v2/main` yet.
+- **Branches.** v2 integrates on `v2/main`, which has phases 1 to 4 merged: phase 4 came in with
+  `da1b404` (`git merge --no-ff v2/phase-4-two-areas`) on 2026-11-16, pushed to the user's fork.
+  Phase 5 branches from there.
 - **Phase 4 is done: tasks 1 to 12, the phase review and its fix wave.** Tasks 1 to 11 are
   `742bf72..ac1f185`. Task 12 ran on the user's Linux machine on 2026-11-16; the commit
   `docs: v2 phase 4 verified` records every check.
@@ -17,7 +18,6 @@ console and the borrower app").
   a failed seed `fill()` in the demo could print the words through an error's `cause`. The fix wave
   `7720099..69c3fda` (nine commits) took those and the review's fix-now minors; `ad7da50` fixed the
   wording the scoped re-review left. The re-review found the wave ready to merge.
-- **Waiting for the user:** the finishing choice for phase 4 (next steps, 1).
 - **Partial repayment:** the user chose item 3(a) only (installments without releasing collateral)
   for phase 5. Phase 7 (item 3(b)) waits until the user brings it back.
 
@@ -61,13 +61,11 @@ console and the borrower app").
 
 ## Next steps, in order (each on the user's go-ahead)
 
-1. **Finish phase 4,** as the user chooses: merge `v2/phase-4-two-areas` into `v2/main` locally
-   with `git merge --no-ff`, open a PR against `v2/main` on the fork, or keep the branch as it is.
-2. **Phase 5** (contract revision, items 1 and 3a) and **phase 6** (private messages): each starts
+1. **Phase 5** (contract revision, items 1 and 3a) and **phase 6** (private messages): each starts
    by breaking the plan's phase section into tasks with the writing-plans skill, as phase 4 was.
    Phase 5 has a design-note gate in the spec first. Fold the items "Carried from the phase review"
    (below) that name a phase into its tasks.
-3. **Final manual checks** by the user after phase 6 is merged into `v2/main`, with the items
+2. **Final manual checks** by the user after phase 6 is merged into `v2/main`, with the items
    below that name them.
 
 ## Environment (the user's Mac)
