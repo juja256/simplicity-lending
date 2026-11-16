@@ -38,8 +38,9 @@ export type LendersPending =
 
 /**
  * The lenders in the directory's order, once the directory, the session's own key and the wasm
- * are known (`pending` until then), with the count of entries that did not verify. Directory
- * entries are untrusted: only verified terms are used, and only their configured pair.
+ * are known (`pending` until then), with the count of other keys' entries that did not verify.
+ * Directory entries are untrusted: only verified terms are used, and only their configured pair.
+ * The session's own key is left out of both locally: the indexer is never asked for its entry.
  */
 export function useLenders(): {
   lenders: Lender[]
@@ -49,7 +50,7 @@ export function useLenders(): {
   wasm: PrivateLendingWasm | undefined
   pending: LendersPending | null
 } {
-  const { directory, lenders: verified, hiddenCount } = useDirectory()
+  const { directory, lenders: verified, hiddenKeys } = useDirectory()
   const identity = useLendingKeyIdentity()
   const fingerprintOf = useFingerprintOf()
   const wasm = useQuery({
@@ -79,6 +80,8 @@ export function useLenders(): {
       }),
     [verified, fingerprintOf, ownKey],
   )
+
+  const hiddenCount = hiddenKeys.filter(pubkey => pubkey !== ownKey).length
 
   let pending: LendersPending | null = null
   if (identity.isError) {

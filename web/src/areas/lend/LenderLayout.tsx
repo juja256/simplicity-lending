@@ -24,7 +24,7 @@ const FOCUS_RING =
 /** The connected lender: its directory name and key fingerprint, and the wallet button. */
 function LenderIdentity() {
   const { isReady, privateCapable } = useWallet()
-  const { identity, own } = useDirectory()
+  const { identity, own } = useDirectory({ ownEntry: true })
   // The name the key signed: an entry that did not verify shows the fingerprint alone.
   const ownName = own?.check?.status === 'verified' ? own.entry?.display_name : undefined
 

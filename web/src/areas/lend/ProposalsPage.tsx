@@ -155,7 +155,7 @@ interface ModalRequest {
  */
 export default function ProposalsPage() {
   const offers = usePrivateOffers()
-  const { own, ownQuery, lookup } = useDirectory()
+  const { own, ownQuery, lookup } = useDirectory({ ownEntry: true })
   const { data: tipHeight } = useBlockHeight()
   const { privateTxs } = usePendingTransactions()
   const { data: wasm } = useQuery({

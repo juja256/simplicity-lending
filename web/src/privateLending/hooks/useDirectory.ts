@@ -6,7 +6,9 @@
 // fingerprint.
 //
 // The wallet's own entry is read by its x-only key, the one part of the key that leaves the
-// browser (also in the writes and the offers it creates), and checked like any other.
+// browser (also in the writes and the offers it creates), and checked like any other. Only the
+// lender console reads it (`ownEntry`): a borrower's visit would otherwise link its IP to its key
+// at the indexer for no need, so the borrower app leaves its own key out of the list locally.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useMemo } from 'react'
 
@@ -105,7 +107,15 @@ function toDirectoryWriteError(error: unknown): unknown {
   return message === undefined ? error : new Error(message, { cause: error })
 }
 
-export function useDirectory() {
+interface UseDirectoryOptions {
+  /**
+   * Read the wallet's own entry by its key (the lender console only); without it `own` stays
+   * undefined and the indexer is never asked for the key.
+   */
+  ownEntry?: boolean
+}
+
+export function useDirectory({ ownEntry = false }: UseDirectoryOptions = {}) {
   const queryClient = useQueryClient()
   const { getLendingKey } = useWallet()
   const identity = useLendingKeyIdentity().data
@@ -119,7 +129,7 @@ export function useDirectory() {
   const ownQuery = useQuery({
     queryKey: privateDirectoryQueryKeys.entry(PRIVATE_API_BASE_URL, identity?.pubkey ?? ''),
     queryFn: ({ signal }) => fetchCheckedEntry(identity!.pubkey, signal),
-    enabled: identity !== undefined,
+    enabled: ownEntry && identity !== undefined,
     staleTime: DIRECTORY_STALE_MS,
   })
 
@@ -128,6 +138,13 @@ export function useDirectory() {
     () =>
       checked.flatMap(({ entry, check }): VerifiedLender[] =>
         check.status === 'verified' ? [{ entry, terms: check.terms }] : [],
+      ),
+    [checked],
+  )
+  const hiddenKeys = useMemo(
+    () =>
+      checked.flatMap(({ entry, check }) =>
+        check.status === 'verified' ? [] : [normalizeHex(entry.pubkey)],
       ),
     [checked],
   )
@@ -224,17 +241,17 @@ export function useDirectory() {
      * its key signed. The wallet's own entry is among them when it verified.
      */
     lenders,
-    /** Listed entries that did not verify, left out of `lenders`. */
-    hiddenCount: checked.length - lenders.length,
+    /** The keys (lowercase) of the listed entries that did not verify, left out of `lenders`. */
+    hiddenKeys,
     lookup,
     /** The wallet's lending-key identity; undefined until known (or without a capable wallet). */
     identity,
-    /** The query of the wallet's own entry: loading and error state, `refetch`. */
+    /** The query of the wallet's own entry, with `ownEntry`: loading and error state, `refetch`. */
     ownQuery,
     /**
      * The wallet's entry, read by its key and checked: undefined until the identity and the
-     * entry are known. An entry without terms (written before the directory carried them) is
-     * here too, though the list leaves it out.
+     * entry are known, and always without `ownEntry`. An entry without terms (written before the
+     * directory carried them) is here too, though the list leaves it out.
      */
     own: ownQuery.data,
     register,
