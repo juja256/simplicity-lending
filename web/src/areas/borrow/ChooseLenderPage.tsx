@@ -51,10 +51,10 @@ export function LendersPendingView({ pending }: { pending: LendersPending }) {
   }
 }
 
-function hiddenNote(count: number): string {
-  return count === 1
-    ? '1 lender hidden: its terms could not be verified.'
-    : `${count} lenders hidden: their terms could not be verified.`
+/** The lenders left out because their entries did not verify; `more` when some are shown. */
+function hiddenNote(count: number, more: boolean): string {
+  const lenders = `${count} ${more ? 'more ' : ''}${count === 1 ? 'lender is' : 'lenders are'}`
+  return `${lenders} not shown: ${count === 1 ? 'its' : 'their'} terms could not be verified.`
 }
 
 function LenderRow({ lender, now }: { lender: Lender; now: number }) {
@@ -111,7 +111,9 @@ export default function ChooseLenderPage() {
         <LendersPendingView pending={pending} />
       ) : lenders.length === 0 ? (
         <p className='bg-background text-muted rounded-2xl px-4 py-6 text-sm'>
-          No lender has published terms for {PAIR_NAME} yet.
+          {hiddenCount > 0
+            ? `No lender has published terms for ${PAIR_NAME} that could be verified.`
+            : `No lender has published terms for ${PAIR_NAME} yet.`}
         </p>
       ) : (
         <ul className='flex flex-col'>
@@ -122,7 +124,7 @@ export default function ChooseLenderPage() {
       )}
 
       {pending === null && hiddenCount > 0 && (
-        <p className='text-muted text-sm'>{hiddenNote(hiddenCount)}</p>
+        <p className='text-muted text-sm'>{hiddenNote(hiddenCount, lenders.length > 0)}</p>
       )}
     </div>
   )

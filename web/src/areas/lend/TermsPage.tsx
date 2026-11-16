@@ -199,7 +199,7 @@ function TermsEditor({ own, register }: TermsEditorProps) {
  * proposal is checked against. Publishing signs them with the lending key, with the display name.
  */
 export default function TermsPage() {
-  const { identity, own, ownQuery, register } = useDirectory()
+  const { identity, own, ownQuery, register } = useDirectory({ ownEntry: true })
 
   return (
     <div className='flex flex-col gap-6'>

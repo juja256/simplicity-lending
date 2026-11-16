@@ -215,7 +215,7 @@ function DirectoryListing({ own, remove }: { own: OwnEntry; remove: Directory['r
  * next to it. A name is chosen by whoever holds a key, so borrowers compare the fingerprint.
  */
 export default function ProfilePage() {
-  const { own, ownQuery, register, remove } = useDirectory()
+  const { own, ownQuery, register, remove } = useDirectory({ ownEntry: true })
   // The name the key signed: an entry that did not verify shows the fingerprint alone.
   const verifiedName = own?.check?.status === 'verified' ? own.entry?.display_name : undefined
 
