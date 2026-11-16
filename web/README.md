@@ -303,12 +303,11 @@ creation, which needs the funds again.
 
 Every run first checks that both wallets hold, in confirmed coins, what the transactions without a
 `confirmed` record still need (`short-proposal` only when it is named), and exits 1 naming each
-shortfall and the address to fund. Each
-stage checks its own need again right before it builds. The needs, per record, are in
-`STAGE_NEEDS` (`scripts/e2e/env.ts`), from these amounts: collateral 20 000 tL-sats, principal
-1 000 TEST units, repayment 1 100 TEST units, and 2 000 tL-sats of fee budget per transaction. A
-creation needs 2 × the collateral, as it takes two coins besides the collateral. From an empty
-state, the stages need:
+shortfall and the address to fund. Each stage checks its own need again right before it builds.
+The needs, per record, are in `STAGE_NEEDS` (`scripts/e2e/env.ts`), from these amounts:
+collateral 20 000 tL-sats, principal 1 000 TEST units, repayment 1 100 TEST units, and 2 000
+tL-sats of fee budget per transaction. A creation needs 2 × the collateral, as it takes two coins
+besides the collateral. From an empty state, the stages need:
 
 - the borrower: 132 000 tL-sats and 100 TEST units (the interest; the principal comes from the
   claim);
@@ -327,7 +326,7 @@ pnpm demo:testnet
 Drives both areas of the app with Playwright on Liquid testnet, with the e2e's two seed wallets:
 the lender in the console at 1280 px, the borrower in the borrower app at 375 × 812, each in its
 own browser context, connected through the connect modal's test-seed option. It broadcasts real
-transactions and waits for their blocks: a run takes 30 to 60 minutes. One test, one step per
+transactions and waits for their blocks: a run takes about 20 minutes. One test, one step per
 part:
 
 1. the lender publishes the `directory` stage's terms as "E2E Lender" on `/lend/terms`, and the
@@ -349,9 +348,13 @@ part:
 
 It needs:
 
-- the e2e set up and funded (Setup, above); the demo first runs the `wallets` stage, which exits 1
-  naming any shortfall. Besides `short-proposal`'s funds, the demo's own loan takes 0.00001 tL-BTC
-  of collateral from the borrower and 0.1 TEST from the lender, with fees;
+- the e2e set up and funded (Setup, above). The demo first runs the `wallets` stage, which exits
+  1 naming any shortfall, but it checks only what the e2e stages without a `confirmed` record
+  need: not `short-proposal`, which checks its own need when the demo runs it, and none of the
+  demo's own transactions. On top of those, the borrower needs the demo loan's collateral,
+  0.00001 tL-BTC, and its interest; the lender needs the demo loan's principal, 0.1 TEST, and the
+  short proposal's, 1 000 TEST units; and each needs the fees of its own transactions, three for
+  the borrower and four for the lender;
 - the local testnet indexer (above), indexing, on a fresh database that starts at the tip
   (`INDEXER__LAST_INDEXED_HEIGHT`), after an earlier run's last transaction: the demo finds its
   loans by their amounts, so an earlier run's loans would match too. The dev server proxies it
@@ -363,14 +366,16 @@ It needs:
   `DEMO_ESPLORA_URL=https://liquid.network/liquidtestnet` for the app and the e2e stages.
 
 The demo starts its own dev server, `pnpm dev --mode demo` on port 5199, proxying the indexer
-under `/api`. A `short-proposal` record that an earlier run left confirmed is removed first, so
-the stage makes a new proposal. Screenshots and the e2e stages' output go to `.demo-output/`, and
-Playwright's output (a failure's `error-context.md`) to `test-results/`, both git-ignored. Nothing
-there may keep the seed phrases typed into the connect modal: the demo takes no trace, report,
-screenshot or video, turns off the page snapshot of a failure (`PLAYWRIGHT_NO_COPY_PROMPT`),
-connects without locator assertions, which would attach a snapshot of the page, and clears the
-phrase from the fields when a connection fails. The demo's proposals
-are addressed to the e2e lender, so a `scan` whose indexed range covers a demo finds them too.
+under `/api`. A `short-proposal` record that an earlier run left confirmed is removed first, and
+the stage removes an unfinished one whose proposal expired, so the stage makes a new proposal.
+Screenshots and the e2e stages' output go to `.demo-output/`, and Playwright's output (a
+failure's `error-context.md`) to `test-results/`, both git-ignored. Nothing there may keep the
+seed phrases typed into the connect modal: the demo takes no trace, report, screenshot or video,
+turns off the page snapshot of a failure (`PLAYWRIGHT_NO_COPY_PROMPT`), connects without locator
+assertions, which would attach a snapshot of the page, clears the phrase from the fields when a
+connection fails, and throws that failure without Playwright's error, whose call log holds the
+typed phrase. The demo's proposals are addressed to the e2e lender, so a `scan` whose indexed
+range covers a demo finds them too.
 
 ## Run
 
