@@ -7,14 +7,22 @@ import {
   useLocation,
 } from 'react-router-dom'
 
-import AppLayout from '@/components/AppLayout'
+import BorrowerLayout from '@/areas/borrow/BorrowerLayout'
+import ChooseLenderPage from '@/areas/borrow/ChooseLenderPage'
+import MyLoansPage from '@/areas/borrow/MyLoansPage'
+import ProposalPage from '@/areas/borrow/ProposalPage'
+import LenderLayout from '@/areas/lend/LenderLayout'
+import LoanBookPage from '@/areas/lend/LoanBookPage'
+import ProfilePage from '@/areas/lend/ProfilePage'
+import ProposalsPage from '@/areas/lend/ProposalsPage'
+import TermsPage from '@/areas/lend/TermsPage'
+import { WalletGate } from '@/areas/WalletGate'
 import { RoutePath } from '@/constants/routes'
 import { AppProviders } from '@/providers/AppProviders'
 import { initAnalytics, trackPageView } from '@/utils/analytics'
 
 import ErrorBoundary from './components/ErrorBoundary'
 import LandingPage from './pages/Landing'
-import PrivatePage from './pages/Private'
 
 function ProvidersLayout() {
   const { pathname } = useLocation()
@@ -40,8 +48,11 @@ function ProvidersLayout() {
   )
 }
 
+/** The two areas need the wallet and the other providers; the landing page does not. */
 function isAppPath(pathname: string) {
-  return pathname === RoutePath.Dashboard || pathname.startsWith(`${RoutePath.Dashboard}/`)
+  return [RoutePath.Lend, RoutePath.Borrow].some(
+    area => pathname === area || pathname.startsWith(`${area}/`),
+  )
 }
 
 const router = createBrowserRouter([
@@ -54,24 +65,80 @@ const router = createBrowserRouter([
         element: <LandingPage />,
       },
       {
-        path: RoutePath.Dashboard,
-        element: <AppLayout />,
+        path: RoutePath.Lend,
+        element: <LenderLayout />,
         children: [
+          { index: true, element: <Navigate to={RoutePath.LendProposals} replace /> },
           {
-            path: RoutePath.Private,
-            element: <PrivatePage />,
+            path: RoutePath.LendProposals,
+            element: (
+              <WalletGate>
+                <ProposalsPage />
+              </WalletGate>
+            ),
           },
-          // The private page is the app: `/app` and old links such as `/app/borrow` land on it.
           {
-            index: true,
-            element: <Navigate to={RoutePath.Private} replace />,
+            path: RoutePath.LendLoans,
+            element: (
+              <WalletGate>
+                <LoanBookPage />
+              </WalletGate>
+            ),
           },
           {
-            path: '*',
-            element: <Navigate to={RoutePath.Private} replace />,
+            path: RoutePath.LendTerms,
+            element: (
+              <WalletGate>
+                <TermsPage />
+              </WalletGate>
+            ),
           },
+          {
+            path: RoutePath.LendProfile,
+            element: (
+              <WalletGate>
+                <ProfilePage />
+              </WalletGate>
+            ),
+          },
+          // An unknown console path leads to the console's start.
+          { path: '*', element: <Navigate to={RoutePath.LendProposals} replace /> },
         ],
       },
+      {
+        path: RoutePath.Borrow,
+        element: <BorrowerLayout />,
+        children: [
+          {
+            index: true,
+            element: (
+              <WalletGate>
+                <ChooseLenderPage />
+              </WalletGate>
+            ),
+          },
+          {
+            path: RoutePath.BorrowLoans,
+            element: (
+              <WalletGate>
+                <MyLoansPage />
+              </WalletGate>
+            ),
+          },
+          {
+            path: RoutePath.BorrowLender,
+            element: (
+              <WalletGate>
+                <ProposalPage />
+              </WalletGate>
+            ),
+          },
+          // An unknown borrower path, such as `/borrow/x/y`, leads to the borrower app's start.
+          { path: '*', element: <Navigate to={RoutePath.Borrow} replace /> },
+        ],
+      },
+      // The old single app: `/app` and its pages lead to the landing page and its two entrances.
+      { path: '/app/*', element: <Navigate to={RoutePath.Landing} replace /> },
     ],
   },
 ])

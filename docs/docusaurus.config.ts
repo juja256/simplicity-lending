@@ -47,6 +47,50 @@ const config: Config = {
     ],
   ],
 
+  plugins: [
+    [
+      '@docusaurus/plugin-client-redirects',
+      {
+        // The public demo's borrower, lender and protocol pages are gone; links to them open the
+        // private-loan guide.
+        redirects: [
+          {
+            to: '/docs/private-loans/guide',
+            from: [
+              '/docs/borrower',
+              '/docs/borrower/create-account',
+              '/docs/borrower/create-offer',
+              '/docs/borrower/cancel-offer',
+              '/docs/borrower/claim-principal',
+              '/docs/borrower/repay',
+              '/docs/lender',
+              '/docs/lender/review-offer',
+              '/docs/lender/fund-offer',
+              '/docs/lender/claim-repayment',
+              '/docs/lender/liquidate',
+              '/docs/protocol',
+              '/docs/protocol/roles',
+              '/docs/protocol/actions',
+              '/docs/protocol/offer-parameters',
+            ],
+          },
+          // The public market's contract pages are gone too. The lending program and the
+          // borrower's account (issuance factory) give way to the private lending contract, whose
+          // creation issues the role tokens with no account first; the vault that held a
+          // repayment gives way to the asset auth program.
+          {
+            to: '/docs/private-loans/protocol',
+            from: ['/docs/contracts/lending', '/docs/contracts/issuance-factory'],
+          },
+          {
+            to: '/docs/contracts/asset-auth',
+            from: ['/docs/contracts/asset-auth-vault'],
+          },
+        ],
+      },
+    ],
+  ],
+
   themes: [
     [
       '@easyops-cn/docusaurus-search-local',

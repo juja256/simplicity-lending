@@ -15,8 +15,9 @@ and explicit test-seed login. No recovery phrase is embedded. Builds reject `VIT
 and mainnet demo mode. The developer Demo/System pages and debug overlays have been removed;
 run `pnpm lint` and `pnpm exec tsc -b` in the terminal for diagnostics.
 
-The app has private loans only: `/app` opens `/app/private`, and the summary card on that page
-counts the connected wallet's verified private offers. The public market is in the git tag
+The app has private loans only, in two areas: the lender console at `/lend` (proposals, loan book,
+terms and profile) and the borrower app at `/borrow` (choose a lender, propose, my loans). The
+landing page at `/` opens both, and `/app` redirects to it. The public market is in the git tag
 `public-lending-last`. See the [private-loan user guide](../docs/docs/private-loans/guide.md)
 for wallet setup, the borrower/lender workflow and recovery, and the
 [protocol notes](../docs/docs/private-loans/protocol.md) for privacy and verification boundaries.
@@ -120,7 +121,7 @@ pnpm build:wasm
 
 This compiles `crates/private-lending-wasm` into `src/wasm/private-lending/` (git-ignored). Build
 LWK and run `pnpm install` first (see Install). Run it again whenever the Rust crates change:
-`pnpm dev`, `pnpm build` and `pnpm lint` need the generated package.
+`pnpm dev`, `pnpm build`, `pnpm lint` and `pnpm test` need the generated package.
 
 ## Check browser addresses against Rust
 
@@ -132,8 +133,10 @@ Initialises LWK and the private lending wasm module in Node and compares them wi
 `scripts/fixtures/private-lending-parity.json`, made from a regtest offer by the Rust code. It
 checks the program id, the contract arguments as lender and as borrower, the output script hashes,
 and the pending offer, active offer and lender NFT lock scripts, and that a tampered commitment is
-rejected. It must print `private lending parity: ok` before the browser's offer addresses are
-relied on (C2). Needs the wasm module built first.
+rejected. It also verifies `scripts/fixtures/directory-parity.json`, a directory entry the Rust
+core signed, with the wasm, and checks that the entry with a changed rate, name, key or challenge
+does not verify. It must print `private lending parity: ok` before the browser's offer addresses
+are relied on (C2). Needs the wasm module built first.
 
 ## Private lending e2e on Liquid testnet
 
@@ -158,14 +161,19 @@ broadcasts real Liquid testnet transactions. It never touches mainnet.
 
 ### Stages
 
-With no stage named, every stage below runs in this order.
+With no stage named, every stage below but `short-proposal` runs in this order.
 
 - `wallets`: prints each wallet's address, confirmed balances and lending-key fingerprint. A
   wallet with too few confirmed tL-BTC coins is split into 6 × 15 000 tL-sats (borrower) or
-  3 × 5 000 (lender).
-- `create`: the borrower creates an offer to the lender that expires 1 440 blocks after the tip.
-  It builds twice from the same coins and checks that the NFTs and the output 3 nonce differ, runs
-  its self-check and broadcasts; the lender then opens and verifies the offer.
+  3 × 5 000 (lender), again once an earlier split was spent (its record `wallets-split-<wallet>`
+  is replaced).
+- `create`: the borrower creates an offer to the lender of a 1-day term, as the borrower's form
+  sets it: it expires 1 440 + 60 blocks after the tip (`proposalExpiry`). It builds twice from the
+  same coins and checks that the NFTs and the output 3 nonce differ, runs its self-check and
+  broadcasts; the lender then opens and verifies the offer. Counted by the term rule
+  (`termBlocksOf`) from the block the creation confirmed in, the offer's term must be 1 day and
+  its proposal within the `directory` stage's terms: a creation that confirms more than 60 blocks
+  after it was built, or a `create` record built before the term rule, fails the stage.
 - `accept`: the lender accepts the `create` offer: the active offer, the principal locked to the
   borrower NFT, and the lender NFT to the lender.
 - `claim-principal`: the borrower claims the principal with its borrower NFT.
@@ -193,11 +201,18 @@ With no stage named, every stage below runs in this order.
   lender publishes "E2E Lender" with terms for the configured pair, typed as in the app: at least
   10 % APR, twice the `create` offer's principal per collateral, 1 to 30 days and a tenth to a
   hundred times its principal. `PUT` and `GET` must return the terms and their publication time,
-  and a write signed over another name or other terms must get a 401. The borrower then lists the
-  directory and finds the lender's entry and terms, and `checkProposal` must find no breach in the
-  `create` proposal (built from the amounts under Funding and the 1 440-block term, so no `create`
-  record is needed) nor at exactly the least collateral, and only `CollateralBelowMinimum` one
-  unit below it. Last, the lender removes its entry, which `GET` and the list must no longer show.
+  and a write signed over another name or other terms must get a 401. The entry read back by key
+  must verify against the key, and the same entry with one changed rate, another name or a
+  signature from another key must not; with its signature cleared it is unsigned. The borrower
+  then lists the directory and finds the lender's verified entry and terms, and `checkProposal`
+  must find no breach in the `create` proposal (built from the amounts under Funding and the
+  1 440-block term, so no `create` record is needed) nor at exactly the least collateral, and
+  only `CollateralBelowMinimum` one unit below it. Last, the lender removes its entry, which `GET` and the list must no longer show.
+- `short-proposal`: runs only when named, for the testnet demo (below). A new offer to the lender
+  that expires 15 blocks after the tip (record `short-proposal`), which the lender opens and
+  verifies. Counted by the term rule, its term is under a day, so against the `directory` stage's
+  terms it must break the shortest term only. The stage stops there; the demo accepts and
+  liquidates it.
 
 Each stage prints its txids and the PSET it built, with the checks it ran. It fails if a covenant
 or NFT input's witness outweighs the constant its builder gives LWK for the fee: on chain, and in
@@ -287,12 +302,12 @@ creation, which needs the funds again.
 ### Funding
 
 Every run first checks that both wallets hold, in confirmed coins, what the transactions without a
-`confirmed` record still need, and exits 1 naming each shortfall and the address to fund. Each
-stage checks its own need again right before it builds. The needs, per record, are in
-`STAGE_NEEDS` (`scripts/e2e/env.ts`), from these amounts: collateral 20 000 tL-sats, principal
-1 000 TEST units, repayment 1 100 TEST units, and 2 000 tL-sats of fee budget per transaction. A
-creation needs 2 × the collateral, as it takes two coins besides the collateral. From an empty
-state, the stages need:
+`confirmed` record still need (`short-proposal` only when it is named), and exits 1 naming each
+shortfall and the address to fund. Each stage checks its own need again right before it builds.
+The needs, per record, are in `STAGE_NEEDS` (`scripts/e2e/env.ts`), from these amounts:
+collateral 20 000 tL-sats, principal 1 000 TEST units, repayment 1 100 TEST units, and 2 000
+tL-sats of fee budget per transaction. A creation needs 2 × the collateral, as it takes two coins
+besides the collateral. From an empty state, the stages need:
 
 - the borrower: 132 000 tL-sats and 100 TEST units (the interest; the principal comes from the
   claim);
@@ -300,6 +315,69 @@ state, the stages need:
 
 The cancellation returns the borrower's collateral, and the liquidation pays its collateral to the
 lender.
+
+## Scripted testnet demo
+
+```bash
+pnpm exec playwright install chromium   # once
+pnpm demo:testnet
+```
+
+Drives both areas of the app with Playwright on Liquid testnet, with the e2e's two seed wallets:
+the lender in the console at 1280 px, the borrower in the borrower app at 375 × 812, each in its
+own browser context, connected through the connect modal's test-seed option. It broadcasts real
+transactions and waits for their blocks: a run takes about 20 minutes. One test, one step per
+part:
+
+1. the lender publishes the `directory` stage's terms as "E2E Lender" on `/lend/terms`, and the
+   console shows the name, the key fingerprint and "Seed phrase" on the wallet button; the terms
+   form opens pre-filled from the verified entry; under 1024 px the sidebar becomes a top bar;
+2. the borrower picks the lender on `/borrow`; the form opens at the lender's minimums, the
+   summary sentence follows the typing, an APR one basis point low and a collateral one base unit
+   low each show their error and keep "Lock collateral and send" disabled; at the minimums the
+   proposal is sent, the app moves to `/borrow/loans`, which shows it "Waiting for E2E Lender",
+   and once the wallet's scan sees the proposal, the wallet button moves on to a new address (the
+   proposal received at an address past the one the button showed);
+3. `pnpm e2e:private short-proposal` runs, and the lender's proposals show it as "Term shorter
+   than 1 day"; as its term is 15 blocks, the lender accepts it at once, after ticking "Accept
+   outside my terms";
+4. the lender accepts the borrower's proposal, within its terms; the borrower receives the
+   principal and repays; the lender claims the repayment;
+5. once the short loan expired, the lender liquidates it, and the loan book shows it liquidated;
+6. each borrower page has no horizontal scroll at 375 px, and every page of both areas gets a
+   screenshot.
+
+It needs:
+
+- the e2e set up and funded (Setup, above). The demo first runs the `wallets` stage, which exits
+  1 naming any shortfall, but it checks only what the e2e stages without a `confirmed` record
+  need: not `short-proposal`, which checks its own need when the demo runs it, and none of the
+  demo's own transactions. On top of those, the borrower needs the short proposal's creation,
+  42 000 tL-sats (as any creation in `STAGE_NEEDS`), and the demo loan's collateral,
+  0.00001 tL-BTC, and its interest; the lender needs the demo loan's principal, 0.1 TEST, and the
+  short proposal's, 1 000 TEST units; and each needs the fees of its own transactions, three for
+  the borrower and four for the lender;
+- the local testnet indexer (above), indexing, on a fresh database that starts at the tip
+  (`INDEXER__LAST_INDEXED_HEIGHT`), after an earlier run's last transaction: the demo finds its
+  loans by their amounts, so an earlier run's loans would match too. The dev server proxies it
+  from `DEMO_INDEXER_URL` (default `http://127.0.0.1:8000`);
+- esplora requests to spare: blockstream.info serves 700 an hour to an IP, and the two wallets'
+  polling, the e2e stages and an indexer on the same esplora spend that within the run, after
+  which the app's transactions stop moving. Leave the indexer on its default esplora
+  (liquid.network, without `ESPLORA__BASE_URL`), and if blockstream.info refuses already, set
+  `DEMO_ESPLORA_URL=https://liquid.network/liquidtestnet` for the app and the e2e stages.
+
+The demo starts its own dev server, `pnpm dev --mode demo` on port 5199, proxying the indexer
+under `/api`. A `short-proposal` record that an earlier run left confirmed is removed first, and
+the stage removes an unfinished one whose proposal expired, so the stage makes a new proposal.
+Screenshots and the e2e stages' output go to `.demo-output/`, and Playwright's output (a
+failure's `error-context.md`) to `test-results/`, both git-ignored. Nothing there may keep the
+seed phrases typed into the connect modal: the demo takes no trace, report, screenshot or video,
+turns off the page snapshot of a failure (`PLAYWRIGHT_NO_COPY_PROMPT`), connects without locator
+assertions, which would attach a snapshot of the page, clears the phrase from the fields when a
+connection fails, and throws that failure without Playwright's error, whose call log holds the
+typed phrase. The demo's proposals are addressed to the e2e lender, so a `scan` whose indexed
+range covers a demo finds them too.
 
 ## Run
 
@@ -333,6 +411,16 @@ Notes:
 ```bash
 pnpm lint
 ```
+
+## Tests
+
+```bash
+pnpm test
+```
+
+Vitest runs the pure rules (`src/**/*.test.ts`) in Node, with the private lending wasm loaded
+from its build (`src/test/wasm.ts`): the term rule and the checks of a proposal against a
+lender's terms. Checks that need the chain are the e2e stages above.
 
 ## Docker
 

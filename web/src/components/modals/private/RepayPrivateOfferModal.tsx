@@ -2,13 +2,14 @@ import { Chip } from '@heroui/react'
 import { useMemo } from 'react'
 
 import { useBlockHeight } from '@/api/esplora/hooks'
+import { loanAmounts } from '@/areas/borrow/proposalForm'
 import Notice from '@/components/Notice'
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { repaymentBorrowerNftOutpoint, utxoOutpoint } from '@/privateLending/candidate'
 import { buildPrivateRepayment } from '@/privateLending/flows/repayment'
-import { isPastExpiry } from '@/privateLending/offerView'
+import { borrowerActions, isPastExpiry } from '@/privateLending/offerView'
 import { selectAssetCoins, selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
 import { useWallet } from '@/providers/wallet/useWallet'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
@@ -24,7 +25,8 @@ const REPAY_WEIGHT_UNITS =
 
 /**
  * The borrower repays an accepted loan in full: it burns the borrower NFT, pays the repayment to
- * the lender, and takes its collateral back.
+ * the lender, and takes its collateral back. The action keeps the name of its button in My loans:
+ * "Repay 3,021.40 TEST".
  */
 export default function RepayPrivateOfferModal(props: PrivateOfferActionModalProps) {
   const { item } = props
@@ -47,12 +49,12 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
     const borrowerNft = repaymentBorrowerNftOutpoint(item.txid, candidate)
     if (borrowerNft === undefined) {
       throw new Error(
-        'The indexer lists no claim of the principal. Claim it first: the repayment burns the ' +
-          'borrower NFT, which unlocks it.',
+        'The indexer lists no receipt of your principal. Receive it first: once you repay, ' +
+          'it can no longer be received.',
       )
     }
     if (offer.opened.principalAsset() !== principalAsset.id) {
-      throw new Error(`The offer's principal is not ${principalAsset.symbol}`)
+      throw new Error(`The loan's principal is not ${principalAsset.symbol}`)
     }
     const coins = deps.walletUtxos()
     const principalCoins = selectAssetCoins(
@@ -81,38 +83,40 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
     () => [
       { label: 'Principal', value: formatPrincipalAmount(terms.principalAmount) },
       { label: 'Interest', value: formatPrincipalAmount(terms.interest) },
-      { label: 'Total Repaid', value: formatPrincipalAmount(terms.repaymentAmount) },
-      { label: 'Collateral Returned', value: formatCollateralDisplay(terms.collateralAmount) },
+      { label: 'You repay', value: formatPrincipalAmount(terms.repaymentAmount) },
+      { label: 'Collateral back to you', value: formatCollateralDisplay(terms.collateralAmount) },
     ],
     [terms, formatCollateralDisplay, formatPrincipalAmount],
   )
+
+  const amounts = loanAmounts(terms.principalAmount, terms.repaymentAmount, principalAsset)
+  const label = borrowerActions(amounts).labels.repay
 
   return (
     <PrivateOfferActionShell
       {...props}
       kind='private_repay_offer'
       requires='active_offer'
-      title='Repay Private Loan'
+      title='Repay your loan'
       chip={
         <Chip color='success' variant='soft' size='sm'>
-          Repay
+          Active
         </Chip>
       }
-      label='Repay & Unlock Collateral'
-      eyebrow='Repay Private Loan'
+      label={label}
+      eyebrow={label}
       summary={summary}
       disabled={insufficientBalance}
       notice={
         insufficientBalance ? (
           <Notice>
-            Insufficient confirmed {principalAsset.symbol} balance: the repayment is{' '}
-            {formatPrincipalAmount(terms.repaymentAmount)}.
+            Your confirmed {principalAsset.symbol} balance is too low: you repay {amounts.repay}.
           </Notice>
         ) : (
           isExpired && (
             <Notice>
-              The loan expired at block #{terms.loanExpirationTime}. The lender may liquidate it at
-              any time; until then you can still repay it.
+              The term ended at block #{terms.loanExpirationTime}. The lender may take your
+              collateral at any time; until then you can still repay.
             </Notice>
           )
         )

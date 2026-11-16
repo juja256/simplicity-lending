@@ -152,11 +152,9 @@ export async function buildPrivateAcceptance(
     deps.network,
   ).toUnconfidential()
   // The principal change goes to the wallet's internal chain, confidential, so it never shares a
-  // script with the receiver (the last unused external address). The policy-asset change takes the
-  // next internal address, so the two changes never share one either.
-  const changeIndex = deps.wollet.change(null).index()
-  const changeAddress = deps.wollet.change(changeIndex).address()
-  const policyChangeAddress = deps.wollet.change(changeIndex + 1).address()
+  // script with the receiver (an external address). The policy-asset change takes the next new
+  // internal address, so the two changes never share one either.
+  const [changeAddress, policyChangeAddress] = deps.addresses.nextChange(deps.wollet, 2)
   const changeOutputs: ExpectedOutput[] =
     principalChange > 0n
       ? [

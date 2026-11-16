@@ -4,8 +4,9 @@ interface KeyFingerprintProps {
   /** `keyFingerprint` of the key: 16 hex characters. */
   fingerprint: string
   /**
-   * The key's directory name, if it has one. Chosen by whoever holds the key and never verified,
-   * so it is isolated in `<bdi>` and always shown next to the fingerprint.
+   * The key's directory name, from its verified entry only (`useDirectory().lookup`): the key
+   * signed it, but whoever holds the key chose it, so it is not an identity. It is isolated in
+   * `<bdi>` and always shown next to the fingerprint.
    */
   name?: string | null
   size?: 'sm' | 'lg'

@@ -1,4 +1,4 @@
-import { type DBSchema, type IDBPDatabase, openDB } from 'idb'
+import { type DBSchema, deleteDB, type IDBPDatabase, openDB } from 'idb'
 
 import { normalizeHex } from '@/utils/hex'
 
@@ -6,8 +6,9 @@ import type { PrivateTxRecord } from './types'
 
 const WALLET_INDEX = 'by-wallet-script-pubkey'
 
-// Private lending transactions live in a database of their own. The public pages' database,
-// `simplicity-lending:pending-transactions`, is no longer opened.
+// Private lending transactions live in a database of their own. The public pages' database is
+// no longer opened, and startup deletes it.
+const ORPHANED_PUBLIC_DB_NAME = 'simplicity-lending:pending-transactions'
 const PRIVATE_DB_NAME = 'simplicity-lending:private-transactions'
 const PRIVATE_DB_VERSION = 1
 const PRIVATE_STORE_NAME = 'private-tx'
@@ -17,6 +18,19 @@ interface PrivateTxDBSchema extends DBSchema {
     key: string
     value: PrivateTxRecord
     indexes: { [WALLET_INDEX]: string }
+  }
+}
+
+/**
+ * Deletes the public pages' database, which nothing opens any more. Called once at startup; a
+ * failure leaves it for the next start, so errors are ignored, including a browser without
+ * IndexedDB, which throws before the promise exists.
+ */
+export function deleteOrphanedPublicDb(): void {
+  try {
+    deleteDB(ORPHANED_PUBLIC_DB_NAME).catch(() => {})
+  } catch {
+    // Ignored, as above.
   }
 }
 

@@ -134,6 +134,7 @@ export type Stage =
   | 'liquidate'
   | 'scan'
   | 'directory'
+  | 'short-proposal'
 
 const NONE: Need = { lbtc: 0n, test: 0n }
 
@@ -189,7 +190,17 @@ export const STAGE_NEEDS: Record<Stage, Record<Wallet, Need>> = {
   },
   scan: { borrower: NONE, lender: NONE },
   directory: { borrower: NONE, lender: NONE },
+  'short-proposal': {
+    borrower: { lbtc: 2n * COLLATERAL + FEE_BUDGET, test: 0n },
+    lender: NONE,
+  },
 }
+
+/**
+ * The records of the stages that run only when named: `short-proposal`, for the testnet demo
+ * (`pnpm demo:testnet`). A run that does not name them does not need their funds.
+ */
+export const ON_REQUEST_STAGES: readonly Stage[] = ['short-proposal']
 
 /** Whether `stage` needs nothing from either wallet, as `scan` and `directory`. */
 export function needsNothing(stage: Stage): boolean {
@@ -211,8 +222,8 @@ export function sumNeeds(stages: readonly Stage[]): Record<Wallet, Need> {
   return total
 }
 
-/** What each wallet must hold, confirmed, to run every stage. */
-export const NEEDS = sumNeeds(STAGE_NAMES)
+/** What each wallet must hold, confirmed, to run every stage that runs unnamed. */
+export const NEEDS = sumNeeds(STAGE_NAMES.filter(stage => !ON_REQUEST_STAGES.includes(stage)))
 
 /** Confirmed tL-BTC coins to split each wallet into, and their size. */
 export const SPLITS = {

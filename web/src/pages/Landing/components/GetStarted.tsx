@@ -2,6 +2,7 @@ import { buttonVariants } from '@heroui/react'
 
 import { ExternalLink } from '@/constants/links'
 
+import { AreaEntrances } from './Hero'
 import { LandingContainer } from './LandingContainer'
 import { Reveal } from './Reveal'
 
@@ -12,13 +13,19 @@ export function GetStarted() {
         <Reveal className='text-foreground flex flex-col gap-4'>
           <p className='text-[36px] leading-10 font-semibold'>Get Started</p>
           <p className='text-sm'>
+            Try both sides on testnet: lend from the console, or borrow from a lender.
+          </p>
+        </Reveal>
+        <Reveal delay={0.1} className='w-full max-w-180'>
+          <AreaEntrances cardClassName='bg-surface' />
+        </Reveal>
+        <Reveal delay={0.15} className='flex flex-col items-center gap-4'>
+          <p className='text-foreground text-sm'>
             Simplicity Lending isn&apos;t live on mainnet yet. Leave your email and we&apos;ll let
             you know the moment it launches.
           </p>
-        </Reveal>
-        <Reveal delay={0.15}>
           <a
-            className={buttonVariants({ variant: 'primary' })}
+            className={buttonVariants({ variant: 'secondary' })}
             href={ExternalLink.NotifyForm}
             target='_blank'
             rel='noopener noreferrer'

@@ -6,6 +6,9 @@ import { createRoot } from 'react-dom/client'
 
 import App from './App'
 import { AppErrorBoundary } from './components/AppErrorBoundary'
+import { deleteOrphanedPublicDb } from './providers/pendingTransactions/storage'
+
+deleteOrphanedPublicDb()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

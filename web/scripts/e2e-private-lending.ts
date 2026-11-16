@@ -33,6 +33,7 @@ import {
   requestDirectoryChallenge,
 } from '@/api/indexer/private'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
+import { AddressCursor } from '@/privateLending/addressCursor'
 import {
   borrowerNftOutpoint as candidateBorrowerNftOutpoint,
   repaymentBorrowerNftOutpoint,
@@ -40,7 +41,12 @@ import {
   utxoOutpoint,
 } from '@/privateLending/candidate'
 import type { PrivateFlowDeps } from '@/privateLending/deps'
-import { registerInDirectory, removeFromDirectory } from '@/privateLending/directory'
+import {
+  checkDirectoryEntry,
+  type EntryCheck,
+  registerInDirectory,
+  removeFromDirectory,
+} from '@/privateLending/directory'
 import { buildPrivateAcceptance } from '@/privateLending/flows/acceptance'
 import { buildPrivateCancellation } from '@/privateLending/flows/cancellation'
 import { buildPrincipalClaim } from '@/privateLending/flows/claimPrincipal'
@@ -62,9 +68,13 @@ import {
   maxPrincipalPerCollateralToDisplay,
   type PairTermsForm,
   pairTermsFromForm,
+  proposalExpiry,
   type ProposalInput,
+  TERM_MARGIN_BLOCKS,
+  termBlocksOf,
   unitsToDecimal,
 } from '@/privateLending/lenderTerms'
+import { checkAgainstTerms, proposalOfOffer } from '@/privateLending/proposalCheck'
 import { walletReceiver } from '@/privateLending/receiver'
 import {
   CREATION_TX_MISMATCH,
@@ -106,6 +116,7 @@ import {
   loadEnv,
   type Need,
   needsNothing,
+  ON_REQUEST_STAGES,
   PRINCIPAL,
   REPAYMENT,
   SPLITS,
@@ -122,6 +133,7 @@ import {
   getNftReceivers,
   getRecord,
   getWalletIdentity,
+  removeRecord,
   saveNftReceiver,
   saveWalletIdentity,
 } from './e2e/state'
@@ -182,11 +194,15 @@ function shortfalls(ctx: Context, needs: Record<Wallet, Need>): string[] {
 /**
  * Exits 1 unless the wallets cover every stage without a `confirmed` record: a `built` or
  * `broadcast` one still counts, as its coins are not spent until it confirms. A stage that needs
- * nothing (`scan`, which never has a record) is never left.
+ * nothing (`scan`, which never has a record) is never left, nor one that runs only when named
+ * (`ON_REQUEST_STAGES`) unless `requested` names it.
  */
-function requireFunding(ctx: Context): void {
+function requireFunding(ctx: Context, requested: readonly string[]): void {
   const remaining = STAGE_NAMES.filter(
-    stage => !needsNothing(stage) && getRecord(stage)?.status !== 'confirmed',
+    stage =>
+      !needsNothing(stage) &&
+      getRecord(stage)?.status !== 'confirmed' &&
+      (!ON_REQUEST_STAGES.includes(stage) || requested.includes(stage)),
   )
   const short = shortfalls(ctx, sumNeeds(remaining))
   if (short.length > 0) {
@@ -206,18 +222,35 @@ function requireStageNeed(ctx: Context, stage: Stage): void {
 
 /**
  * Throws `wallet identity changed` if a wallet's identity script differs from the one the
- * `wallets` stage saved; with `save`, saves the ones not saved yet. The saved private transactions
- * of the app are keyed by it, so taking fresh receive addresses must leave it as it was.
+ * `wallets` stage saved. With `save` (the `wallets` stage), saves the ones not saved yet; without
+ * it, throws if one is not saved, so no stage runs unchecked. The saved private transactions of
+ * the app are keyed by it, so taking fresh receive addresses must leave it as it was.
  */
 function checkWalletIdentities(ctx: Context, save: boolean): void {
   for (const name of NAMES) {
     const script = walletIdentityScript(ctx.wallets[name].wollet)
     const saved = getWalletIdentity(name)
-    if (saved !== undefined && saved !== script) {
+    if (saved === undefined) {
+      if (!save) throw new Error(`no saved identity for the ${name}: run the wallets stage`)
+      saveWalletIdentity(name, script)
+    } else if (saved !== script) {
       throw new Error(`wallet identity changed: ${name} was ${saved}, is ${script}`)
     }
-    if (saved === undefined && save) saveWalletIdentity(name, script)
   }
+}
+
+/**
+ * The address cursor of wallet `name` for this run, one wallet session: it logs each receive and
+ * change index it hands out, and throws if one repeats within the run.
+ */
+function runAddresses(name: Wallet): AddressCursor {
+  const handedOut = new Set<string>()
+  return new AddressCursor((chain, index) => {
+    out(`${name} ${chain} index ${index}`)
+    const key = `${chain} ${index}`
+    if (handedOut.has(key)) throw new Error(`${name}: ${chain} index ${index} handed out twice`)
+    handedOut.add(key)
+  })
 }
 
 async function walletsStage(ctx: Context): Promise<void> {
@@ -237,14 +270,20 @@ async function walletsStage(ctx: Context): Promise<void> {
     const stage = `wallets-split-${name}`
     const { coins: target, amount } = SPLITS[name]
     const coins = confirmedLbtcCoins(wallet)
-    const recorded = await resumeRecorded(ctx, stage)
-    if (recorded) {
+    // A split not yet confirmed is resumed; a confirmed one counts only while its coins last.
+    const record = getRecord(stage)
+    if (record !== undefined && record.status !== 'confirmed') {
+      await resumeRecorded(ctx, stage)
       await wallet.sync()
       continue
     }
     if (coins >= target) {
       out(`${name}: ${coins} confirmed tL-BTC coins, no split needed`)
       continue
+    }
+    if (record !== undefined) {
+      out(`${name}: the split ${record.txid} was spent since; splitting again`)
+      removeRecord(stage)
     }
     const needed = BigInt(target) * amount + FEE_BUDGET
     const have = confirmedBalance(wallet, TESTNET_ASSETS.policy)
@@ -285,8 +324,13 @@ async function resumeRecorded(ctx: Context, stage: string): Promise<boolean> {
   return true
 }
 
-/** Blocks from the tip to an e2e offer's loan expiration. */
-const OFFER_EXPIRY_BLOCKS = 1_440
+/** The days an e2e offer's borrower chose: its term by the term rule (`termBlocksOf`). */
+const OFFER_TERM_DAYS = 1
+
+/** An e2e offer's loan expiration, from the tip it is built at, as the borrower's form sets it. */
+function offerExpiry(tip: number): number {
+  return proposalExpiry(tip, OFFER_TERM_DAYS)
+}
 
 function compareValues(a: lwk.WalletTxOut, b: lwk.WalletTxOut): number {
   const diff = a.unblinded().value() - b.unblinded().value()
@@ -400,7 +444,7 @@ function assertDistinctOutputScripts(pset: lwk.Pset, what: string): void {
  */
 async function buildFreshCreation(
   ctx: Context,
-  expiryBlocks: number,
+  expiryAt: (tip: number) => number,
   borrowerNftReceiver: lwk.Address,
 ): Promise<Awaited<ReturnType<typeof buildPrivateCreation>>> {
   const { borrower, lender } = ctx.wallets
@@ -413,7 +457,7 @@ async function buildFreshCreation(
     collateralAmount: COLLATERAL,
     principalAmount: PRINCIPAL,
     repaymentAmount: REPAYMENT,
-    loanExpirationTime: tip + expiryBlocks,
+    loanExpirationTime: expiryAt(tip),
     borrowerNftReceiver,
   }
 
@@ -436,13 +480,17 @@ async function buildFreshCreation(
 }
 
 /**
- * A fresh receiver for the borrower NFT of the creation `stage`, saved in the state. Throws if an
- * earlier creation saved the same one: the wallet must have applied each broadcast creation
- * before the next takes its address.
+ * A fresh receiver for the borrower NFT of the creation `stage`, saved in the state. Throws if it
+ * is the wallet's identity (address 0), or if an earlier creation saved the same one: the
+ * session's address cursor must hand out a new address to each flow.
  */
 function creationNftReceiver(ctx: Context, stage: CreationRecord): lwk.Address {
-  const receiver = walletReceiver({ wollet: ctx.wallets.borrower.wollet })
+  const { borrower } = ctx.wallets
+  const receiver = walletReceiver(borrower)
   const address = receiver.toString()
+  if (receiver.scriptPubkey().toString() === walletIdentityScript(borrower.wollet)) {
+    throw new Error(`NFT receiver is the wallet's identity: ${address}`)
+  }
   for (const [other, saved] of Object.entries(getNftReceivers())) {
     if (other !== stage && saved === address) throw new Error(`NFT receiver reused: ${address}`)
   }
@@ -451,17 +499,20 @@ function creationNftReceiver(ctx: Context, stage: CreationRecord): lwk.Address {
   return receiver
 }
 
-/** Builds (only without a record), saves and broadcasts a creation; returns its txid. */
+/**
+ * Builds (only without a record), saves and broadcasts a creation whose loan expires at
+ * `expiryAt` of the tip; returns its txid.
+ */
 async function submitCreation(
   ctx: Context,
   stage: CreationRecord,
   need: Stage,
-  expiryBlocks: number,
+  expiryAt: (tip: number) => number,
 ): Promise<string> {
   let hex: string | undefined
   if (!getRecord(stage)) {
     requireStageNeed(ctx, need)
-    const built = await buildFreshCreation(ctx, expiryBlocks, creationNftReceiver(ctx, stage))
+    const built = await buildFreshCreation(ctx, expiryAt, creationNftReceiver(ctx, stage))
     const { finalizedTx, summary } = await built.finalize(
       ctx.wallets.borrower.signer.sign(built.pset),
     )
@@ -518,19 +569,60 @@ async function lenderView(ctx: Context, txid: string): Promise<void> {
 }
 
 async function createStage(ctx: Context): Promise<void> {
-  const txid = await submitCreation(ctx, 'create', 'create', OFFER_EXPIRY_BLOCKS)
+  const txid = await submitCreation(ctx, 'create', 'create', offerExpiry)
   await lenderView(ctx, txid)
+  await checkCreatedTerm(ctx, txid)
   out('\ncreate: ok')
+}
+
+/**
+ * The `create` proposal as the lender's console counts and checks it, through the console's own
+ * `proposalOfOffer` and `checkAgainstTerms`: its term by the term rule from the block its creation
+ * confirmed in, which the console reads from esplora (never the indexer's `created_at_height`), as
+ * this stage does. Confirmed within `TERM_MARGIN_BLOCKS` of the tip it was built at, it counts the
+ * `OFFER_TERM_DAYS` the borrower chose and is within the e2e lender's terms.
+ */
+async function checkCreatedTerm(ctx: Context, txid: string): Promise<void> {
+  const offer = await loadCreatedOffer(ctx, 'lender')
+  const { blockHeight } = await ctx.chain.fetchTimelock(txid)
+  if (blockHeight === null) throw new Error(`the creation ${txid} is not confirmed`)
+  const { opened } = offer
+  const expiry = opened.loanExpirationTime()
+  const proposal = proposalOfOffer(
+    {
+      principalAsset: opened.principalAsset(),
+      collateralAsset: opened.collateralAsset(),
+      principalAmount: opened.principalAmount(),
+      collateralAmount: opened.collateralAmount(),
+      repaymentAmount: opened.repaymentAmount(),
+      loanExpirationTime: expiry,
+    },
+    blockHeight,
+  )
+  out(
+    `term: created at block ${blockHeight}, expires at ${expiry}: ` +
+      `${proposal.term_blocks / BLOCKS_PER_DAY} days`,
+  )
+  if (proposal.term_blocks !== OFFER_TERM_DAYS * BLOCKS_PER_DAY) {
+    throw new Error(
+      `the create offer counts ${proposal.term_blocks} blocks, not ${OFFER_TERM_DAYS} days: ` +
+        `it confirmed more than ${TERM_MARGIN_BLOCKS} blocks after it was built, or it was ` +
+        'built before the term rule (move .e2e-private/state.json aside)',
+    )
+  }
+  const own: EntryCheck = { status: 'verified', terms: e2eTerms() }
+  const pair = { collateral: TESTNET_PAIR.collateralAsset, principal: TESTNET_PAIR.principalAsset }
+  const verdict = checkAgainstTerms(wasm, own, proposal, pair)
+  if (verdict.kind !== 'within') {
+    throw new Error(`the create proposal is not within the e2e terms: ${JSON.stringify(verdict)}`)
+  }
+  out("the create proposal is within the e2e lender's terms")
 }
 
 /** A creation built twice and checked, but never signed, broadcast or saved. */
 async function createDryStage(ctx: Context): Promise<void> {
   requireStageNeed(ctx, 'create')
-  await buildFreshCreation(
-    ctx,
-    OFFER_EXPIRY_BLOCKS,
-    walletReceiver({ wollet: ctx.wallets.borrower.wollet }),
-  )
+  await buildFreshCreation(ctx, offerExpiry, walletReceiver(ctx.wallets.borrower))
   out('\ncreate-dry: ok (nothing signed, broadcast or saved)')
 }
 
@@ -539,9 +631,20 @@ const CREATION_STAGES = {
   create: 'create',
   'cancel-create': 'cancel',
   'liquidate-create': 'liquidate',
+  'short-proposal': 'short-proposal',
 } as const
 
 type CreationRecord = keyof typeof CREATION_STAGES
+
+/**
+ * The creations the `scan` stage finds: every one but `short-proposal`, which runs only when named
+ * and goes on in the testnet demo.
+ */
+const SCANNED_CREATIONS = [
+  'create',
+  'cancel-create',
+  'liquidate-create',
+] as const satisfies readonly CreationRecord[]
 
 /** The `create` offer, fetched from chain and opened through the gate as `role`. */
 async function loadCreatedOffer(ctx: Context, role: Wallet): Promise<VerifiedOffer> {
@@ -783,7 +886,7 @@ async function buildSignedAcceptance(
   offer: VerifiedOffer,
 ): Promise<{ hex: string; txid: string }> {
   const { lender } = ctx.wallets
-  const lenderNftReceiver = walletReceiver({ wollet: lender.wollet })
+  const lenderNftReceiver = walletReceiver(lender)
   const principalCoins = pickCoins(lender, TESTNET_ASSETS.principal, PRINCIPAL, 'lender principal')
   const feeCoins = pickCoins(lender, TESTNET_ASSETS.policy, FEE_BUDGET, 'lender fee')
   out(`principal coins ${principalCoins.map(outpointOf).join(', ')}`)
@@ -896,7 +999,7 @@ async function buildSignedClaim(
   acceptTxid: string,
 ): Promise<{ hex: string; txid: string }> {
   const { borrower } = ctx.wallets
-  const receiver = walletReceiver({ wollet: borrower.wollet })
+  const receiver = walletReceiver(borrower)
   const feeCoins = pickCoins(borrower, TESTNET_ASSETS.policy, FEE_BUDGET, 'borrower fee')
   out(`fee coins ${feeCoins.map(outpointOf).join(', ')}`)
 
@@ -1089,7 +1192,7 @@ async function buildSignedRepayment(
   acceptTxid: string,
 ): Promise<{ hex: string; txid: string }> {
   const { borrower } = ctx.wallets
-  const collateralReceiver = walletReceiver({ wollet: borrower.wollet })
+  const collateralReceiver = walletReceiver(borrower)
   const principalCoins = pickCoins(
     borrower,
     TESTNET_ASSETS.principal,
@@ -1273,7 +1376,7 @@ async function repayHostileDryStage(ctx: Context): Promise<void> {
     'borrower repayment',
   )
   const feeCoins = pickCoins(borrower, TESTNET_ASSETS.policy, FEE_BUDGET, 'borrower fee')
-  const collateralReceiver = walletReceiver({ wollet: borrower.wollet })
+  const collateralReceiver = walletReceiver(borrower)
   const deps = stopAtBuild(flowDeps(borrower, ctx.chain))
   const tryBuild = (activeOfferOutpoint: string, borrowerNftOutpoint: string) =>
     buildPrivateRepayment(deps, offer, {
@@ -1413,7 +1516,7 @@ async function buildSignedRepaymentClaim(
   repayTxid: string,
 ): Promise<{ hex: string; txid: string }> {
   const { lender } = ctx.wallets
-  const receiver = walletReceiver({ wollet: lender.wollet })
+  const receiver = walletReceiver(lender)
   const feeCoins = pickCoins(lender, TESTNET_ASSETS.policy, FEE_BUDGET, 'lender fee')
   out(`fee coins ${feeCoins.map(outpointOf).join(', ')}`)
 
@@ -1621,7 +1724,7 @@ async function buildSignedCancellation(
   creationTxid: string,
 ): Promise<{ hex: string; txid: string }> {
   const { borrower } = ctx.wallets
-  const collateralReceiver = walletReceiver({ wollet: borrower.wollet })
+  const collateralReceiver = walletReceiver(borrower)
   const feeCoins = pickCoins(borrower, TESTNET_ASSETS.policy, FEE_BUDGET, 'borrower fee')
   out(`fee coins ${feeCoins.map(outpointOf).join(', ')}`)
 
@@ -1645,12 +1748,7 @@ async function buildSignedCancellation(
 /** A new offer from the borrower to the lender, which the borrower then cancels. */
 async function cancelStage(ctx: Context): Promise<void> {
   const { borrower } = ctx.wallets
-  const creationTxid = await submitCreation(
-    ctx,
-    'cancel-create',
-    'cancel-create',
-    OFFER_EXPIRY_BLOCKS,
-  )
+  const creationTxid = await submitCreation(ctx, 'cancel-create', 'cancel-create', offerExpiry)
   await lenderView(ctx, creationTxid)
   const offer = await loadOffer(ctx, 'cancel-create', 'borrower')
 
@@ -1770,7 +1868,7 @@ function liquidationParams(ctx: Context, acceptTxid: string, tipHeight: number):
     activeOfferOutpoint: `${acceptTxid}:${ACCEPTANCE_OUTPUT.activeOffer}`,
     lenderNftOutpoint: `${acceptTxid}:${ACCEPTANCE_OUTPUT.lenderNft}`,
     feeCoins: pickCoins(lender, TESTNET_ASSETS.policy, FEE_BUDGET, 'lender fee'),
-    collateralReceiver: walletReceiver({ wollet: lender.wollet }),
+    collateralReceiver: walletReceiver(lender),
     tipHeight,
   }
 }
@@ -1867,7 +1965,7 @@ async function liquidateStage(ctx: Context): Promise<void> {
     ctx,
     'liquidate-create',
     'liquidate-create',
-    LIQUIDATION_EXPIRY_BLOCKS,
+    tip => tip + LIQUIDATION_EXPIRY_BLOCKS,
   )
   await lenderView(ctx, creationTxid)
   const offer = await loadOffer(ctx, 'liquidate-create', 'lender')
@@ -1956,6 +2054,66 @@ async function liquidateDryStage(ctx: Context): Promise<void> {
   const tip = await ctx.chain.tipHeight()
   const { txid } = await buildSignedLiquidation(ctx, offer, acceptTxid, tip)
   out(`\nliquidate-dry: ok (${txid} finalized at tip ${tip}, not saved or broadcast)`)
+}
+
+/** Blocks from the tip to the `short-proposal` offer's loan expiration: less than a day. */
+const SHORT_PROPOSAL_BLOCKS = 15
+
+/**
+ * A new offer from the borrower to the lender that expires 15 blocks after the tip, for the
+ * testnet demo (`pnpm demo:testnet`), and nothing more: the demo's lender sees it outside its
+ * terms, accepts it after the warning and liquidates it once it expired. Counted by the term rule
+ * from the block its creation confirmed in, its term is under a day, so against the `directory`
+ * stage's terms it breaks the shortest term only.
+ */
+async function shortProposalStage(ctx: Context): Promise<void> {
+  await dropExpiredShortProposal(ctx)
+  const txid = await submitCreation(
+    ctx,
+    'short-proposal',
+    'short-proposal',
+    tip => tip + SHORT_PROPOSAL_BLOCKS,
+  )
+  await lenderView(ctx, txid)
+  const offer = await loadOffer(ctx, 'short-proposal', 'lender')
+  const { blockHeight } = await ctx.chain.fetchTimelock(txid)
+  if (blockHeight === null) throw new Error(`the creation ${txid} is not confirmed`)
+  const expiry = offer.opened.loanExpirationTime()
+  const termBlocks = termBlocksOf(expiry, blockHeight)
+  out(`term: created at block ${blockHeight}, expires at ${expiry}: ${termBlocks} blocks`)
+  const breaches = wasm.checkProposal(
+    JSON.stringify(e2eTerms()),
+    JSON.stringify(createProposal(termBlocks)),
+  )
+  if (!isDeepStrictEqual(breaches, ['TermBelowRange'])) {
+    throw new Error(
+      `against the e2e terms the short proposal breaks ${JSON.stringify(breaches)}, ` +
+        'not the shortest term only',
+    )
+  }
+  out("against the e2e lender's terms it breaks the shortest term only")
+  out('\nshort-proposal: ok')
+}
+
+/**
+ * Removes an unfinished `short-proposal` record whose offer can no longer be accepted (the tip at
+ * or past its expiry), so the stage makes a new one: resumed, it would at best confirm a proposal
+ * the demo cannot accept, and the demo would wait for its timeout. A confirmed record is the
+ * demo's to remove.
+ */
+async function dropExpiredShortProposal(ctx: Context): Promise<void> {
+  const record = getRecord('short-proposal')
+  if (record === undefined || record.status === 'confirmed') return
+  const opened = wasm.openCreationAsLender(ctx.wallets.lender.lendingKey, record.hex)
+  const expiry = opened.loanExpirationTime()
+  opened.free()
+  const tip = await ctx.chain.tipHeight()
+  if (tip < expiry) return
+  out(
+    `short-proposal: the unfinished ${record.txid} expired at block ${expiry} (tip ${tip}); ` +
+      'making a new one',
+  )
+  removeRecord('short-proposal')
 }
 
 /** An e2e offer, which the borrower created for the lender. */
@@ -2322,18 +2480,18 @@ async function listWholeDirectory(apiUrl: string): Promise<DirectoryEntry[]> {
 }
 
 /**
- * The proposal of the `create` stage's offer, from the constants it is built from: its amounts,
- * and its expiry offset as the term. The `create` record is not needed, so the stage runs from any
- * state.
+ * The proposal of the `create` stage's offer over `termBlocks`, from the constants it is built
+ * from: its amounts. The `directory` stage gives it its stated term, `OFFER_TERM_DAYS`, so the
+ * `create` record is not needed and the stage runs from any state.
  */
-function createProposal(): ProposalInput {
+function createProposal(termBlocks: number): ProposalInput {
   return {
     principal_asset: TESTNET_ASSETS.principal,
     collateral_asset: TESTNET_ASSETS.collateral,
     principal_amount: PRINCIPAL.toString(),
     collateral_amount: COLLATERAL.toString(),
     repayment_amount: REPAYMENT.toString(),
-    term_blocks: OFFER_EXPIRY_BLOCKS,
+    term_blocks: termBlocks,
   }
 }
 
@@ -2352,11 +2510,21 @@ function e2eTermsForm(): PairTermsForm {
       principal.decimals,
       collateral.decimals,
     ),
-    minTermDays: String(OFFER_EXPIRY_BLOCKS / BLOCKS_PER_DAY),
+    minTermDays: String(OFFER_TERM_DAYS),
     maxTermDays: '30',
     minPrincipal: unitsToDecimal(PRINCIPAL / 10n, principal.decimals),
     maxPrincipal: unitsToDecimal(PRINCIPAL * 100n, principal.decimals),
   }
+}
+
+/** The e2e lender's terms from `form`; throws if the form is refused. */
+function e2eTerms(form = e2eTermsForm()): LenderTermsInput {
+  const { collateralAsset: collateral, principalAsset: principal } = TESTNET_PAIR
+  const parsed = pairTermsFromForm(form, { collateral, principal })
+  if (parsed.terms === null) {
+    throw new Error(`the e2e terms form is refused: ${JSON.stringify(parsed.errors)}`)
+  }
+  return { pairs: [parsed.terms] }
 }
 
 /** A PUT of `body` must be refused with 401 "invalid signature". */
@@ -2383,9 +2551,12 @@ async function expectInvalidSignature(
 /**
  * The lender publishes terms for the configured pair in the local indexer's directory (`web/
  * README.md`, "Local testnet indexer"); a write whose name or terms differ from what was signed is
- * refused. The borrower lists the directory, finds the lender's entry and terms, and checks the
- * `create` proposal against them: within, also at exactly the least collateral, and one unit
- * below it only `CollateralBelowMinimum`. Last, the lender removes its entry. Nothing is broadcast.
+ * refused. The entry read back by key is verified against the key (`checkDirectoryEntry`), and the
+ * same entry as an indexer could alter it is not: one changed rate, another name or a signature
+ * from another key is `invalid`, a cleared signature `unsigned`. The borrower lists the directory,
+ * finds the lender's verified entry and terms, and checks the `create` proposal against them:
+ * within, also at exactly the least collateral, and one unit below it only
+ * `CollateralBelowMinimum`. Last, the lender removes its entry. Nothing is broadcast.
  */
 async function directoryStage(ctx: Context): Promise<void> {
   const { lender } = ctx.wallets
@@ -2398,18 +2569,15 @@ async function directoryStage(ctx: Context): Promise<void> {
 
   // The lender: the terms from what it types, then the signed write.
   const form = e2eTermsForm()
-  const parsed = pairTermsFromForm(form, { collateral, principal })
-  if (parsed.terms === null) {
-    throw new Error(`the e2e terms form is refused: ${JSON.stringify(parsed.errors)}`)
-  }
+  const terms = e2eTerms(form)
+  const [pairTerms] = terms.pairs
   const rate = 2n * wasm.principalPerCollateral(PRINCIPAL, COLLATERAL)
-  if (BigInt(parsed.terms.max_principal_per_collateral) !== rate) {
+  if (BigInt(pairTerms.max_principal_per_collateral) !== rate) {
     throw new Error(
       `${form.maxPrincipalPerCollateral} ${principal.symbol} per ${collateral.symbol} gave ` +
-        `${parsed.terms.max_principal_per_collateral}, not ${rate} per 10^8 base units`,
+        `${pairTerms.max_principal_per_collateral}, not ${rate} per 10^8 base units`,
     )
   }
-  const terms: LenderTermsInput = { pairs: [parsed.terms] }
   out(
     `  terms: APR at least ${form.minAprPercent} %, at most ${form.maxPrincipalPerCollateral} ` +
       `${principal.symbol} per ${collateral.symbol} (${rate} per 10^8 base units), ` +
@@ -2445,6 +2613,36 @@ async function directoryStage(ctx: Context): Promise<void> {
       'GET shows the same',
   )
 
+  // What a reader checks: the served name and terms against the key, never the indexer's word.
+  const otherTerms = { pairs: [{ ...pairTerms, min_apr_bps: pairTerms.min_apr_bps + 1 }] }
+  if (fetched.signed_challenge === null || fetched.signature === null) {
+    throw new Error(`GET serves the entry without its signature: ${JSON.stringify(fetched)}`)
+  }
+  const otherKeySignature = wasm.signDirectoryAction(
+    ctx.wallets.borrower.lendingKey,
+    wasm.DirectoryAction.Put,
+    fetched.signed_challenge,
+    name,
+    JSON.stringify(terms),
+  )
+  const entryCases: [string, DirectoryEntry, EntryCheck['status']][] = [
+    ['as served', fetched, 'verified'],
+    ['with one changed rate', { ...fetched, terms: otherTerms }, 'invalid'],
+    ['with another name', { ...fetched, display_name: 'E2E Impostor' }, 'invalid'],
+    ['signed by another key', { ...fetched, signature: otherKeySignature }, 'invalid'],
+    ['with its signature cleared', { ...fetched, signature: null }, 'unsigned'],
+  ]
+  for (const [what, served, expected] of entryCases) {
+    const checked = checkDirectoryEntry(wasm, served)
+    if (
+      checked.status !== expected ||
+      (checked.status === 'verified' && !isDeepStrictEqual(checked.terms, terms))
+    ) {
+      throw new Error(`the entry ${what} checks as ${JSON.stringify(checked)}, not ${expected}`)
+    }
+    out(`  the entry ${what}: ${checked.status}`)
+  }
+
   // Signed over the name and the terms together: a write that changes either is refused.
   const signedPut = async (): Promise<PutDirectoryEntryBody> => {
     const { challenge } = await requestDirectoryChallenge(ctx.apiUrl)
@@ -2463,7 +2661,6 @@ async function directoryStage(ctx: Context): Promise<void> {
     { ...(await signedPut()), display_name: 'E2E Impostor' },
     'signed over another name',
   )
-  const otherTerms = { pairs: [{ ...parsed.terms, min_apr_bps: parsed.terms.min_apr_bps + 1 }] }
   await expectInvalidSignature(
     ctx,
     pubkey,
@@ -2471,26 +2668,31 @@ async function directoryStage(ctx: Context): Promise<void> {
     'signed over other terms',
   )
 
-  // The borrower: the lender's terms from the list, and the `create` proposal against them.
+  // The borrower: the lender's verified terms from the list, and the `create` proposal against
+  // them.
   const listed = (await listWholeDirectory(ctx.apiUrl)).find(item => item.pubkey === pubkey)
   if (listed === undefined) throw new Error('the directory list does not show the lender')
-  const pair = findPairTerms(listed.terms, { collateral, principal })
+  const listedCheck = checkDirectoryEntry(wasm, listed)
+  if (listedCheck.status !== 'verified') {
+    throw new Error(`the listed entry checks as ${listedCheck.status}: ${JSON.stringify(listed)}`)
+  }
+  const pair = findPairTerms(listedCheck.terms, { collateral, principal })
   if (
     pair === undefined ||
-    !isDeepStrictEqual(listed.terms, terms) ||
+    !isDeepStrictEqual(listedCheck.terms, terms) ||
     listed.terms_published_at !== entry.terms_published_at
   ) {
     throw new Error(`the directory lists the lender as ${JSON.stringify(listed)}`)
   }
   out(
-    `  the borrower lists "${listed.display_name}", terms published at ` +
+    `  the borrower lists "${listed.display_name}", verified, terms published at ` +
       formatPublishedAt(listed.terms_published_at!),
   )
 
-  const listedTerms = JSON.stringify(listed.terms)
+  const listedTerms = JSON.stringify(listedCheck.terms)
   const check = (proposal: ProposalInput): string[] =>
     wasm.checkProposal(listedTerms, JSON.stringify(proposal))
-  const proposal = createProposal()
+  const proposal = createProposal(OFFER_TERM_DAYS * BLOCKS_PER_DAY)
   const leastCollateral = wasm.minCollateral(
     BigInt(proposal.principal_amount),
     BigInt(pair.max_principal_per_collateral),
@@ -2537,7 +2739,7 @@ async function directoryStage(ctx: Context): Promise<void> {
  * offers, and a hostile indexer cannot get an offer verified. Nothing is broadcast.
  */
 async function scanStage(ctx: Context): Promise<void> {
-  const creations: Creation[] = (Object.keys(CREATION_STAGES) as CreationRecord[]).map(stage => {
+  const creations: Creation[] = SCANNED_CREATIONS.map(stage => {
     const record = getRecord(stage)
     if (record?.status !== 'confirmed') {
       throw new Error(`no confirmed ${stage}: run the ${CREATION_STAGES[stage]} stage`)
@@ -2594,13 +2796,17 @@ const STAGES: Record<string, (ctx: Context) => Promise<void>> = {
   liquidate: liquidateStage,
   scan: scanStage,
   directory: directoryStage,
+  'short-proposal': shortProposalStage,
 }
 
 /**
  * The stages run when none is named: the real ones. The dry ones (`*-dry`) only rebuild and check
- * a stage's transaction, from whatever coins the wallets hold now, so they run only by name.
+ * a stage's transaction, from whatever coins the wallets hold now, so they run only by name, as
+ * do the stages for the testnet demo (`ON_REQUEST_STAGES`).
  */
-const DEFAULT_STAGES = Object.keys(STAGES).filter(name => !name.endsWith('-dry'))
+const DEFAULT_STAGES = Object.keys(STAGES).filter(
+  name => !name.endsWith('-dry') && !(ON_REQUEST_STAGES as readonly string[]).includes(name),
+)
 
 async function main(): Promise<void> {
   const requested = process.argv.slice(2)
@@ -2615,14 +2821,14 @@ async function main(): Promise<void> {
   const ctx: Context = {
     chain: createChain(env.esploraApi),
     wallets: {
-      borrower: seedWallet(env, env.borrowerMnemonic),
-      lender: seedWallet(env, env.lenderMnemonic),
+      borrower: seedWallet(env, env.borrowerMnemonic, runAddresses('borrower')),
+      lender: seedWallet(env, env.lenderMnemonic, runAddresses('lender')),
     },
     apiUrl: env.apiUrl,
   }
   await ctx.wallets.borrower.sync()
   await ctx.wallets.lender.sync()
-  requireFunding(ctx)
+  requireFunding(ctx, names)
   for (const name of names) {
     out(`== ${name}`)
     if (name !== 'wallets') checkWalletIdentities(ctx, false)

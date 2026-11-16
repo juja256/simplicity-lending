@@ -1,11 +1,4 @@
-import {
-  Jade,
-  type Network,
-  type Pset,
-  Singlesig,
-  type Wollet,
-  type WolletDescriptor,
-} from 'lwk_wasm'
+import { Jade, type Network, type Pset, type WolletDescriptor } from 'lwk_wasm'
 
 import type { ConnectionStatus, JadeVersionInfo, WalletType } from '../types'
 import { DEFAULT_WALLET_TYPE } from '../types'
@@ -102,26 +95,6 @@ export class JadeConnector implements WalletConnector {
       throw mapJadeRpcError(error)
     } finally {
       this.busy = false
-    }
-  }
-
-  /**
-   * Ask Jade to display and confirm the receive address on-device.
-   *
-   * Jade shows the address on its screen and requires a button press to confirm.
-   * The returned string is the address as verified by the hardware — compare it
-   * against the software-derived address to detect substitution attacks.
-   */
-  async getVerifiedReceiveAddress(variant: WalletType, wollet: Wollet): Promise<string> {
-    if (!this.jade) throw new JadeNotConnectedError()
-    const addrResult = wollet.address()
-    const index = addrResult.index()
-    const path = wollet.addressFullPath(index)
-    const singlesig = Singlesig.from(variant)
-    try {
-      return await this.jade.getReceiveAddressSingle(singlesig, path)
-    } catch (error) {
-      throw mapJadeRpcError(error)
     }
   }
 

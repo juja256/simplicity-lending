@@ -130,6 +130,13 @@ pub struct DirectoryEntry {
     pub terms: Option<LenderTermsDto>,
     /// Unix seconds of the last put, `null` when `terms` is.
     pub terms_published_at: Option<i64>,
+    /// The challenge the last put consumed, 32 bytes, hex; `null` for an entry written before the
+    /// directory kept it.
+    pub signed_challenge: Option<String>,
+    /// The last put's BIP340 signature, 64 bytes, hex, over the put action, the entry's `pubkey`,
+    /// the challenge, the name and the terms (the core's `directory_message`); `null` when
+    /// `signed_challenge` is.
+    pub signature: Option<String>,
     /// Unix seconds.
     pub created_at: i64,
     /// Unix seconds.

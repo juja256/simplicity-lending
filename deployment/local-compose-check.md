@@ -26,7 +26,7 @@ wallet signing, loan creation or asset-registry submission was performed.
 | Migrations | All three applied successfully: base tables, private offers, lender directory. Migration service exited 0. |
 | PostgreSQL/API/web | Healthy. `/api/health` and `/api/ready` returned 200. |
 | Public and private APIs | `/api/offers?limit=1`, `/api/private/candidates?limit=1` and `/api/private/directory` returned 200 with JSON. |
-| SPA deep link | `/app/private` returned the app shell with `Cache-Control: no-cache`. |
+| SPA deep link | `/app/private` returned the app shell with `Cache-Control: no-cache`. That route is gone; the deep links to check now are `/lend` and `/borrow`. |
 | Static assets | JS and both LWK/private-lending WASM assets had gzip and immutable cache headers. WASM MIME type was `application/wasm`; a missing asset returned 404 rather than HTML. |
 | SSE | `/api/events` returned `text/event-stream` and delivered an unbuffered keep-alive at 15 seconds. A real indexed-block event was not observed. |
 | Browser | Docker-served dashboard rendered; “Open private loans” navigated correctly; disconnected private page worked; wallet picker offered Jade TESTNET and Seed phrase DEMO ONLY. No wallet was connected. |

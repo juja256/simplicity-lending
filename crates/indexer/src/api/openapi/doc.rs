@@ -130,6 +130,16 @@ mod tests {
     }
 
     #[test]
+    fn openapi_entry_carries_its_signature() {
+        let spec = ApiDoc::openapi();
+        let schemas = spec.components.expect("components").schemas;
+        let entry = serde_json::to_value(&schemas["DirectoryEntry"]).expect("serialize");
+        for field in ["signed_challenge", "signature"] {
+            assert!(entry["properties"].get(field).is_some(), "{field}");
+        }
+    }
+
+    #[test]
     fn openapi_operation_ids_are_unique() {
         let spec = ApiDoc::openapi();
         let mut seen = std::collections::HashMap::<String, String>::new();

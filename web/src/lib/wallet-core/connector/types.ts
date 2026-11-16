@@ -1,4 +1,4 @@
-import type { Pset, Wollet, WolletDescriptor } from 'lwk_wasm'
+import type { Pset, WolletDescriptor } from 'lwk_wasm'
 
 import type { ConnectionStatus, WalletCoin, WalletType } from '../types'
 
@@ -18,7 +18,6 @@ export interface WalletConnector {
   signPset(pset: Pset): Promise<WalletRequest<Pset>>
   isConnected: boolean
   getConnectionStatus(): Promise<ConnectionStatus>
-  getVerifiedReceiveAddress?(variant: WalletType, wollet: Wollet): Promise<string>
 
   getCoins?(assetIds: string[]): Promise<WalletCoin[]>
   receiveAddress?(): string | null

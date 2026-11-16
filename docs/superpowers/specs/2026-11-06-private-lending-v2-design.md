@@ -27,8 +27,10 @@ Builds on [the v1 design](2026-10-28-private-lending-design.md) and
      between one user's loans. `wollet.address(null)` (the last unused address) keeps the gap
      limit safe.
 
-3. **Add partial repayment, using Bulletproofs++ (BP++) proofs. Both (a) and (b) are in v2,
-   decided 2026-11-12.**
+3. **Add partial repayment, using Bulletproofs++ (BP++) proofs. (a) is in v2; (b) is postponed
+   until the user brings it back, decided 2026-11-14 (it was in v2 from 2026-11-12).**
+   The demo repays in installments without releasing collateral: (a) needs no zero-knowledge
+   proof and keeps the contract small.
    v1 reserves the partial-repayment branch and always fails it: releasing collateral in
    proportion to a hidden amount needs a zero-knowledge proof.
    - Split in two. (a) Installments only reduce the debt; the collateral stays locked until the
@@ -247,14 +249,15 @@ professional tool. Choices marked *(proposed)* were not discussed and need confi
 
 ## Scope of v2 (decided 2026-11-12)
 
-- In v2: items 1, 2, 3 (a and b), 6, 7, 8, 9 and 10. Item 4 needs no work beyond item 10's
-  console, which keeps hiding acceptance after expiry. Item 5 comes after v2.
+- In v2: items 1, 2, 3(a), 6, 7, 8, 9 and 10. Item 4 needs no work beyond item 10's console,
+  which keeps hiding acceptance after expiry. Item 5 comes after v2. Item 3(b) is postponed until
+  the user brings it back (decided 2026-11-14).
 - No migration: the app knows only the v2 contract, and loans made on testnet with v1 are
   dropped.
 - Items 1 and 3(a) both change `private_lending.simf`, so they share one contract revision: the
-  program's CMR, the parity script and the end-to-end run change once. Item 3(b) needs a research
-  spike first and gets a second revision if it is feasible; with no migration, a second revision
-  costs only another parity and end-to-end run.
+  program's CMR, the parity script and the end-to-end run change once. Item 3(b), when it comes
+  back, needs a research spike first and gets a second revision if it is feasible; with no
+  migration, a second revision costs only another parity and end-to-end run.
 - Item 6's creation message changes the terms encoding. Item 1's salt changes it too only if the
   salt is carried in the terms instead of derived from the offer's shared secret; if so, the two
   share one version bump.

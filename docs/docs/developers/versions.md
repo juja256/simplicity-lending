@@ -4,7 +4,8 @@ description: The toolchain this repository is built and tested with.
 
 # Versions
 
-These are the versions the repository is built and tested with. [Build](./build.md) is where they are installed.
+These are the versions the repository is built and tested with. [Build](./build.md) is where they
+are installed.
 
 | Tool | Version |
 | --- | --- |
@@ -16,4 +17,6 @@ These are the versions the repository is built and tested with. [Build](./build.
 | PostgreSQL | 16 in both compose files. The indexer runs on 14 or newer, which is what CI uses. |
 | nginx | 1.27, in the root compose file. |
 
-Simplex is the compiler and test runner for the SimplicityHL sources in `crates/contracts/simf/`. It is a separate install from the Rust toolchain. [Simplicity](../simplicity.md) explains what those sources are.
+Simplex is the compiler and test runner for the SimplicityHL sources in `crates/contracts/simf/`. It
+is a separate install from the Rust toolchain. [Simplicity](../simplicity.md) explains what those
+sources are.

@@ -74,6 +74,13 @@ interface PrivateOfferActionShellProps<TSummary> extends PrivateOfferActionModal
   /** Shown under the offer details, such as why the action is disabled. */
   notice?: ReactNode
   build: (fresh: FreshOffer) => Promise<UpdatedPset<TSummary> | AsyncUpdatedPset<TSummary>>
+  /**
+   * Must resolve before the transaction is broadcast, after signing and on a retry, such as a
+   * check of the tip: when it throws, nothing is broadcast.
+   */
+  beforeBroadcast?: () => Promise<void>
+  /** Why a saved transaction can no longer be broadcast: the modal offers only "Discard". */
+  unsentBlockedNote?: string | null
 }
 
 function OfferDetails({
@@ -90,10 +97,16 @@ function OfferDetails({
 
   const rows = useMemo<DetailRow[]>(() => {
     const counterparty = counterpartyOf(item)
-    return [
-      { label: 'Offer', value: truncateAddress(item.txid), copyValue: item.txid },
+    // The borrower app says "proposal" and "lender key"; its loans list shows the status.
+    const isBorrower = counterparty.role === 'lender'
+    const rows: DetailRow[] = [
       {
-        label: counterparty.role === 'borrower' ? 'Borrower' : 'Lender',
+        label: isBorrower ? 'Proposal' : 'Offer',
+        value: truncateAddress(item.txid),
+        copyValue: item.txid,
+      },
+      {
+        label: isBorrower ? 'Lender key' : 'Borrower',
         value: <KeyFingerprint fingerprint={counterparty.fingerprint} name={counterpartyName} />,
       },
       { label: 'Collateral', value: formatCollateralDisplay(terms.collateralAmount) },
@@ -104,9 +117,14 @@ function OfferDetails({
         value: formatPrincipalAmount(terms.interest),
         tooltip: 'The repayment minus the principal.',
       },
-      { label: 'Expiry Block', value: expiryLabel(terms.loanExpirationTime, status, tipHeight) },
-      { label: 'Status', value: <OfferStatusChip status={status} /> },
+      {
+        label: isBorrower ? 'Term ends at block' : 'Expiry block',
+        value: expiryLabel(terms.loanExpirationTime, status, tipHeight),
+      },
     ]
+    return isBorrower
+      ? rows
+      : [...rows, { label: 'Status', value: <OfferStatusChip status={status} /> }]
   }, [
     item,
     terms,
@@ -135,6 +153,7 @@ export default function PrivateOfferActionShell<TSummary>({
   kind,
   requires,
   build,
+  beforeBroadcast,
   ...shell
 }: PrivateOfferActionShellProps<TSummary>) {
   const { syncWallet, getLendingKey } = useWallet()
@@ -146,19 +165,24 @@ export default function PrivateOfferActionShell<TSummary>({
     // The opened offer holds the offer's secrets: freed once the transaction is finalized.
     const held: { offer?: VerifiedOffer } = {}
     try {
-      return await run({ kind, offerTxid: item.txid }, async () => {
-        await syncInSession(getLendingKey, syncWallet)
-        const candidate = await fetchPrivateCandidate(item.txid, PRIVATE_API_BASE_URL)
-        const utxo = unspentUtxo(candidate, requires)
-        if (!utxo) {
-          throw new Error(
-            `The indexer lists no unspent ${PRIVATE_UTXO_LABEL[requires]} for this offer`,
-          )
-        }
-        const deps = await getDeps()
-        held.offer = await loadOffer(deps, item.txid, item.role)
-        return build({ deps, offer: held.offer, candidate, utxo })
-      })
+      return await run(
+        { kind, offerTxid: item.txid },
+        async () => {
+          await syncInSession(getLendingKey, syncWallet)
+          const candidate = await fetchPrivateCandidate(item.txid, PRIVATE_API_BASE_URL)
+          const utxo = unspentUtxo(candidate, requires)
+          if (!utxo) {
+            throw new Error(
+              `The indexer no longer lists this ${PRIVATE_UTXO_LABEL[requires]} as open: it ` +
+                'may have changed since the page loaded.',
+            )
+          }
+          const deps = await getDeps()
+          held.offer = await loadOffer(deps, item.txid, item.role)
+          return build({ deps, offer: held.offer, candidate, utxo })
+        },
+        beforeBroadcast,
+      )
     } finally {
       held.offer?.opened.free()
     }
@@ -170,6 +194,7 @@ export default function PrivateOfferActionShell<TSummary>({
       isOpen={isOpen}
       unsentTx={unsentTx}
       execute={execute}
+      beforeBroadcast={beforeBroadcast}
       onClose={onClose}
     >
       <OfferDetails item={item} counterpartyName={counterpartyName} />

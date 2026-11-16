@@ -31,3 +31,8 @@ src/wasm/
 
 # Private lending e2e state
 .e2e-private/
+
+# Testnet demo (`pnpm demo:testnet`): screenshots and logs, and Playwright's output
+.demo-output/
+test-results/
+playwright-report/
