@@ -352,7 +352,8 @@ It needs:
 - the e2e set up and funded (Setup, above). The demo first runs the `wallets` stage, which exits
   1 naming any shortfall, but it checks only what the e2e stages without a `confirmed` record
   need: not `short-proposal`, which checks its own need when the demo runs it, and none of the
-  demo's own transactions. On top of those, the borrower needs the demo loan's collateral,
+  demo's own transactions. On top of those, the borrower needs the short proposal's creation,
+  42 000 tL-sats (as any creation in `STAGE_NEEDS`), and the demo loan's collateral,
   0.00001 tL-BTC, and its interest; the lender needs the demo loan's principal, 0.1 TEST, and the
   short proposal's, 1 000 TEST units; and each needs the fees of its own transactions, three for
   the borrower and four for the lender;

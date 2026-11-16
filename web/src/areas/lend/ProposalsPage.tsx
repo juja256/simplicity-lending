@@ -104,7 +104,7 @@ function ProposalRow({
 
   return (
     <tr className='hover:bg-[var(--table-row-hover)]'>
-      <Cell className='whitespace-nowrap' title={`Confirmed in block #${createdAt}`}>
+      <Cell className='whitespace-nowrap' title={`Block #${createdAt}, as the indexer reports it`}>
         {tipHeight === 0 ? `#${createdAt}` : age < 1 ? 'Just now' : `${formatBlockSpan(age)} ago`}
       </Cell>
       <Cell>

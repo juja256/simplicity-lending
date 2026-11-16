@@ -26,7 +26,10 @@ function sentence(label: string): string {
 }
 
 interface TermsBadgeProps {
-  /** The proposal against the lender's terms; undefined until they are loaded. */
+  /**
+   * The proposal against the lender's terms; undefined until the terms are loaded and esplora
+   * gives the block the proposal's creation confirmed in.
+   */
   verdict: TermsVerdict | undefined
   /** The check cannot run: the lender's terms, or the app's loan rules, could not be loaded. */
   failed?: boolean
