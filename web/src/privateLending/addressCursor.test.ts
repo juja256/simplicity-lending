@@ -23,12 +23,19 @@ function fakeWollet() {
 const names = (addresses: Address[]) => addresses.map(address => address.toString())
 
 describe('AddressCursor', () => {
+  it("starts receiving past the wallet's last unused index, the wallet button's", () => {
+    const wollet = fakeWollet()
+    wollet.lastUnused.external = 4
+    const cursor = new AddressCursor()
+    expect(cursor.nextReceive(wollet).toString()).toBe('external/5')
+  })
+
   it('gives two receive calls two indices', () => {
     const wollet = fakeWollet()
     wollet.lastUnused.external = 4
     const cursor = new AddressCursor()
-    expect(cursor.nextReceive(wollet).toString()).toBe('external/4')
     expect(cursor.nextReceive(wollet).toString()).toBe('external/5')
+    expect(cursor.nextReceive(wollet).toString()).toBe('external/6')
   })
 
   it("follows the wallet's last unused index once it moves past the ones handed out", () => {
@@ -38,7 +45,7 @@ describe('AddressCursor', () => {
     cursor.nextReceive(wollet)
     cursor.nextReceive(wollet)
     wollet.lastUnused.external = 9
-    expect(cursor.nextReceive(wollet).toString()).toBe('external/9')
+    expect(cursor.nextReceive(wollet).toString()).toBe('external/10')
   })
 
   it('never gives a fresh wallet its address 0, its identity', () => {
@@ -61,7 +68,7 @@ describe('AddressCursor', () => {
     wollet.lastUnused.external = 3
     wollet.lastUnused.internal = 3
     const cursor = new AddressCursor()
-    expect(cursor.nextReceive(wollet).toString()).toBe('external/3')
+    expect(cursor.nextReceive(wollet).toString()).toBe('external/4')
     expect(names(cursor.nextChange(wollet, 1))).toEqual(['internal/3'])
   })
 
@@ -70,11 +77,28 @@ describe('AddressCursor', () => {
     wollet.lastUnused.external = 10
     const cursor = new AddressCursor()
     const bound = 10 + GAP_LIMIT - 1
-    const handedOut = Array.from({ length: GAP_LIMIT }, () => cursor.nextReceive(wollet).toString())
-    expect(new Set(handedOut).size).toBe(GAP_LIMIT)
+    // From the last unused index plus one to the bound.
+    const handedOut = Array.from({ length: GAP_LIMIT - 1 }, () =>
+      cursor.nextReceive(wollet).toString(),
+    )
+    expect(new Set(handedOut).size).toBe(GAP_LIMIT - 1)
+    expect(handedOut[0]).toBe('external/11')
     expect(handedOut.at(-1)).toBe(`external/${bound}`)
     expect(cursor.nextReceive(wollet).toString()).toBe(`external/${bound}`)
     expect(cursor.nextReceive(wollet).toString()).toBe(`external/${bound}`)
+  })
+
+  it('moves on from the bound once a scan raises the last unused index', () => {
+    const wollet = fakeWollet()
+    wollet.lastUnused.external = 10
+    const cursor = new AddressCursor()
+    const bound = 10 + GAP_LIMIT - 1
+    for (let i = 0; i < GAP_LIMIT + 2; i += 1) cursor.nextReceive(wollet)
+    expect(cursor.nextReceive(wollet).toString()).toBe(`external/${bound}`)
+    // A scan saw a transaction to index 12: LWK's last unused index is 13.
+    wollet.lastUnused.external = 13
+    expect(cursor.nextReceive(wollet).toString()).toBe(`external/${bound + 1}`)
+    expect(cursor.nextReceive(wollet).toString()).toBe(`external/${bound + 2}`)
   })
 
   it('repeats the last change addresses at the bound, still two apart from each other', () => {

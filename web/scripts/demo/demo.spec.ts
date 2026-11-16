@@ -298,7 +298,8 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     await expect(loanRow).toBeVisible({ timeout: CHAIN_TIMEOUT })
     await expect(ownLoan).toContainText(`Waiting for ${LENDER_NAME}`)
     await expect(ownLoan.getByRole('button', { name: 'Cancel' })).toBeVisible()
-    // The proposal used the shown address: the button moved on to the next one.
+    // The proposal received at an address past the shown one, which stays the user's: once the
+    // wallet's scan sees the proposal, the button moves on past both.
     await expect(walletButton).not.toHaveText(walletAddress, { timeout: 5 * MINUTE })
     await shot(borrower, 'borrow-loans-waiting')
   })

@@ -336,7 +336,8 @@ part:
    summary sentence follows the typing, an APR one basis point low and a collateral one base unit
    low each show their error and keep "Lock collateral and send" disabled; at the minimums the
    proposal is sent, the app moves to `/borrow/loans`, which shows it "Waiting for E2E Lender",
-   and the wallet button moves on to a new address;
+   and once the wallet's scan sees the proposal, the wallet button moves on to a new address (the
+   proposal received at an address past the one the button showed);
 3. `pnpm e2e:private short-proposal` runs, and the lender's proposals show it as "Term shorter
    than 1 day"; as its term is 15 blocks, the lender accepts it at once, after ticking "Accept
    outside my terms";
