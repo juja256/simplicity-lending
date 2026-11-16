@@ -133,8 +133,9 @@ pub struct DirectoryEntry {
     /// The challenge the last put consumed, 32 bytes, hex; `null` for an entry written before the
     /// directory kept it.
     pub signed_challenge: Option<String>,
-    /// The last put's BIP340 signature over the challenge, the name and the terms, 64 bytes, hex;
-    /// `null` when `signed_challenge` is.
+    /// The last put's BIP340 signature, 64 bytes, hex, over the put action, the entry's `pubkey`,
+    /// the challenge, the name and the terms (the core's `directory_message`); `null` when
+    /// `signed_challenge` is.
     pub signature: Option<String>,
     /// Unix seconds.
     pub created_at: i64,

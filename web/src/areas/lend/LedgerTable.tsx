@@ -17,7 +17,10 @@ export interface LedgerColumn {
   label: string
   /** Amounts align right. */
   align?: 'right'
-  /** A column whose cells explain themselves, such as the actions: its label is for readers only. */
+  /**
+   * A column whose cells explain themselves, such as the actions: its label is for screen readers
+   * only.
+   */
   hideLabel?: boolean
 }
 
