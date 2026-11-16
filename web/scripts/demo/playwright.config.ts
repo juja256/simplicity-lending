@@ -30,7 +30,8 @@ export default defineConfig({
   // The scripts import the app's modules by its `@/` alias.
   tsconfig: path.join(webRoot, 'tsconfig.node.json'),
   outputDir: path.join(webRoot, 'test-results'),
-  // Liquid makes a block a minute; the whole run waits for about 40 of them.
+  // Liquid makes a block a minute; a run waits for about 20 of them. The limit leaves room for
+  // slow blocks and a slow esplora.
   timeout: 120 * 60_000,
   expect: { timeout: 30_000 },
   workers: 1,
