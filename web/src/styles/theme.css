@@ -69,30 +69,13 @@
 }
 
 :root {
-  --z-base: 0;
-  --z-dropdown: 1000;
   --z-sticky: 1100;
-  --z-overlay: 1200;
   --z-modal: 1300;
-  --z-popover: 1400;
-  --z-tooltip: 1600;
 }
 
-@utility z-dropdown {
-  z-index: var(--z-dropdown);
-}
 @utility z-sticky {
   z-index: var(--z-sticky);
 }
-@utility z-overlay {
-  z-index: var(--z-overlay);
-}
 @utility z-modal {
   z-index: var(--z-modal);
-}
-@utility z-popover {
-  z-index: var(--z-popover);
-}
-@utility z-tooltip {
-  z-index: var(--z-tooltip);
 }

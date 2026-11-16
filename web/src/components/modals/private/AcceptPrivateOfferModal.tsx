@@ -32,7 +32,9 @@ function verdictReasons(verdict: Exclude<TermsVerdict, { kind: 'within' }>): str
     : ['your published terms do not verify, so it cannot be checked against them']
 }
 
-/** The proposal against the lender's terms; outside them, acceptance waits for the lender's tick. */
+/**
+ * The proposal against the lender's terms; outside them, acceptance waits for the lender's tick.
+ */
 function TermsSection({
   verdict,
   acceptOutside,
