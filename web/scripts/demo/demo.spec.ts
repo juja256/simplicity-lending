@@ -1,7 +1,7 @@
 // The scripted testnet demo of both areas (`pnpm demo:testnet`, see `web/README.md`): the lender
 // console and the borrower app, each in its own browser context with one of the e2e's seed
 // wallets, through a whole loan on Liquid testnet and a short one that the lender liquidates.
-// It broadcasts real testnet transactions and waits for their blocks, so one run takes 30 to 60
+// It broadcasts real testnet transactions and waits for their blocks, so one run takes about 20
 // minutes. Screenshots of every page of both areas go to `.demo-output/` (git-ignored).
 /// <reference lib="dom" />
 import { spawn } from 'node:child_process'
@@ -308,7 +308,8 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     lender.getByRole('main').getByRole('row').filter({ hasText: text })
 
   await test.step('3. a 15-block proposal shows as "term shorter than 1 day"', async () => {
-    // An earlier demo's short proposal expired long ago: the stage makes a new one.
+    // An earlier demo's short proposal expired long ago: its confirmed record is removed here,
+    // and the stage removes an unfinished one that expired, so the stage makes a new one.
     if (getRecord('short-proposal')?.status === 'confirmed') removeRecord('short-proposal')
     await runE2e('short-proposal')
 

@@ -2067,6 +2067,7 @@ const SHORT_PROPOSAL_BLOCKS = 15
  * stage's terms it breaks the shortest term only.
  */
 async function shortProposalStage(ctx: Context): Promise<void> {
+  await dropExpiredShortProposal(ctx)
   const txid = await submitCreation(
     ctx,
     'short-proposal',
@@ -2092,6 +2093,27 @@ async function shortProposalStage(ctx: Context): Promise<void> {
   }
   out("against the e2e lender's terms it breaks the shortest term only")
   out('\nshort-proposal: ok')
+}
+
+/**
+ * Removes an unfinished `short-proposal` record whose offer can no longer be accepted (the tip at
+ * or past its expiry), so the stage makes a new one: resumed, it would at best confirm a proposal
+ * the demo cannot accept, and the demo would wait for its timeout. A confirmed record is the
+ * demo's to remove.
+ */
+async function dropExpiredShortProposal(ctx: Context): Promise<void> {
+  const record = getRecord('short-proposal')
+  if (record === undefined || record.status === 'confirmed') return
+  const opened = wasm.openCreationAsLender(ctx.wallets.lender.lendingKey, record.hex)
+  const expiry = opened.loanExpirationTime()
+  opened.free()
+  const tip = await ctx.chain.tipHeight()
+  if (tip < expiry) return
+  out(
+    `short-proposal: the unfinished ${record.txid} expired at block ${expiry} (tip ${tip}); ` +
+      'making a new one',
+  )
+  removeRecord('short-proposal')
 }
 
 /** An e2e offer, which the borrower created for the lender. */
