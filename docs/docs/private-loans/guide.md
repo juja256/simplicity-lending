@@ -101,8 +101,12 @@ restart when the lender accepts.
 1. Publish your terms on the console's **Terms** page, as described above.
 2. Fund your wallet with the principal asset and testnet L-BTC for fees.
 3. Under **Proposals**, each proposal addressed to you shows its borrower, principal, collateral,
-   APR and term, and whether it is **Within your terms** or **Outside your terms**. An outside one
-   names each term it breaks. The app verifies a proposal before enabling an action.
+   APR and term, and how it compares with your terms: a **Within your terms** badge, or one badge
+   for each term it breaks, naming your figure (such as "APR below 6 %" or "Term shorter than 30
+   days"). When it cannot be checked, the badge says why: **No terms published**, **Your terms do
+   not verify**, or **Not checked** when your terms or the app's loan rules could not be loaded.
+   The term, the APR and the badge wait until the proposal's creation is confirmed. The app
+   verifies a proposal before enabling an action.
 4. Select **Review**, check the amounts, the borrower, and the expiry block, then select **Accept
    and lend** and approve signing. You can accept a proposal outside your terms after the warning.
    Wait for confirmation and indexing. Acceptance is not offered once a proposal's expiry has
@@ -140,7 +144,9 @@ notes](./protocol.md#expiry-and-review-status) for the review scope.
 
 If signing succeeds but broadcast fails, the app saves the finalized transaction in this browser and
 shows a saved-but-not-broadcast warning. **Broadcast again** resends the same transaction with the
-same transaction ID; it does not create or sign another loan.
+same transaction ID; it does not create or sign another loan. A saved proposal that would now count
+fewer days than you chose, or a saved acceptance whose proposal's term has passed, is not sent
+again: the app offers only **Discard** for it.
 
 Preserve the browser profile and its site data while a transaction needs recovery. A different
 profile does not have that local retry record. Check the transaction ID in the explorer if the

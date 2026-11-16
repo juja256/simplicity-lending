@@ -83,6 +83,27 @@ against the terms are not shown, and it cannot be reviewed.
 A dishonest or unavailable indexer can still hide data, delay discovery, or prevent progress.
 Verification protects the transaction path; it does not guarantee availability or fresh UI counts.
 
+## Directory signatures
+
+A lender publishes its display name and terms by signing them together with its lending key: the
+signature covers the action, the key, a single-use challenge from the indexer, the name and the
+terms. The indexer serves each entry with the challenge and the signature of its last put, and the
+browser checks every entry against its key. An entry is verified when the signature verifies for
+the served key, name and terms. It is unsigned when the indexer serves no challenge or signature,
+as for an entry written before the indexer kept them, and invalid when the signature does not
+verify or the terms cannot be read. The publication time is not signed.
+
+Only verified entries are used. Borrowers see verified lenders only, and names shown next to a key
+come from verified entries only; an unsigned or invalid entry is hidden from borrowers and only
+counted. The lender's console checks proposals against its own entry's terms only when that entry
+verifies, and pre-fills its terms form only from such an entry.
+
+A valid signature proves that the key signed this name and these terms once. It does not prove
+that the entry is the key's latest put: nothing a reader can check orders two puts, so an indexer
+can serve an older put of the same key unnoticed. Borrowers then see the lender's older terms and
+name, and the lender's own console checks proposals against those older terms. Freshness rests on
+the indexer.
+
 ## Client state and implementation map
 
 Decrypted display terms are held in the session-scoped query cache and removed when that session
