@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react'
+
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import {
   findPairTerms,
@@ -6,6 +8,10 @@ import {
   maxPrincipalPerCollateralToDisplay,
 } from '@/privateLending/lenderTerms'
 import { formatAmount } from '@/utils/format'
+
+function Nowrap({ children }: { children: ReactNode }) {
+  return <span className='whitespace-nowrap'>{children}</span>
+}
 
 interface PairTermsSummaryProps {
   /**
@@ -36,23 +42,28 @@ export default function PairTermsSummary({ verifiedTerms, unverified }: PairTerm
     )
   }
 
-  const rows: [string, string][] = [
+  const rate = maxPrincipalPerCollateralToDisplay(
+    BigInt(pair.max_principal_per_collateral),
+    principal.decimals,
+    collateral.decimals,
+  )
+  const maxPrincipal = formatAmount(BigInt(pair.max_principal), principal.decimals)
+  // Each amount stays on one line with its unit.
+  const rows: [string, ReactNode][] = [
     ['Least APR', formatAprBps(pair.min_apr_bps)],
     [
       'Most principal',
-      `${maxPrincipalPerCollateralToDisplay(
-        BigInt(pair.max_principal_per_collateral),
-        principal.decimals,
-        collateral.decimals,
-      )} ${principal.symbol} per ${collateral.symbol}`,
+      <>
+        <Nowrap>{`${rate} ${principal.symbol}`}</Nowrap> per <Nowrap>{collateral.symbol}</Nowrap>
+      </>,
     ],
     ['Term', `${pair.min_term_days} to ${pair.max_term_days} days`],
     [
       'Principal',
-      `${formatAmount(BigInt(pair.min_principal), principal.decimals)} to ${formatAmount(
-        BigInt(pair.max_principal),
-        principal.decimals,
-      )} ${principal.symbol}`,
+      <>
+        {formatAmount(BigInt(pair.min_principal), principal.decimals)} to{' '}
+        <Nowrap>{`${maxPrincipal} ${principal.symbol}`}</Nowrap>
+      </>,
     ],
   ]
   return (
