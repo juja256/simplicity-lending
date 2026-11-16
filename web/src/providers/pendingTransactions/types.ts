@@ -9,6 +9,16 @@ export type PrivateTxKind =
   | 'private_claim_repayment'
   | 'private_liquidate_offer'
 
+/**
+ * The term a borrower chose for a creation, saved with it: every broadcast of the creation, a
+ * retry's included, is refused once it could no longer count `termDays` (`creationSendable`).
+ */
+export interface CreationTerm {
+  /** The creation's expiry, a block height (`proposalExpiry` of the tip and `termDays`). */
+  loanExpirationTime: number
+  termDays: number
+}
+
 /** A private lending transaction, saved finalized before its first broadcast. */
 export interface PrivateTxRecord {
   txid: string
@@ -27,6 +37,8 @@ export interface PrivateTxRecord {
   /** Set once confirmations first reach the finalized threshold. */
   finalizedAt?: number
   errorMessage?: string
+  /** A creation's term; absent for other kinds, and for a creation saved before it was kept. */
+  creationTerm?: CreationTerm
 }
 
 export interface SavePrivateTxInput {
@@ -34,6 +46,7 @@ export interface SavePrivateTxInput {
   kind: PrivateTxKind
   offerTxid: string
   txHex: string
+  creationTerm?: CreationTerm
 }
 
 export interface PendingTransactionsContextValue {

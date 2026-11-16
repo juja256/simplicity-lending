@@ -13,7 +13,12 @@ import type {
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import { repaymentBorrowerNftOutpoint, unspentUtxo } from '@/privateLending/candidate'
 import type { PrivateOfferItem, PrivateOfferTerms } from '@/privateLending/hooks/usePrivateOffers'
-import type { PrivateTxKind, PrivateTxRecord } from '@/providers/pendingTransactions/types'
+import { proposalExpiryIsStale } from '@/privateLending/lenderTerms'
+import type {
+  CreationTerm,
+  PrivateTxKind,
+  PrivateTxRecord,
+} from '@/providers/pendingTransactions/types'
 import { formatBlockSpan, formatTermLeft } from '@/utils/format'
 
 /** A key fingerprint in groups of four characters: `1aa0 5299 d34b b9f5`. */
@@ -352,6 +357,48 @@ export function lenderSendable(
     if (record.kind !== 'private_accept_offer') return 'yes'
     if (tipHeight === 0) return 'unknown'
     return canStillAccept(item.terms, tipHeight) ? 'yes' : 'expired'
+  }
+}
+
+/** Why a saved creation can no longer be sent: the chain moved on while it waited. */
+export const STALE_CREATION_NOTE =
+  'The chain moved on since it was signed: sent now, it would run fewer days than you chose.'
+/** Why a saved creation without its term cannot be sent. */
+export const UNCHECKED_CREATION_NOTE =
+  'It was saved without its term, so it cannot be checked before it is sent.'
+
+/**
+ * Whether the borrower's saved creation may be broadcast at `tipHeight`, by the rule the build
+ * applies (`proposalExpiryIsStale`): `expired` once a confirmation in the next block would count
+ * fewer days than the borrower chose, as the lender could then refuse it, or once its term passed,
+ * when the lender can never accept it. A creation saved without its term cannot be checked, so it
+ * is `expired` too; `unknown` while the tip is not known.
+ */
+export function creationSendable(term: CreationTerm | undefined, tipHeight: number): Sendable {
+  if (!(tipHeight > 0)) return 'unknown'
+  if (term === undefined) return 'expired'
+  return proposalExpiryIsStale(term.loanExpirationTime, tipHeight, term.termDays)
+    ? 'expired'
+    : 'yes'
+}
+
+/** Why a saved creation that `creationSendable` finds `expired` cannot be sent. */
+export function creationExpiredNote(term: CreationTerm | undefined): string {
+  return term === undefined ? UNCHECKED_CREATION_NOTE : STALE_CREATION_NOTE
+}
+
+/**
+ * Throws a plain message for the borrower unless `creationSendable` says `yes`: before a creation
+ * is first broadcast, and again before every retry, with the tip read at that moment.
+ */
+export function checkCreationSendable(term: CreationTerm | undefined, tipHeight: number): void {
+  switch (creationSendable(term, tipHeight)) {
+    case 'unknown':
+      throw new Error("The chain tip is not known, so the proposal's term cannot be checked.")
+    case 'expired':
+      throw new Error(`Not sent. ${creationExpiredNote(term)} Discard it and propose again.`)
+    case 'yes':
+      return
   }
 }
 

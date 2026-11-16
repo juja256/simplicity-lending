@@ -26,6 +26,8 @@ import {
   borrowerStatus,
   borrowerView,
   counterpartyOf,
+  creationExpiredNote,
+  creationSendable,
   dueText,
   isOpenedOffer,
   type OfferActionState,
@@ -33,6 +35,8 @@ import {
   type OfferTxState,
   offerTxState,
   type OpenedOfferItem,
+  type Sendable,
+  TIP_UNKNOWN_NOTE,
   usesConfiguredAssets,
 } from '@/privateLending/offerView'
 import type { PrivateTxKind, PrivateTxRecord } from '@/providers/pendingTransactions/types'
@@ -226,17 +230,37 @@ function LoanRow({ item, lenderName, tipHeight, state, onOpen }: LoanRowProps) {
   )
 }
 
-/** A proposal this browser made that the scan has not found yet. */
+/** What a new proposal that was signed but not sent says, by `creationSendable`. */
+function unsentNote(record: PrivateTxRecord, sendable: Sendable): string {
+  switch (sendable) {
+    case 'yes':
+      return 'It was signed but not sent.'
+    case 'unknown':
+      return `It was signed but not sent. ${TIP_UNKNOWN_NOTE}`
+    case 'expired':
+      return `It was signed but not sent. ${creationExpiredNote(record.creationTerm)}`
+  }
+}
+
+/**
+ * A proposal this browser made that the scan has not found yet. One signed but not sent gets
+ * "Broadcast again" while it can still count the days chosen (`creationSendable`), only "Discard"
+ * once it cannot, and nothing while the tip is not known.
+ */
 function NewProposalRow({
   txState,
+  tipHeight,
   onBroadcastAgain,
 }: {
   txState: OfferTxState<'private_create_offer'>
+  tipHeight: number
   onBroadcastAgain: () => void
 }) {
+  const { removePrivateTx } = usePendingTransactions()
   const { record } = txState
   const isUnsent = txState.state === 'unsent'
   const isConfirmed = record.confirmationStatus !== 'processing'
+  const sendable = creationSendable(record.creationTerm, tipHeight)
 
   return (
     <li className='border-separator flex flex-col gap-3 border-b py-5 first:pt-0 last:border-b-0'>
@@ -247,14 +271,19 @@ function NewProposalRow({
         </StatusLine>
       </div>
       <div className='flex flex-wrap items-center gap-x-4 gap-y-2'>
-        {isUnsent && (
+        {isUnsent && sendable === 'yes' && (
           <UiButton variant='secondary' onPress={onBroadcastAgain}>
             Broadcast again
           </UiButton>
         )}
+        {isUnsent && sendable === 'expired' && (
+          <UiButton variant='secondary' onPress={() => void removePrivateTx(record.txid)}>
+            Discard
+          </UiButton>
+        )}
         <p className='text-muted min-w-0 flex-1 basis-48 text-sm'>
           {isUnsent
-            ? 'It was signed but not sent.'
+            ? unsentNote(record, sendable)
             : isConfirmed
               ? 'It is confirmed, and shows here with its lender once the indexer lists it.'
               : 'It waits for its confirmation.'}{' '}
@@ -422,6 +451,7 @@ export default function MyLoansPage() {
             <NewProposalRow
               key={txState.record.txid}
               txState={txState}
+              tipHeight={tipHeight}
               onBroadcastAgain={() => open({ kind: 'create', unsentTx: txState.record })}
             />
           ))}

@@ -30,6 +30,12 @@ export interface PrivateTxShellProps {
   execute: () => Promise<{ txid: string }>
   /** Must resolve before a saved transaction is broadcast again, such as a check of the tip. */
   beforeBroadcast?: () => Promise<void>
+  /**
+   * Why the saved transaction can no longer be broadcast, from the tip the page shows, or null
+   * while it can: the modal then offers only to discard it. `beforeBroadcast` still checks a
+   * fresh tip.
+   */
+  unsentBlockedNote?: string | null
   onClose: () => void
   /** Called on closing after a broadcast went through. */
   onSuccess?: () => void
@@ -61,6 +67,7 @@ export default function PrivateTxShell({
   unsentTx,
   execute,
   beforeBroadcast,
+  unsentBlockedNote = null,
   onClose,
   onSuccess,
   notice,
@@ -84,19 +91,23 @@ export default function PrivateTxShell({
     onError: keepUnsent,
   })
 
-  // A failed broadcast returns to the form, which then offers to broadcast again.
+  // A failed broadcast returns to the form, which then offers to broadcast again, unless the
+  // saved transaction can no longer be sent: then it offers only "Discard".
   const retryStatus: MutationStatus =
     retry.error instanceof PrivateBroadcastError ? 'idle' : retry.status
-  const action: OfferAction =
+  const blocked = unsent !== null && unsentBlockedNote !== null
+  const action: OfferAction | undefined =
     unsent !== null
-      ? {
-          label: 'Broadcast again',
-          eyebrow,
-          summary,
-          status: retryStatus,
-          txid: retry.data,
-          onConfirm: () => retry.mutate(unsent.txid),
-        }
+      ? blocked && retryStatus === 'idle'
+        ? undefined
+        : {
+            label: 'Broadcast again',
+            eyebrow,
+            summary,
+            status: retryStatus,
+            txid: retry.data,
+            onConfirm: () => retry.mutate(unsent.txid),
+          }
       : {
           label,
           variant,
@@ -131,10 +142,14 @@ export default function PrivateTxShell({
               The transaction was signed and saved in this browser, but it was not broadcast
               {unsent.message ? `: ${unsent.message}` : '.'}
             </p>
-            <p>
-              Broadcasting again sends the same transaction. Discard it only if it can no longer be
-              mined, for example because its coins were spent since.
-            </p>
+            {blocked ? (
+              <p>{unsentBlockedNote} It can only be discarded.</p>
+            ) : (
+              <p>
+                Broadcasting again sends the same transaction. Discard it only if it can no longer
+                be mined, for example because its coins were spent since.
+              </p>
+            )}
             <UiButton
               className='self-start'
               variant='ghost'
