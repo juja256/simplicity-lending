@@ -2,7 +2,6 @@ import { NETWORK_CONFIG } from '@/constants/network-config'
 import {
   findPairTerms,
   formatAprBps,
-  formatPublishedAt,
   type LenderTermsInput,
   maxPrincipalPerCollateralToDisplay,
 } from '@/privateLending/lenderTerms'
@@ -11,21 +10,18 @@ import { formatAmount } from '@/utils/format'
 interface PairTermsSummaryProps {
   /**
    * A directory entry's terms as `checkDirectoryEntry` verified them; null when the entry did not
-   * verify, and when it has no terms.
+   * verify, and when there is no entry.
    */
   verifiedTerms: LenderTermsInput | null
-  /**
-   * The entry's `terms_published_at`: unix seconds, null when it has no terms. Leave it out to
-   * show the terms without when they were published.
-   */
-  publishedAt?: number | null
+  /** There is an entry, but it did not verify against its key (unsigned or invalid). */
+  unverified?: boolean
 }
 
 /**
- * A lender's verified terms for the configured pair, and when the indexer says they were
- * published. Terms for other pairs are not shown, nor terms that did not verify.
+ * A lender's verified terms for the configured pair. Terms for other pairs are not shown, nor
+ * terms that did not verify.
  */
-export default function PairTermsSummary({ verifiedTerms, publishedAt }: PairTermsSummaryProps) {
+export default function PairTermsSummary({ verifiedTerms, unverified }: PairTermsSummaryProps) {
   const { collateralAsset: collateral, principalAsset: principal } = NETWORK_CONFIG
   const pair = findPairTerms(verifiedTerms, { collateral, principal })
   if (pair === undefined) {
@@ -33,9 +29,9 @@ export default function PairTermsSummary({ verifiedTerms, publishedAt }: PairTer
       <p className='text-muted text-xs'>
         {verifiedTerms !== null
           ? `No terms for ${principal.symbol} against ${collateral.symbol}.`
-          : publishedAt === null
-            ? 'No terms published.'
-            : 'These terms could not be verified.'}
+          : unverified
+            ? 'These terms could not be verified.'
+            : 'No terms published.'}
       </p>
     )
   }
@@ -59,9 +55,6 @@ export default function PairTermsSummary({ verifiedTerms, publishedAt }: PairTer
       )} ${principal.symbol}`,
     ],
   ]
-  if (publishedAt !== undefined) {
-    rows.push(['Published', publishedAt === null ? '—' : formatPublishedAt(publishedAt)])
-  }
   return (
     <dl className='grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs'>
       {rows.map(([label, value]) => (

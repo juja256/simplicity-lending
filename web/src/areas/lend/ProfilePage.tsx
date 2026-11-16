@@ -216,6 +216,7 @@ function DirectoryListing({ own, remove }: { own: OwnEntry; remove: Directory['r
  */
 export default function ProfilePage() {
   const { own, ownQuery, register, remove } = useDirectory({ ownEntry: true })
+  const identity = useLendingKeyIdentity()
   // The name the key signed: an entry that did not verify shows the fingerprint alone.
   const verifiedName = own?.check?.status === 'verified' ? own.entry?.display_name : undefined
 
@@ -233,13 +234,16 @@ export default function ProfilePage() {
         <LendingKey name={verifiedName} />
       </ProfileSection>
 
-      <ProfileSection title='Display name'>
-        {own === undefined ? (
-          <OwnEntryPending ownQuery={ownQuery} />
-        ) : (
-          <DisplayName own={own} register={register} />
-        )}
-      </ProfileSection>
+      {/* Without the key there is no entry to read: the key's section above says why, once. */}
+      {!identity.isError && (
+        <ProfileSection title='Display name'>
+          {own === undefined ? (
+            <OwnEntryPending ownQuery={ownQuery} />
+          ) : (
+            <DisplayName own={own} register={register} />
+          )}
+        </ProfileSection>
+      )}
 
       {own !== undefined && (
         <ProfileSection title='Directory'>

@@ -28,7 +28,7 @@ function sentence(label: string): string {
 interface TermsBadgeProps {
   /** The proposal against the lender's terms; undefined until they are loaded. */
   verdict: TermsVerdict | undefined
-  /** The lender's terms could not be loaded. */
+  /** The check cannot run: the lender's terms, or the app's loan rules, could not be loaded. */
   failed?: boolean
 }
 

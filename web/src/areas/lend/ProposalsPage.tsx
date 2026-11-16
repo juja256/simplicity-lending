@@ -82,7 +82,7 @@ interface ProposalRowProps {
   figures: ProposalFigures | undefined
   borrowerName: string | undefined
   tipHeight: number
-  ownFailed: boolean
+  checkFailed: boolean
   state: OfferActionState<LenderAction>
   onOpen: (action: LenderAction, item: OpenedOfferItem, unsentTx?: PrivateTxRecord) => void
 }
@@ -92,7 +92,7 @@ function ProposalRow({
   figures,
   borrowerName,
   tipHeight,
-  ownFailed,
+  checkFailed,
   state,
   onOpen,
 }: ProposalRowProps) {
@@ -130,7 +130,7 @@ function ProposalRow({
         {figures === undefined ? MISSING : formatDays(figures.termBlocks / BLOCKS_PER_DAY)}
       </Cell>
       <Cell className='min-w-48'>
-        <TermsBadge verdict={figures?.verdict} failed={ownFailed} />
+        <TermsBadge verdict={figures?.verdict} failed={checkFailed} />
       </Cell>
       {/* Review waits for the check against the lender's terms, which the acceptance shows. */}
       <ActionCell state={state} isDisabled={figures?.verdict === undefined} onOpen={onOpen} />
@@ -158,7 +158,7 @@ export default function ProposalsPage() {
   const { own, ownQuery, lookup } = useDirectory({ ownEntry: true })
   const { data: tipHeight } = useBlockHeight()
   const { privateTxs } = usePendingTransactions()
-  const { data: wasm } = useQuery({
+  const { data: wasm, isError: wasmFailed } = useQuery({
     queryKey: privateLendingWasmQueryKey(),
     queryFn: getPrivateLendingWasm,
     staleTime: Infinity,
@@ -193,6 +193,8 @@ export default function ProposalsPage() {
   const summary = useMemo(() => bookSummary(opened, tipHeight), [opened, tipHeight])
   const unopened = lending.length - opened.length
   const ownFailed = own === undefined && ownQuery.isError
+  // Without the lender's terms or the app's loan rules, no proposal can be checked.
+  const checkFailed = ownFailed || wasmFailed
   const borrowerName = (item: OpenedOfferItem) => lookup(item.terms.borrowerPublicKey)?.display_name
 
   return (
@@ -223,7 +225,7 @@ export default function ProposalsPage() {
 
       <LedgerTable
         offers={offers}
-        caption='Proposals waiting for you'
+        caption='Pending proposals'
         columns={COLUMNS}
         isEmpty={proposals.length === 0}
         loadingText='Scanning for proposals addressed to you…'
@@ -236,7 +238,7 @@ export default function ProposalsPage() {
             figures={figures.get(item.txid)}
             borrowerName={borrowerName(item)}
             tipHeight={tipHeight}
-            ownFailed={ownFailed}
+            checkFailed={checkFailed}
             state={offerActionState(
               privateTxs,
               item,

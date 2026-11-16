@@ -1,13 +1,14 @@
 import { Checkbox } from '@heroui/react'
 import { useId, useMemo, useState } from 'react'
 
+import { useBlockHeight } from '@/api/esplora/hooks'
 import { fetchLatestBlockHeight } from '@/api/esplora/methods'
 import Notice from '@/components/Notice'
 import { OfferStatusChip } from '@/components/OfferStatusChip'
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { buildPrivateAcceptance } from '@/privateLending/flows/acceptance'
-import { checkStillAcceptable } from '@/privateLending/offerView'
+import { canStillAccept, checkStillAcceptable, TERM_PASSED_NOTE } from '@/privateLending/offerView'
 import type { TermsVerdict } from '@/privateLending/proposalCheck'
 import { selectAssetCoins, selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
 import { useWallet } from '@/providers/wallet/useWallet'
@@ -97,6 +98,7 @@ export default function AcceptPrivateOfferModal({
   const { principalAsset } = NETWORK_CONFIG
   const { confirmedBalances } = useWallet()
   const { formatCollateralDisplay, formatPrincipalAmount } = useFormatAmount()
+  const { data: tipHeight } = useBlockHeight()
 
   const insufficientBalance =
     BigInt(confirmedBalances[principalAsset.id] ?? 0) < terms.principalAmount
@@ -105,6 +107,9 @@ export default function AcceptPrivateOfferModal({
   // The acceptance sets no lock time and the covenant does not check the expiry: the tip, read
   // fresh, is checked before the build and again before any broadcast, a retry's included.
   const checkTerm = async () => checkStillAcceptable(terms, await fetchLatestBlockHeight())
+  // A saved acceptance whose term passed can only be discarded: `checkTerm` would refuse it.
+  const unsentBlockedNote =
+    tipHeight > 0 && !canStillAccept(terms, tipHeight) ? TERM_PASSED_NOTE : null
 
   // The indexer must still list the pending offer unspent (`requires`); the builder spends output
   // 3 of the creation the gate verified.
@@ -172,6 +177,7 @@ export default function AcceptPrivateOfferModal({
       }
       build={build}
       beforeBroadcast={checkTerm}
+      unsentBlockedNote={unsentBlockedNote}
     />
   )
 }

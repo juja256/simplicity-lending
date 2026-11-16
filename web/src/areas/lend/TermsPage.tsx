@@ -10,14 +10,11 @@ import { NETWORK_CONFIG } from '@/constants/network-config'
 import { RoutePath } from '@/constants/routes'
 import { type OwnEntry, useDirectory } from '@/privateLending/hooks/useDirectory'
 import {
-  EMPTY_PAIR_TERMS_FORM,
-  findPairTerms,
   formatPublishedAt,
   lenderTermsFromForm,
   MAX_TERM_DAYS,
   otherPairs,
   type PairTermsForm,
-  pairTermsToForm,
   type TermsPair,
   termsToPublish,
 } from '@/privateLending/lenderTerms'
@@ -25,6 +22,7 @@ import { ErrorHandler } from '@/utils/errorHandler'
 
 import { displayNameError, MAX_DISPLAY_NAME_CHARS } from './displayName'
 import OwnEntryPending from './OwnEntryPending'
+import { termsFormOf, verifiedOwnTerms } from './termsForm'
 
 const { collateralAsset: COLLATERAL, principalAsset: PRINCIPAL } = NETWORK_CONFIG
 const PAIR: TermsPair = { collateral: COLLATERAL, principal: PRINCIPAL }
@@ -78,16 +76,13 @@ interface TermsEditorProps {
  * there is none (a first publish, or an entry that did not verify).
  */
 function TermsEditor({ own, register }: TermsEditorProps) {
-  const verified = own.entry !== null && own.check?.status === 'verified' ? own.check.terms : null
+  const verified = verifiedOwnTerms(own)
   const verifiedName = verified !== null ? own.entry?.display_name : undefined
   const isUnverified = own.entry !== null && verified === null
 
   const [name, setName] = useState('')
   // Nothing the indexer serves pre-fills the form unless the key signed it.
-  const [termsForm, setTermsForm] = useState<PairTermsForm>(() => {
-    const published = findPairTerms(verified, PAIR)
-    return published ? pairTermsToForm(published, PAIR) : EMPTY_PAIR_TERMS_FORM
-  })
+  const [termsForm, setTermsForm] = useState<PairTermsForm>(() => termsFormOf(own, PAIR))
 
   const displayName = verifiedName ?? name
   const nameError = name === '' ? null : displayNameError(name)
@@ -185,10 +180,7 @@ function TermsEditor({ own, register }: TermsEditorProps) {
 
       <aside className='bg-background flex h-fit flex-col gap-3 rounded-2xl p-4'>
         <h2 className='text-foreground text-sm font-semibold'>What borrowers see</h2>
-        <PairTermsSummary
-          verifiedTerms={verified}
-          publishedAt={own.entry?.terms_published_at ?? null}
-        />
+        <PairTermsSummary verifiedTerms={verified} unverified={isUnverified} />
       </aside>
     </div>
   )
