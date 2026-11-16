@@ -64,9 +64,9 @@ pnpm build:wasm
 pnpm build
 ```
 
-`pnpm build:wasm` compiles `crates/private-lending-wasm` into `web/src/wasm/private-lending/`. `pnpm
-build` typechecks the app and produces the Vite bundle. Running it against a local API is covered in
-[Run locally](./local-setup.md).
+`pnpm build:wasm` compiles `crates/private-lending-wasm` into `web/src/wasm/private-lending/`.
+`pnpm build` typechecks the app and produces the Vite bundle. Running it against a local API is
+covered in [Run locally](./local-setup.md).
 
 ## This site
 
