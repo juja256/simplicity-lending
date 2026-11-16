@@ -10,6 +10,7 @@ import {
   pairTermsToForm,
   proposalExpiry,
   type ProposalInput,
+  TERM_MARGIN_BLOCKS,
   type TermsPair,
   unitsFromDecimal,
   unitsToDecimal,
@@ -300,6 +301,40 @@ describe('proposalOfOffer', () => {
     expect(proposalOfOffer(terms, tip + 61)).toEqual({
       ...proposal,
       term_blocks: 29 * BLOCKS_PER_DAY,
+    })
+  })
+
+  it('flags a confirmation later than the margin as shorter than the shortest term', () => {
+    const tip = 2_000_000
+    const days = PAIR.min_term_days
+    const principal = TEST(3_950n)
+    const { minCollateral, minRepayment } = proposalLimits(wasm, PAIR, principal, days)
+    const terms: PrivateOfferTerms = {
+      borrowerPublicKey: 'b'.repeat(64),
+      borrowerFingerprint: 'b'.repeat(16),
+      lenderPublicKey: 'c'.repeat(64),
+      lenderFingerprint: 'c'.repeat(16),
+      collateralAsset: PAIR.collateral_asset,
+      collateralAmount: minCollateral,
+      principalAsset: PAIR.principal_asset,
+      principalAmount: principal,
+      repaymentAmount: minRepayment,
+      interest: minRepayment - principal,
+      loanExpirationTime: proposalExpiry(tip, days),
+      borrowerNft: 'e'.repeat(64),
+      lenderNft: 'f'.repeat(64),
+    }
+
+    const onTime = proposalOfOffer(terms, tip + TERM_MARGIN_BLOCKS)
+    expect(onTime.term_blocks).toBe(days * BLOCKS_PER_DAY)
+    expect(checkAgainstTerms(wasm, OWN, onTime, PAIR_INFO)).toEqual({ kind: 'within' })
+
+    const late = proposalOfOffer(terms, tip + TERM_MARGIN_BLOCKS + 1)
+    expect(late.term_blocks).toBe((days - 1) * BLOCKS_PER_DAY)
+    expect(checkAgainstTerms(wasm, OWN, late, PAIR_INFO)).toEqual({
+      kind: 'outside',
+      breaches: ['TermBelowRange'],
+      labels: ['term shorter than 30 days'],
     })
   })
 })

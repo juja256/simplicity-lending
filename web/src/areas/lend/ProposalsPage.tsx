@@ -11,13 +11,12 @@ import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { useKeyedModal } from '@/hooks/useKeyedModal'
 import { privateLendingWasmQueryKey } from '@/privateLending/hooks/queryKeys'
-import { type OwnEntry, useDirectory } from '@/privateLending/hooks/useDirectory'
+import { useDirectory } from '@/privateLending/hooks/useDirectory'
 import { usePrivateOffers } from '@/privateLending/hooks/usePrivateOffers'
 import {
   BLOCKS_PER_DAY,
   formatAprBps,
   maxPrincipalPerCollateralToDisplay,
-  termBlocksOf,
   type TermsPair,
 } from '@/privateLending/lenderTerms'
 import {
@@ -31,12 +30,8 @@ import {
   offerActionState,
   type OpenedOfferItem,
 } from '@/privateLending/offerView'
-import {
-  checkAgainstTerms,
-  proposalOfOffer,
-  type TermsVerdict,
-} from '@/privateLending/proposalCheck'
-import { getPrivateLendingWasm, type PrivateLendingWasm } from '@/privateLending/wasm'
+import type { TermsVerdict } from '@/privateLending/proposalCheck'
+import { getPrivateLendingWasm } from '@/privateLending/wasm'
 import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
 import { usePendingTransactions } from '@/providers/pendingTransactions/usePendingTransactions'
 import { ErrorHandler } from '@/utils/errorHandler'
@@ -44,8 +39,10 @@ import { formatBlockSpan } from '@/utils/format'
 
 import { bookSummary } from './bookSummary'
 import LedgerTable, { ActionCell, Cell, type LedgerColumn } from './LedgerTable'
+import { type ProposalFigures, proposalFigures } from './proposalFigures'
 import SummaryStrip from './SummaryStrip'
 import TermsBadge from './TermsBadge'
+import { useCreationHeights } from './useCreationHeights'
 
 /** A proposal is accepted here; the loan book tracks the rest. */
 const PROPOSAL_ACTIONS: OfferActions<LenderAction, 'private_accept_offer'> = {
@@ -70,52 +67,6 @@ const COLUMNS: LedgerColumn[] = [
   { label: 'Against your terms' },
   { label: 'Action', hideLabel: true },
 ]
-
-/** What the table shows of a proposal beyond its amounts, from the wasm's display rules. */
-interface ProposalFigures {
-  /** The term, counted by the term rule from the block its creation confirmed in. */
-  termBlocks: number
-  /** Null when the wasm cannot give one: a term of 0, or a repayment below the principal. */
-  aprBps: bigint | null
-  /** Principal base units per 10^8 collateral base units; null for 0 collateral. */
-  principalPerCollateral: bigint | null
-  verdict: TermsVerdict | undefined
-}
-
-function orNull<T>(compute: () => T): T | null {
-  try {
-    return compute()
-  } catch {
-    // A `bad-input` error of a display rule: the figure is not shown.
-    return null
-  }
-}
-
-function figuresOf(
-  wasm: PrivateLendingWasm,
-  item: OpenedOfferItem,
-  own: OwnEntry | undefined,
-): ProposalFigures {
-  const { terms, candidate } = item
-  const termBlocks = termBlocksOf(terms.loanExpirationTime, candidate.created_at_height)
-  return {
-    termBlocks,
-    aprBps: orNull(() => wasm.aprBps(terms.principalAmount, terms.repaymentAmount, termBlocks)),
-    principalPerCollateral: orNull(() =>
-      wasm.principalPerCollateral(terms.principalAmount, terms.collateralAmount),
-    ),
-    // The proposal against the terms the lender's key signed, by the same term rule.
-    verdict:
-      own === undefined
-        ? undefined
-        : checkAgainstTerms(
-            wasm,
-            own.check,
-            proposalOfOffer(terms, candidate.created_at_height),
-            PAIR,
-          ),
-  }
-}
 
 /** A decimal with its whole part grouped: `"59,523.8095"`. */
 function grouped(decimal: string): string {
@@ -147,6 +98,7 @@ function ProposalRow({
 }: ProposalRowProps) {
   const { formatCollateralDisplay, formatPrincipalAmount } = useFormatAmount()
   const { terms, candidate } = item
+  // The indexer's height, for display only: the term and the check take esplora's.
   const createdAt = candidate.created_at_height
   const age = tipHeight - createdAt
 
@@ -223,12 +175,20 @@ export default function ProposalsPage() {
         .sort((a, b) => b.candidate.created_at_height - a.candidate.created_at_height),
     [opened],
   )
+  // Each term counts from the creation's block as esplora reports it, never the indexer's height.
+  const proposalTxids = useMemo(() => proposals.map(item => item.txid), [proposals])
+  const creationHeights = useCreationHeights(proposalTxids)
   const figures = useMemo(
     () =>
       new Map(
-        wasm === undefined ? [] : proposals.map(item => [item.txid, figuresOf(wasm, item, own)]),
+        wasm === undefined
+          ? []
+          : proposals.map(item => [
+              item.txid,
+              proposalFigures(wasm, item.terms, creationHeights.get(item.txid), own?.check, PAIR),
+            ]),
       ),
-    [wasm, proposals, own],
+    [wasm, proposals, creationHeights, own],
   )
   const summary = useMemo(() => bookSummary(opened, tipHeight), [opened, tipHeight])
   const unopened = lending.length - opened.length

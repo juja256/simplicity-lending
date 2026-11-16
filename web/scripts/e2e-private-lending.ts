@@ -74,6 +74,7 @@ import {
   termBlocksOf,
   unitsToDecimal,
 } from '@/privateLending/lenderTerms'
+import { checkAgainstTerms, proposalOfOffer } from '@/privateLending/proposalCheck'
 import { walletReceiver } from '@/privateLending/receiver'
 import {
   CREATION_TX_MISMATCH,
@@ -575,17 +576,29 @@ async function createStage(ctx: Context): Promise<void> {
 }
 
 /**
- * The `create` proposal as the lender's console counts it: its term by the term rule from the
- * block its creation confirmed in, which the indexer serves as the candidate's
- * `created_at_height`. Confirmed within `TERM_MARGIN_BLOCKS` of the tip it was built at, it counts
- * the `OFFER_TERM_DAYS` the borrower chose and is within the e2e lender's terms.
+ * The `create` proposal as the lender's console counts and checks it, through the console's own
+ * `proposalOfOffer` and `checkAgainstTerms`: its term by the term rule from the block its creation
+ * confirmed in, which the console reads from esplora (never the indexer's `created_at_height`), as
+ * this stage does. Confirmed within `TERM_MARGIN_BLOCKS` of the tip it was built at, it counts the
+ * `OFFER_TERM_DAYS` the borrower chose and is within the e2e lender's terms.
  */
 async function checkCreatedTerm(ctx: Context, txid: string): Promise<void> {
   const offer = await loadCreatedOffer(ctx, 'lender')
   const { blockHeight } = await ctx.chain.fetchTimelock(txid)
   if (blockHeight === null) throw new Error(`the creation ${txid} is not confirmed`)
-  const expiry = offer.opened.loanExpirationTime()
-  const proposal = createProposal(termBlocksOf(expiry, blockHeight))
+  const { opened } = offer
+  const expiry = opened.loanExpirationTime()
+  const proposal = proposalOfOffer(
+    {
+      principalAsset: opened.principalAsset(),
+      collateralAsset: opened.collateralAsset(),
+      principalAmount: opened.principalAmount(),
+      collateralAmount: opened.collateralAmount(),
+      repaymentAmount: opened.repaymentAmount(),
+      loanExpirationTime: expiry,
+    },
+    blockHeight,
+  )
   out(
     `term: created at block ${blockHeight}, expires at ${expiry}: ` +
       `${proposal.term_blocks / BLOCKS_PER_DAY} days`,
@@ -597,9 +610,11 @@ async function checkCreatedTerm(ctx: Context, txid: string): Promise<void> {
         'built before the term rule (move .e2e-private/state.json aside)',
     )
   }
-  const breaches = wasm.checkProposal(JSON.stringify(e2eTerms()), JSON.stringify(proposal))
-  if (breaches.length !== 0) {
-    throw new Error(`the create proposal breaks the e2e terms: ${JSON.stringify(breaches)}`)
+  const own: EntryCheck = { status: 'verified', terms: e2eTerms() }
+  const pair = { collateral: TESTNET_PAIR.collateralAsset, principal: TESTNET_PAIR.principalAsset }
+  const verdict = checkAgainstTerms(wasm, own, proposal, pair)
+  if (verdict.kind !== 'within') {
+    throw new Error(`the create proposal is not within the e2e terms: ${JSON.stringify(verdict)}`)
   }
   out("the create proposal is within the e2e lender's terms")
 }

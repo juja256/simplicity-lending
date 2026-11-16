@@ -4,11 +4,10 @@
 //
 // The rules are the core's, through the wasm (`checkProposal`, `minCollateral`, `minRepayment`); a
 // term is counted by the term rule (`termBlocksOf`). This module is pure (no React, no
-// `import.meta.env`; it takes only types from the offers hook), so tests import it.
+// `import.meta.env`, nothing from the hooks), so tests and the e2e script import it.
 import type { PairAsset } from '@/constants/resolve-network-config'
 
 import type { EntryCheck } from './directory'
-import type { PrivateOfferTerms } from './hooks/usePrivateOffers'
 import {
   BLOCKS_PER_DAY,
   findPairTerms,
@@ -26,8 +25,19 @@ import {
 } from './lenderTerms'
 import type { PrivateLendingWasm } from './wasm'
 
+/** What a proposal is made of in an opened offer's terms (`PrivateOfferTerms` has them all). */
+export interface OfferProposalTerms {
+  principalAsset: string
+  collateralAsset: string
+  principalAmount: bigint
+  collateralAmount: bigint
+  repaymentAmount: bigint
+  /** The loan's expiry, a block height. */
+  loanExpirationTime: number
+}
+
 /** The proposal of an opened offer, its term counted from `createdAtHeight` by the term rule. */
-export function proposalOfOffer(terms: PrivateOfferTerms, createdAtHeight: number): ProposalInput {
+export function proposalOfOffer(terms: OfferProposalTerms, createdAtHeight: number): ProposalInput {
   return {
     principal_asset: terms.principalAsset,
     collateral_asset: terms.collateralAsset,

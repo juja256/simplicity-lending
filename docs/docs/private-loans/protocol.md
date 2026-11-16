@@ -74,6 +74,12 @@ For repayment, the client requires positive evidence that principal was claimed 
 claim transaction. An indexer omitting the principal output must not enable repayment that burns
 the only token capable of claiming it.
 
+The lender's console counts a proposal's term from the block its creation confirmed in, which it
+reads from esplora, not from the indexer's creation height. A later height from the indexer would
+count a shorter term and a higher APR, and could show a proposal outside the lender's terms as
+within them. Until esplora reports the creation confirmed, the proposal's term, APR and check
+against the terms are not shown, and it cannot be reviewed.
+
 A dishonest or unavailable indexer can still hide data, delay discovery, or prevent progress.
 Verification protects the transaction path; it does not guarantee availability or fresh UI counts.
 
