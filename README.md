@@ -43,10 +43,11 @@ contract restriction. This remains a testnet demo with incomplete manual sign-of
 
 ## Private loans
 
-Open **Private loans** in the main navigation (`/app/private`; `/app` opens it too). Its summary
-card shows the connected wallet's verified open offers, active loans, and total offers. Connect
-Jade or use explicit test-seed login in demo mode, and compare lending-key fingerprints with your
-counterparty before creating an offer. Directory names are not verified identities.
+The landing page opens two areas: the lender console at `/lend`, where a lender publishes terms
+and reviews the proposals addressed to it, and the borrower app at `/borrow`, where a borrower
+chooses a lender and proposes a loan within its terms. Connect Jade or use explicit test-seed login
+in demo mode, and compare lending-key fingerprints with your counterparty before proposing.
+Directory names are not verified identities.
 
 - [Private-loan user guide](docs/docs/private-loans/guide.md): setup, both roles, recovery, and troubleshooting.
 - [Protocol and privacy notes](docs/docs/private-loans/protocol.md): verification, role tokens, state transitions, and trust boundaries.

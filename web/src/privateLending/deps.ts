@@ -4,6 +4,8 @@ import type { Network, Transaction, WalletTxOut, Wollet } from 'lwk_wasm'
 
 import type { PrivateLendingSources } from '@/simplicity/private-lending/scripts'
 
+import type { AddressCursor } from './addressCursor'
+
 export type PrivateNetworkName = 'liquid' | 'liquidtestnet' | 'regtest'
 
 export interface PrivateFlowDeps {
@@ -13,6 +15,11 @@ export interface PrivateFlowDeps {
   networkName: PrivateNetworkName
   sources: PrivateLendingSources
   wollet: Wollet
+  /**
+   * The receive and change addresses the session's flows take, one cursor per wallet session: a
+   * fresh one for each session, never one per flow.
+   */
+  addresses: AddressCursor
   /** The wallet's spendable coins. */
   walletUtxos: () => WalletTxOut[]
   fetchTx: (txid: string) => Promise<Transaction>

@@ -197,7 +197,7 @@ export async function buildPrincipalClaim(
         blindingPubkey: principalReceiver.blindingPubkey(),
       },
     ],
-    changeAddress: deps.wollet.change(null).address(),
+    changeAddress: deps.addresses.nextChange(deps.wollet, 1)[0],
   })
 
   // 4. The layout of the unblinded PSET.

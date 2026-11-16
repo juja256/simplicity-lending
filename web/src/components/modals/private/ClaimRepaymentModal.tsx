@@ -56,14 +56,14 @@ export default function ClaimRepaymentModal(props: PrivateOfferActionModalProps)
       {...props}
       kind='private_claim_repayment'
       requires='repayment'
-      title='Claim Repayment'
+      title='Claim repayment'
       chip={
         <Chip color='accent' variant='soft' size='sm'>
           Claim
         </Chip>
       }
-      label='Claim Repayment'
-      eyebrow='Claim Repayment'
+      label='Claim repayment'
+      eyebrow='Claim repayment'
       summary={summary}
       build={build}
     />

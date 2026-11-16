@@ -1,0 +1,23 @@
+{
+  "description": "A lender directory entry signed by private-lending-core, as the indexer serves it without its timestamps. Written by the directory_parity_entry test in directory.rs.",
+  "entry": {
+    "display_name": "Acme Bank — Zürich",
+    "pubkey": "a9ddbd65b7c05e2f4317706cd0edd6a139b8b6ad44c0772d9805e87843ae9762",
+    "signature": "00e38becc47328024f5b3f60a1a3db29fc3ad75ee6e93d58e2991aaf9516d328824f7177cb62f856382901efa69d7b56e6372cf05098e544fef0596672a7e437",
+    "signed_challenge": "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+    "terms": {
+      "pairs": [
+        {
+          "collateral_asset": "3f3e3d3c3b3a393837363534333231302f2e2d2c2b2a29282726252423222120",
+          "max_principal": "3544952156018063160",
+          "max_principal_per_collateral": "1230066625199609624",
+          "max_term_days": 3650,
+          "min_apr_bps": 16909060,
+          "min_principal": "2387509390608836392",
+          "min_term_days": 7,
+          "principal_asset": "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100"
+        }
+      ]
+    }
+  }
+}

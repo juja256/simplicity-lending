@@ -1,6 +1,9 @@
-//! Signing lender directory actions.
+//! Signing lender directory actions, and checking the entries the indexer serves.
 
-use private_lending_core::{DirectoryAction as CoreDirectoryAction, sign_directory_action as sign};
+use elements::secp256k1_zkp::{XOnlyPublicKey, schnorr};
+use private_lending_core::{
+    DirectoryAction as CoreDirectoryAction, sign_directory_action as sign, verify_directory_action,
+};
 use wasm_bindgen::prelude::*;
 
 use crate::error::{bad_input, decode_hex_array, encode_hex};
@@ -71,6 +74,44 @@ pub fn sign_directory_action(
     )
     .map_err(bad_input)?;
     Ok(encode_hex(signature.as_ref()))
+}
+
+/// Decodes exactly `N` bytes of hex; the error names the field.
+fn field_hex<const N: usize>(field: &str, hex: &str) -> Result<[u8; N], String> {
+    decode_hex_array::<N>(hex).map_err(|_| bad_input(format!("{field} is not {N} bytes of hex")))
+}
+
+/// Checks a served directory entry: whether the x-only key `pubkey_hex` signed a put for the
+/// challenge (32 bytes, hex), the display name and the terms (JSON, as `encodeLenderTerms` takes
+/// them), with the 64-byte Schnorr signature (hex).
+///
+/// Terms that do not parse or that `LenderTerms::validate` rejects give `false`, as no put the
+/// indexer accepts carries them. Malformed hex, or a key that is not an x-only public key, is a
+/// `bad-input` error naming the field.
+#[wasm_bindgen(js_name = verifyDirectoryEntry)]
+pub fn verify_directory_entry(
+    pubkey_hex: &str,
+    challenge_hex: &str,
+    display_name: &str,
+    terms_json: &str,
+    signature_hex: &str,
+) -> Result<bool, String> {
+    let pubkey = XOnlyPublicKey::from_slice(&field_hex::<32>("pubkey", pubkey_hex)?)
+        .map_err(|_| bad_input("pubkey is not an x-only public key"))?;
+    let challenge = field_hex::<32>("challenge", challenge_hex)?;
+    let signature = schnorr::Signature::from_slice(&field_hex::<64>("signature", signature_hex)?)
+        .map_err(|_| bad_input("signature is not a Schnorr signature"))?;
+    let Ok(terms) = parse_terms(terms_json) else {
+        return Ok(false);
+    };
+    Ok(verify_directory_action(
+        &pubkey,
+        CoreDirectoryAction::Put,
+        &challenge,
+        display_name,
+        Some(&terms),
+        &signature,
+    ))
 }
 
 #[cfg(test)]
@@ -154,6 +195,142 @@ mod tests {
             sign_directory_action(&key, DirectoryAction::Delete, &challenge_hex(), "", None)
                 .unwrap();
         assert!(verifies(&key, &signature, Core::Delete, "", None));
+    }
+
+    /// A put signed by `key` over the challenge, the name and the terms.
+    fn signed_put(key: &LendingKey, name: &str, terms: &str) -> String {
+        sign_directory_action(
+            key,
+            DirectoryAction::Put,
+            &challenge_hex(),
+            name,
+            Some(terms.to_string()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn verify_entry_accepts_signed_put() {
+        let key = key();
+        let signature = signed_put(&key, "Acme Bank", &terms_json());
+        assert_eq!(
+            verify_directory_entry(
+                &key.x_only_public_key(),
+                &challenge_hex(),
+                "Acme Bank",
+                &terms_json(),
+                &signature,
+            ),
+            Ok(true)
+        );
+        // Hex of either case, as the other hex inputs take it.
+        assert_eq!(
+            verify_directory_entry(
+                &key.x_only_public_key().to_uppercase(),
+                &challenge_hex().to_uppercase(),
+                "Acme Bank",
+                &terms_json(),
+                &signature.to_uppercase(),
+            ),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn verify_entry_rejects_changed_terms_name_or_key() {
+        let key = key();
+        let signature = signed_put(&key, "Acme Bank", &terms_json());
+        let verify = |pubkey: &str, name: &str, terms: &str| {
+            verify_directory_entry(pubkey, &challenge_hex(), name, terms, &signature)
+        };
+        let pubkey = key.x_only_public_key();
+
+        // One byte of the rate: the APR moves by 1 basis point.
+        let mut terms: serde_json::Value = serde_json::from_str(&terms_json()).unwrap();
+        let apr = terms["pairs"][0]["min_apr_bps"].as_u64().unwrap();
+        terms["pairs"][0]["min_apr_bps"] = (apr + 1).into();
+        assert_eq!(verify(&pubkey, "Acme Bank", &terms.to_string()), Ok(false));
+        assert_eq!(verify(&pubkey, "Acme Bank Ltd", &terms_json()), Ok(false));
+        let other = LendingKey::from_master_blinding_key(&"08".repeat(32)).unwrap();
+        assert_eq!(
+            verify(&other.x_only_public_key(), "Acme Bank", &terms_json()),
+            Ok(false)
+        );
+        // Signed by another key, served under this one.
+        let forged = signed_put(&other, "Acme Bank", &terms_json());
+        assert_eq!(
+            verify_directory_entry(
+                &pubkey,
+                &challenge_hex(),
+                "Acme Bank",
+                &terms_json(),
+                &forged
+            ),
+            Ok(false)
+        );
+        // A signature over another challenge.
+        assert_eq!(
+            verify_directory_entry(
+                &pubkey,
+                &encode_hex(&[0x5b; 32]),
+                "Acme Bank",
+                &terms_json(),
+                &signature
+            ),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn verify_entry_gives_false_for_invalid_terms() {
+        let key = key();
+        let signature = signed_put(&key, "Acme Bank", &terms_json());
+        let mut out_of_range: serde_json::Value = serde_json::from_str(&terms_json()).unwrap();
+        out_of_range["pairs"][0]["max_term_days"] = 3651.into();
+        for terms in [
+            r#"{"pairs": []}"#.to_string(),
+            out_of_range.to_string(),
+            "not json".to_string(),
+            r#"{"pairs": [], "version": 1}"#.to_string(),
+        ] {
+            assert_eq!(
+                verify_directory_entry(
+                    &key.x_only_public_key(),
+                    &challenge_hex(),
+                    "Acme Bank",
+                    &terms,
+                    &signature,
+                ),
+                Ok(false),
+                "{terms}"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_entry_names_the_malformed_field() {
+        let key = key();
+        let pubkey = key.x_only_public_key();
+        let signature = signed_put(&key, "Acme Bank", &terms_json());
+        let challenge = challenge_hex();
+        let verify = |pubkey: &str, challenge: &str, signature: &str| {
+            verify_directory_entry(pubkey, challenge, "Acme Bank", &terms_json(), signature)
+                .unwrap_err()
+        };
+        let cases = [
+            (verify("zz", &challenge, &signature), "pubkey"),
+            (verify(&pubkey[2..], &challenge, &signature), "pubkey"),
+            // 32 bytes, but no point on the curve has this x.
+            (verify(&"ff".repeat(32), &challenge, &signature), "pubkey"),
+            (verify(&pubkey, "abc", &signature), "challenge"),
+            (verify(&pubkey, &challenge[2..], &signature), "challenge"),
+            (verify(&pubkey, &challenge, "xyz"), "signature"),
+            (verify(&pubkey, &challenge, &signature[2..]), "signature"),
+        ];
+        for (error, field) in cases {
+            assert!(error.starts_with("bad-input: "), "{error}");
+            assert!(error.contains(field), "{field}: {error}");
+        }
     }
 
     #[test]

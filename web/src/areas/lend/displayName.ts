@@ -1,5 +1,5 @@
-// The directory's display-name rule, which only the page's directory form uses. The rules shared
-// with the modals live in `@/privateLending/offerView`.
+// The directory's display-name rule, which the console's terms and profile pages check before a
+// name is signed.
 
 /** The indexer's limit on a directory display name, in Unicode scalar values. */
 export const MAX_DISPLAY_NAME_CHARS = 64

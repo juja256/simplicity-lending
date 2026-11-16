@@ -66,3 +66,12 @@ export function formatUsd(
   const formatted = formatDecimalParts(BigInt(whole), frac)
   return negative ? `-$${formatted}` : `$${formatted}`
 }
+
+// blocks → "12 min" / "3 h" / "1 day" / "41 days", rounded down, at Liquid's minute a block.
+export function formatBlockSpan(blocks: number): string {
+  const minutes = Math.max(0, blocks) * MINUTES_PER_BLOCK
+  if (minutes < MINUTES_PER_HOUR) return `${minutes} min`
+  if (minutes < MINUTES_PER_DAY) return `${Math.floor(minutes / MINUTES_PER_HOUR)} h`
+  const days = Math.floor(minutes / MINUTES_PER_DAY)
+  return `${days.toLocaleString(GROUP_LOCALE)} ${days === 1 ? 'day' : 'days'}`
+}

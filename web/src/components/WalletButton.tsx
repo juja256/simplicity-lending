@@ -8,6 +8,7 @@ import { NETWORK_CONFIG } from '@/constants/network-config'
 import type { PolicyAssetDenomination } from '@/providers/assetDenomination/constants'
 import { useAssetDenomination } from '@/providers/assetDenomination/useAssetDenomination'
 import { useLwk } from '@/providers/lwk/useLwk'
+import type { WalletSignerType } from '@/providers/wallet/types'
 import { useWallet } from '@/providers/wallet/useWallet'
 import { truncateAddress } from '@/utils/format'
 
@@ -16,9 +17,29 @@ const NETWORK_LABEL: Record<'liquidtestnet' | 'regtest', string> = {
   regtest: 'Regtest',
 }
 
-export function WalletButton({ isDisabled }: { isDisabled?: boolean } = {}) {
-  const { connectionStatus, syncing, receiveAddress, disconnect, reconnecting, pendingRequest } =
-    useWallet()
+const SIGNER_NAME: Record<WalletSignerType, string> = {
+  jade: 'Jade',
+  seed: 'Seed phrase',
+  sideswap: 'SideSwap',
+  humid: 'Humid',
+}
+
+interface WalletButtonProps {
+  isDisabled?: boolean
+  /** Name the connected signer ("Jade") on the button instead of the receive address. */
+  showSigner?: boolean
+}
+
+export function WalletButton({ isDisabled, showSigner }: WalletButtonProps = {}) {
+  const {
+    connectionStatus,
+    syncing,
+    currentReceiveAddress,
+    signerType,
+    disconnect,
+    reconnecting,
+    pendingRequest,
+  } = useWallet()
   const { network, isMainnet } = useLwk()
   const [disconnecting, setDisconnecting] = useState(false)
   const [isMenuOpen, setIsMenuOpen] = useState(false)
@@ -51,11 +72,15 @@ export function WalletButton({ isDisabled }: { isDisabled?: boolean } = {}) {
     )
   }
 
-  if (connectionStatus === 'ready' && receiveAddress) {
+  // Read on every render, not kept from connect: a scan or a broadcast that used the address
+  // re-renders the button, which then shows the next unused one.
+  const receiveAddress = connectionStatus === 'ready' ? currentReceiveAddress() : null
+
+  if (receiveAddress) {
     return (
       <Dropdown.Root isOpen={isMenuOpen} onOpenChange={setIsMenuOpen}>
         <Dropdown.Trigger className={buttonVariants({ variant: 'secondary' })}>
-          {truncateAddress(receiveAddress)}
+          {showSigner && signerType ? SIGNER_NAME[signerType] : truncateAddress(receiveAddress)}
         </Dropdown.Trigger>
         <Dropdown.Popover placement='bottom end' className='p-4'>
           <div className='flex flex-col gap-3'>

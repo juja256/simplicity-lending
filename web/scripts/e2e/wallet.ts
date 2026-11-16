@@ -6,6 +6,7 @@ import path from 'node:path'
 import * as lwk from 'lwk_wasm'
 
 import { resolveWaterfallsRecipient } from '@/lwk/waterfallsRecipient'
+import type { AddressCursor } from '@/privateLending/addressCursor'
 import type { PrivateFlowDeps } from '@/privateLending/deps'
 import type { PrivateLendingSources } from '@/simplicity/private-lending/scripts'
 import * as wasm from '@/wasm/private-lending/private_lending_wasm'
@@ -44,12 +45,14 @@ export interface SeedWallet {
   wollet: lwk.Wollet
   network: lwk.Network
   lendingKey: wasm.LendingKey
+  /** The run's address cursor: one run is one wallet session. */
+  addresses: AddressCursor
   sync(): Promise<void>
   utxos(): lwk.WalletTxOut[]
   address(): string
 }
 
-export function seedWallet(env: E2eEnv, mnemonic: string): SeedWallet {
+export function seedWallet(env: E2eEnv, mnemonic: string, addresses: AddressCursor): SeedWallet {
   const network = lwk.Network.testnet()
   const signer = new lwk.Signer(new lwk.Mnemonic(mnemonic), network)
   const descriptor = signer.wpkhSlip77Descriptor()
@@ -62,6 +65,7 @@ export function seedWallet(env: E2eEnv, mnemonic: string): SeedWallet {
     wollet,
     network,
     lendingKey: wasm.LendingKey.fromDescriptor(descriptor.toString()),
+    addresses,
     async sync() {
       recipientSet ??= resolveWaterfallsRecipient(env.waterfallsUrl, env.waterfallsRecipient).then(
         recipient => client.setWaterfallsServerRecipient(recipient),
@@ -84,6 +88,7 @@ export function flowDeps(wallet: SeedWallet, chain: Chain): PrivateFlowDeps {
     networkName: 'liquidtestnet',
     sources: readSources(),
     wollet: wallet.wollet,
+    addresses: wallet.addresses,
     walletUtxos: () => wallet.utxos(),
     fetchTx: txid => chain.fetchTx(txid),
     fetchTipHeight: () => chain.tipHeight(),

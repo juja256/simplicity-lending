@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -36,7 +37,6 @@ export default defineConfig(({ command, mode }) => {
     throw new Error('The demo release must use Liquid testnet.')
   }
   const apiProxyTarget = configEnv.API_PROXY_TARGET
-  const useLocalApiProxy = command === 'serve' && mode === 'development' && apiProxyTarget
   // A deployed API serves under `/api`; a local indexer serves at `/`, so its proxy drops the
   // prefix. Opt in with API_PROXY_STRIP_PREFIX=true.
   const stripApiPrefix = configEnv.API_PROXY_STRIP_PREFIX === 'true'
@@ -67,8 +67,14 @@ export default defineConfig(({ command, mode }) => {
     optimizeDeps: {
       exclude: ['lwk_wasm'],
     },
-    server: useLocalApiProxy ? { proxy } : undefined,
+    // In every mode: `pnpm dev --mode demo` (the testnet demo, `pnpm demo:testnet`) reads `/api`.
+    server: { proxy },
     // Local smoke testing of the production bundle against the same indexer.
     preview: { proxy },
+    // `pnpm test`: the pure rules, in Node. Checks that need the chain are `pnpm e2e:private`.
+    test: {
+      environment: 'node',
+      include: ['src/**/*.test.ts'],
+    },
   }
 })

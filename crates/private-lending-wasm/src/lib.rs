@@ -19,7 +19,7 @@ mod scan;
 
 pub use blind::{InputSecret, PinnedBlinding, blind_pset};
 pub use build::{NewOffer, OfferTermsInput, contract_hash_from_json, issued_asset_id};
-pub use directory::{DirectoryAction, sign_directory_action};
+pub use directory::{DirectoryAction, sign_directory_action, verify_directory_entry};
 pub use inspect::inspect_pset;
 pub use keys::{LendingKey, confidential_address, fresh_issuer_pubkey, key_fingerprint};
 pub use lender_terms::{

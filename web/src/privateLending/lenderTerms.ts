@@ -61,10 +61,17 @@ export const U32_MAX = 2 ** 32 - 1
 export const MAX_TERM_DAYS = 3650
 /** The core's `BLOCKS_PER_DAY`. */
 export const BLOCKS_PER_DAY = 1440
+/**
+ * The blocks a proposal's expiry adds to the days the borrower chose, so that a proposal whose
+ * creation confirms within this many blocks of the tip it was built at counts those days.
+ */
+export const TERM_MARGIN_BLOCKS = 60
 /** `max_principal_per_collateral` counts per 10^8 collateral base units (`COLLATERAL_SCALE`). */
 const COLLATERAL_SCALE_DECIMALS = 8
-/** Basis points are hundredths of a percent. */
-const PERCENT_DECIMALS = 2
+/** Basis points are hundredths of a percent: an APR takes at most 2 decimals. */
+export const PERCENT_DECIMALS = 2
+/** The terms form's error for an APR that is not a percent with at most 2 decimals. */
+export const APR_FORMAT_ERROR = 'Enter the minimum APR as a percent, such as 6 or 6.25'
 /** The decimals an asset can have (`resolveNetworkConfig`'s bound). */
 const MAX_ASSET_DECIMALS = 18
 
@@ -170,6 +177,36 @@ export function maxPrincipalPerCollateralToDisplay(
   return shiftPoint(value, principalDecimals + COLLATERAL_SCALE_DECIMALS - collateralDecimals)
 }
 
+/**
+ * The expiry of a proposal of `days` built at `tipHeight`: the days and `TERM_MARGIN_BLOCKS` after
+ * the tip. `termBlocksOf` counts the chosen days for it when its creation confirms at most the
+ * margin after the tip, a day less when it confirms later.
+ */
+export function proposalExpiry(tipHeight: number, days: number): number {
+  return tipHeight + days * BLOCKS_PER_DAY + TERM_MARGIN_BLOCKS
+}
+
+/**
+ * Whether a proposal of `days` with `expiry` can no longer count those days: a creation confirmed
+ * in the block after `tipHeight`, the earliest it can confirm, would count fewer by the term rule.
+ * `TERM_MARGIN_BLOCKS` absorbs the blocks found while the borrower reviews and signs; only a
+ * proposal held past it is stale. The creation checks it with the tip it reads before building.
+ */
+export function proposalExpiryIsStale(expiry: number, tipHeight: number, days: number): boolean {
+  return termBlocksOf(expiry, tipHeight + 1) < days * BLOCKS_PER_DAY
+}
+
+/**
+ * The term of a proposal, the term rule: the whole days from the block its creation confirmed in
+ * to its expiry, in blocks, `floor((expiry − createdAtHeight) / BLOCKS_PER_DAY) · BLOCKS_PER_DAY`;
+ * 0 when the expiry is not after the creation block. The borrower's form, the lender's console and
+ * the e2e count a term with it alone.
+ */
+export function termBlocksOf(expiry: number, createdAtHeight: number): number {
+  if (expiry <= createdAtHeight) return 0
+  return Math.floor((expiry - createdAtHeight) / BLOCKS_PER_DAY) * BLOCKS_PER_DAY
+}
+
 /** An APR in basis points as a percent, such as `"5.25 %"`. */
 export function formatAprBps(bps: number): string {
   return `${shiftPoint(BigInt(bps), PERCENT_DECIMALS)} %`
@@ -263,7 +300,13 @@ export function pairTermsFromForm(
   const errors: PairTermsFormErrors = {}
 
   const minAprBps = field(errors, 'minAprPercent', () => {
-    const bps = unitsFromDecimal(form.minAprPercent, PERCENT_DECIMALS)
+    let bps: bigint
+    try {
+      bps = unitsFromDecimal(form.minAprPercent, PERCENT_DECIMALS)
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error
+      throw new RangeError(APR_FORMAT_ERROR)
+    }
     if (bps > BigInt(U32_MAX)) throw new RangeError('The APR is too large.')
     return Number(bps)
   })
@@ -323,9 +366,8 @@ export function pairTermsFromForm(
 }
 
 /**
- * The terms a lender publishes from the form: the configured pair alone. It takes nothing from the
- * entry the indexer serves, whose terms carry no signature the app can check: carrying its other
- * pairs into a new signature would sign whatever the indexer injected.
+ * The terms of the form: the configured pair alone. It takes nothing from the entry the indexer
+ * serves; `termsToPublish` adds the other pairs the lender's key signed, once they verified.
  */
 export function lenderTermsFromForm(
   form: PairTermsForm,
@@ -335,12 +377,26 @@ export function lenderTermsFromForm(
   return parsed.terms === null ? parsed : { terms: { pairs: [parsed.terms] }, errors: null }
 }
 
-/** The pairs of served terms for assets other than the configured pair, which a save drops. */
+/** The pairs of `terms` for assets other than the configured pair. */
 export function otherPairs(
   terms: LenderTermsInput | null | undefined,
   pair: TermsPair,
 ): PairTermsInput[] {
   return (terms?.pairs ?? []).filter(other => findPairTerms({ pairs: [other] }, pair) === undefined)
+}
+
+/**
+ * The terms a lender publishes: `formTerms` (from `lenderTermsFromForm`, the configured pair) and
+ * the other pairs of `verifiedTerms`, the terms its key signed before as `checkDirectoryEntry`
+ * verified them. Pass null when the served entry did not verify: its pairs carry no signature the
+ * app can check, so signing them again would sign whatever the indexer injected.
+ */
+export function termsToPublish(
+  formTerms: LenderTermsInput,
+  verifiedTerms: LenderTermsInput | null,
+  pair: TermsPair,
+): LenderTermsInput {
+  return { pairs: [...formTerms.pairs, ...otherPairs(verifiedTerms, pair)] }
 }
 
 /** The form of published terms, to edit them: the inverse of `pairTermsFromForm`. */

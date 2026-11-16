@@ -246,7 +246,7 @@ export async function buildPrivateLiquidation(
         blindingPubkey: collateralReceiver.blindingPubkey(),
       },
     ],
-    changeAddress: deps.wollet.change(null).address(),
+    changeAddress: deps.addresses.nextChange(deps.wollet, 1)[0],
     lockTime: expiration,
   })
 

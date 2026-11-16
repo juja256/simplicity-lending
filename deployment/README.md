@@ -125,7 +125,8 @@ Once the stack is running, verify:
 - `http://localhost:${WEB_PORT}/api/health`
 - `http://localhost:${WEB_PORT}/api/ready`
 - `http://localhost:${WEB_PORT}/api/private/candidates?limit=1`
-- `http://localhost:${WEB_PORT}/app/private` (direct SPA navigation)
+- `http://localhost:${WEB_PORT}/lend` and `http://localhost:${WEB_PORT}/borrow` (direct SPA
+  navigation)
 
 Check event-stream delivery without buffering:
 

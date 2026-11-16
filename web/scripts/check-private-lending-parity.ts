@@ -1,10 +1,10 @@
 // Proves that the browser (LWK + the private-lending wasm) derives the same offer addresses
 // as the Rust code. Run it with `pnpm parity`; it must pass before browser addresses are relied on.
 // It also checks, offline, the lender terms arithmetic of the wasm against the core's vectors
-// (`checkLenderTerms`), the app's conversion of typed terms (`checkTermsConversion`), the rules of
-// the app's lending-key holder (`checkLendingKeyHolder`,
-// `checkSyncInSession`) and the PSET builder's `'none'` blinding mode
-// (`checkPsetBuilderNoneBlinding`).
+// (`checkLenderTerms`), the app's conversion of typed terms (`checkTermsConversion`), the check
+// of a directory entry the core signed (`checkDirectoryEntryParity`), the rules of the app's
+// lending-key holder (`checkLendingKeyHolder`, `checkSyncInSession`) and the PSET builder's
+// `'none'` blinding mode (`checkPsetBuilderNoneBlinding`).
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -12,11 +12,14 @@ import { isDeepStrictEqual } from 'node:util'
 
 import * as lwk from 'lwk_wasm'
 
+import type { DirectoryEntry } from '@/api/indexer/private'
 import { resolveNetworkConfig } from '@/constants/resolve-network-config'
 import { buildPset, type PsetInputSpec } from '@/lwk/psetBuilder'
 import { createWaterfallsRecipientResolver } from '@/lwk/waterfallsRecipient'
+import { checkDirectoryEntry } from '@/privateLending/directory'
 import { inspectPset } from '@/privateLending/inspectPset'
 import {
+  APR_FORMAT_ERROR,
   EMPTY_PAIR_TERMS_FORM,
   lenderTermsFromForm,
   maxPrincipalPerCollateralFromDisplay,
@@ -104,6 +107,17 @@ interface LenderTermsVector {
 const lenderTermsFixture = JSON.parse(
   fs.readFileSync(path.join(here, 'fixtures/lender-terms-parity.json'), 'utf-8'),
 ) as { vectors: LenderTermsVector[] }
+
+// Written by the `directory_parity_entry` test of `crates/private-lending-core/src/directory.rs`:
+// an entry the core signed, as the indexer serves it without its timestamps.
+const directoryFixture = JSON.parse(
+  fs.readFileSync(path.join(here, 'fixtures/directory-parity.json'), 'utf-8'),
+) as {
+  entry: Pick<
+    DirectoryEntry,
+    'pubkey' | 'display_name' | 'terms' | 'signed_challenge' | 'signature'
+  >
+}
 
 function readSimf(name: string): string {
   // Trimmed, as simplicitySourcesPlugin does.
@@ -249,6 +263,7 @@ async function main(): Promise<void> {
 
   checkLenderTerms()
   checkTermsConversion()
+  checkDirectoryEntryParity()
   await checkLendingKeyHolder()
   await checkSyncInSession()
   await checkWaterfallsRecipient()
@@ -519,19 +534,27 @@ function checkTermsConversion(): void {
       JSON.stringify(result),
     )
   }
-  // A served entry with a pair for other assets (as a hostile indexer could add): the lender
-  // publishes, and so signs, the form's pair alone.
+  for (const typed of ['1.234', '-1', 'six', '']) {
+    const result = pairTermsFromForm({ ...form, minAprPercent: typed }, pair)
+    equal(
+      `terms form: the APR error for ${JSON.stringify(typed)}`,
+      result.errors?.minAprPercent ?? '',
+      APR_FORMAT_ERROR,
+    )
+  }
+  // A served entry with a pair for other assets (as a hostile indexer could add): the form gives
+  // its pair alone, and `termsToPublish` adds other pairs only from verified terms.
   if (parsed.terms !== null) {
     const injected = { ...parsed.terms, principal_asset: 'ab'.repeat(32) }
     const served = { pairs: [parsed.terms, injected] }
     const published = lenderTermsFromForm(form, pair)
     check(
-      "terms form: the published terms are the form's pair alone",
+      "terms form: the form's terms are its pair alone",
       isDeepStrictEqual(published.terms, { pairs: [parsed.terms] }),
       JSON.stringify(published),
     )
     check(
-      'terms form: a served pair for other assets is found, to be dropped',
+      'terms form: a served pair for other assets is found',
       isDeepStrictEqual(otherPairs(served, pair), [injected]) &&
         otherPairs({ pairs: [parsed.terms] }, pair).length === 0 &&
         otherPairs(null, pair).length === 0,
@@ -548,6 +571,77 @@ function checkTermsConversion(): void {
     'terms form: an empty form has an error on every field',
     empty.terms === null && Object.keys(empty.errors).length === 6,
   )
+}
+
+/**
+ * An entry the core signed verifies in the wasm (`verifyDirectoryEntry`), with the terms as the
+ * app serializes them and a name that is not ASCII; one changed rate, another name, another key or
+ * another challenge does not. `checkDirectoryEntry` gives `verified` with the terms, `invalid` for
+ * the changed entries and for malformed hex, and `unsigned` without a signature.
+ */
+function checkDirectoryEntryParity(): void {
+  const entry: DirectoryEntry = {
+    ...directoryFixture.entry,
+    terms_published_at: 0,
+    created_at: 0,
+    updated_at: 0,
+  }
+  const { pubkey, display_name: name, terms, signed_challenge, signature } = entry
+  if (terms === null || signed_challenge === null || signature === null) {
+    check('directory entry: the fixture has terms and a signature', false)
+    return
+  }
+  const termsJson = JSON.stringify(terms)
+  const verify = (
+    what: string,
+    expected: boolean,
+    changed: { pubkey?: string; challenge?: string; name?: string; termsJson?: string } = {},
+  ) =>
+    check(
+      `directory entry: ${what} ${expected ? 'verifies' : 'does not verify'}`,
+      wasm.verifyDirectoryEntry(
+        changed.pubkey ?? pubkey,
+        changed.challenge ?? signed_challenge,
+        changed.name ?? name,
+        changed.termsJson ?? termsJson,
+        signature,
+      ) === expected,
+    )
+  const pair = terms.pairs[0]
+  const otherRate = { pairs: [{ ...pair, min_apr_bps: pair.min_apr_bps + 1 }] }
+  const otherKey = wasm.LendingKey.fromMasterBlindingKey('02'.repeat(32)).xOnlyPublicKey()
+  verify('the core-signed entry', true)
+  verify('the entry in upper-case hex', true, {
+    pubkey: pubkey.toUpperCase(),
+    challenge: signed_challenge.toUpperCase(),
+  })
+  verify('one changed rate', false, { termsJson: JSON.stringify(otherRate) })
+  verify('another name', false, { name: `${name} ` })
+  verify('another key', false, { pubkey: otherKey })
+  verify('another challenge', false, { challenge: '5d'.repeat(32) })
+
+  const status = (changed: Partial<DirectoryEntry>) =>
+    checkDirectoryEntry(wasm, { ...entry, ...changed }).status
+  const verified = checkDirectoryEntry(wasm, entry)
+  check(
+    'directory entry: the core-signed entry is verified, with its terms',
+    verified.status === 'verified' && isDeepStrictEqual(verified.terms, terms),
+    JSON.stringify(verified),
+  )
+  const cases: [string, Partial<DirectoryEntry>, string][] = [
+    ['one changed rate', { terms: otherRate }, 'invalid'],
+    ['another name', { display_name: 'Acme Bank' }, 'invalid'],
+    ['another key', { pubkey: otherKey }, 'invalid'],
+    ['an entry whose terms the app could not read', { terms: null }, 'invalid'],
+    ['a malformed signature', { signature: signature.slice(2) }, 'invalid'],
+    ['a key off the curve', { pubkey: 'ff'.repeat(32) }, 'invalid'],
+    ['no signature', { signature: null }, 'unsigned'],
+    ['no challenge', { signed_challenge: null }, 'unsigned'],
+  ]
+  for (const [what, changed, expected] of cases) {
+    const got = status(changed)
+    check(`directory entry: ${what} is ${expected}`, got === expected, got)
+  }
 }
 
 /**

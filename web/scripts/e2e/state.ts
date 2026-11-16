@@ -67,3 +67,10 @@ export function saveWalletIdentity(wallet: string, script: string): void {
   state.walletIdentities[wallet] = script
   writeAll(state)
 }
+
+/** Removes the record of `stage`, so that the next run builds a new transaction. */
+export function removeRecord(stage: string): void {
+  const state = readAll()
+  delete state.records[stage]
+  writeAll(state)
+}
