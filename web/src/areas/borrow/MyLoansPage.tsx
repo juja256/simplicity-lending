@@ -156,7 +156,7 @@ function Figure({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className='flex min-w-0 flex-col'>
       <dt className='text-muted text-xs'>{label}</dt>
-      <dd className='text-foreground text-sm tabular-nums'>{children}</dd>
+      <dd className='text-foreground text-sm whitespace-nowrap tabular-nums'>{children}</dd>
     </div>
   )
 }
@@ -185,7 +185,7 @@ function LoanRow({ item, lenderName, tipHeight, state, onOpen }: LoanRowProps) {
       <div className='flex flex-wrap items-start justify-between gap-x-4 gap-y-2'>
         <div className='flex min-w-0 flex-col gap-1'>
           <p className='text-foreground text-base font-semibold wrap-break-word'>
-            {lenderName ? <bdi>{lenderName}</bdi> : 'Unlisted lender'}
+            {lenderName ? <bdi>{lenderName}</bdi> : 'Unknown lender'}
           </p>
           {lender && (
             <p className='text-muted flex flex-wrap items-baseline gap-x-2 text-xs'>

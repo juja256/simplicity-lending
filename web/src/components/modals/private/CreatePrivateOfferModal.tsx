@@ -182,9 +182,9 @@ export default function CreatePrivateOfferModal({
       onSuccess={onCreated}
       notice={
         <Notice>
-          Only you and this lender key can read the proposal, and only it can accept: compare it
-          with the lender before you sign. Your collateral stays locked until you repay the loan, or
-          until you cancel the proposal before the lender accepts.
+          Only you and this lender key can read the proposal, and only this lender can accept it:
+          compare the key with the lender before you sign. Your collateral stays locked until you
+          repay the loan, or until you cancel the proposal before the lender accepts.
         </Notice>
       }
     >

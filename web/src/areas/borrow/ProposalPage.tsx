@@ -1,4 +1,4 @@
-import { type FormEvent, useState } from 'react'
+import { type FormEvent, type ReactNode, useState } from 'react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 
 import { useBlockHeight } from '@/api/esplora/hooks'
@@ -43,22 +43,40 @@ function range(low: string, high: string): string {
   return low === high ? low : `${low} to ${high}`
 }
 
+/** An amount and its unit, kept on one line. */
+function Amount({ children }: { children: ReactNode }) {
+  return <span className='whitespace-nowrap'>{children}</span>
+}
+
 /** What each field says of the lender's terms while it has no error. */
-function fieldHints(lender: Lender, wasm: PrivateLendingWasm, principalText: string) {
+function fieldHints(
+  lender: Lender,
+  wasm: PrivateLendingWasm,
+  principalText: string,
+): Record<keyof ProposalForm, ReactNode> {
   const { pair } = lender
-  let leastCollateral: string | undefined
+  let leastCollateral: ReactNode
   try {
     const principal = unitsFromDecimal(principalText, PRINCIPAL.decimals)
     const least = wasm.minCollateral(principal, BigInt(pair.max_principal_per_collateral))
     const coins = `${amountText(least, COLLATERAL.decimals)} ${COLLATERAL.symbol}`
-    leastCollateral = `At least ${coins} for this principal.`
+    leastCollateral = (
+      <>
+        At least <Amount>{coins}</Amount> for this principal.
+      </>
+    )
   } catch {
     // No principal yet, or no least collateral that can exist: the field's error says which.
   }
   const low = amountText(BigInt(pair.min_principal), PRINCIPAL.decimals)
   const high = amountText(BigInt(pair.max_principal), PRINCIPAL.decimals)
   return {
-    principal: `${range(low, high)} ${PRINCIPAL.symbol}.`,
+    principal: (
+      <>
+        {low === high ? null : `${low} to `}
+        <Amount>{`${high} ${PRINCIPAL.symbol}`}</Amount>.
+      </>
+    ),
     days: `${range(String(pair.min_term_days), String(pair.max_term_days))} ${
       pair.max_term_days === 1 ? 'day' : 'days'
     }.`,
@@ -104,12 +122,12 @@ interface ProposalFormViewProps {
  */
 function ProposalFormView({ lender, wasm }: ProposalFormViewProps) {
   const navigate = useNavigate()
-  const { data: tipHeight } = useBlockHeight()
+  const { data: tipHeight, dataUpdatedAt: tipReadAt } = useBlockHeight()
   const { utxos: coins, isLoading: coinsLoading } = usePolicyAssetUtxos(true)
   const feeRate = useFeeRateSatPerKvb(true)
   const { privateTxs } = usePendingTransactions()
   const { modal, isOpen, open, close } = useKeyedModal<PrivateOfferDraft>()
-  const [now] = useState(() => Date.now())
+  const [openedAt] = useState(() => Date.now())
 
   const [state, setState] = useState(() => openProposalForm(wasm, lender.pair, PAIR))
   const { form } = state
@@ -133,6 +151,9 @@ function ProposalFormView({ lender, wasm }: ProposalFormViewProps) {
     !hasUnsentCreation &&
     !coinsLoading &&
     coinProblem === null
+  // Why sending waits, when no other notice on the page says why.
+  const loadingNote =
+    tipHeight === 0 ? 'Loading the chain tip…' : coinsLoading ? 'Loading your coins…' : null
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
@@ -147,9 +168,13 @@ function ProposalFormView({ lender, wasm }: ProposalFormViewProps) {
     })
   }
 
-  // The term ends at the expiry the proposal would get now: the days and the margin after the tip.
+  // The term ends at the expiry the proposal would get now: the days and the margin after the tip,
+  // counted from when the tip was read (every 30 s), or from when the page opened until then.
   const days = proposal?.days ?? lender.pair.min_term_days
-  const repayBy = dateAfterBlocks(new Date(now), proposalExpiry(tipHeight, days) - tipHeight)
+  const repayBy = dateAfterBlocks(
+    new Date(tipReadAt > 0 ? tipReadAt : openedAt),
+    proposalExpiry(tipHeight, days) - tipHeight,
+  )
 
   return (
     <>
@@ -183,11 +208,11 @@ function ProposalFormView({ lender, wasm }: ProposalFormViewProps) {
           </h2>
           <dl className='grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm'>
             <dt className='text-muted'>You repay</dt>
-            <dd className='text-foreground text-right tabular-nums'>
+            <dd className='text-foreground text-right whitespace-nowrap tabular-nums'>
               {proposal === null ? '—' : principalText(proposal.repayment)}
             </dd>
             <dt className='text-muted'>Interest</dt>
-            <dd className='text-foreground text-right tabular-nums'>
+            <dd className='text-foreground text-right whitespace-nowrap tabular-nums'>
               {proposal === null ? '—' : principalText(proposal.repayment - proposal.principal)}
             </dd>
           </dl>
@@ -209,14 +234,21 @@ function ProposalFormView({ lender, wasm }: ProposalFormViewProps) {
           </Notice>
         )}
 
-        <UiButton
-          type='submit'
-          variant='primary'
-          className='self-stretch sm:self-start'
-          isDisabled={!canSend}
-        >
-          Lock collateral and send
-        </UiButton>
+        <div className='flex flex-col gap-2'>
+          <UiButton
+            type='submit'
+            variant='primary'
+            className='self-stretch sm:self-start'
+            isDisabled={!canSend}
+          >
+            Lock collateral and send
+          </UiButton>
+          {loadingNote && (
+            <p role='status' className='text-muted text-sm'>
+              {loadingNote}
+            </p>
+          )}
+        </div>
       </form>
 
       {modal !== null && (

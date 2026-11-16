@@ -101,6 +101,8 @@ const router = createBrowserRouter([
               </WalletGate>
             ),
           },
+          // An unknown console path leads to the console's start.
+          { path: '*', element: <Navigate to={RoutePath.LendProposals} replace /> },
         ],
       },
       {
@@ -131,6 +133,8 @@ const router = createBrowserRouter([
               </WalletGate>
             ),
           },
+          // An unknown borrower path, such as `/borrow/x/y`, leads to the borrower app's start.
+          { path: '*', element: <Navigate to={RoutePath.Borrow} replace /> },
         ],
       },
       // The old single app: `/app` and its pages lead to the landing page and its two entrances.

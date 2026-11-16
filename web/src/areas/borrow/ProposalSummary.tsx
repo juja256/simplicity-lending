@@ -28,11 +28,11 @@ export default function ProposalSummary({ lenderName, proposal, repayBy }: Propo
       ) : (
         <p className='text-h3 text-foreground wrap-break-word'>
           You repay{' '}
-          <span className='tabular-nums'>
+          <span className='whitespace-nowrap tabular-nums'>
             {amountText(proposal.repayment, principal.decimals, 2)} {principal.symbol}
           </span>{' '}
           by {formatDay(repayBy)}. If you don&apos;t, {name} keeps your{' '}
-          <span className='tabular-nums'>
+          <span className='whitespace-nowrap tabular-nums'>
             {amountText(proposal.collateral, collateral.decimals)} {collateral.symbol}
           </span>
           .

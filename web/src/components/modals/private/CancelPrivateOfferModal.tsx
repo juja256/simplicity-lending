@@ -1,10 +1,12 @@
 import { Chip } from '@heroui/react'
 import { useMemo } from 'react'
 
+import { useBlockHeight } from '@/api/esplora/hooks'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { borrowerNftOutpoint } from '@/privateLending/candidate'
 import { buildPrivateCancellation } from '@/privateLending/flows/cancellation'
+import { canStillAccept } from '@/privateLending/offerView'
 import { selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
 import { SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/script-auth/witness'
@@ -29,6 +31,9 @@ export default function CancelPrivateOfferModal(props: PrivateOfferActionModalPr
   const { item } = props
   const { terms } = item
   const { formatCollateralDisplay } = useFormatAmount()
+  const { data: tipHeight } = useBlockHeight()
+  // Past its term the lender can no longer accept it: it expired.
+  const expired = tipHeight > 0 && !canStillAccept(terms, tipHeight)
 
   // The indexer must still list the pending offer unspent (`requires`). The builder spends output
   // 3 and the lender NFT lock of the creation the gate verified, and requires the borrower NFT at
@@ -61,8 +66,8 @@ export default function CancelPrivateOfferModal(props: PrivateOfferActionModalPr
       requires='pending_offer'
       title='Cancel your proposal'
       chip={
-        <Chip color='warning' variant='soft' size='sm'>
-          Not accepted yet
+        <Chip color={expired ? 'default' : 'warning'} variant='soft' size='sm'>
+          {expired ? 'Expired' : 'Not accepted yet'}
         </Chip>
       }
       label='Cancel proposal'

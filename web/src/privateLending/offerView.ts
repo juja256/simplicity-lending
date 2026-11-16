@@ -1,8 +1,8 @@
 // Display and gating rules of the private offers, shared by the lender console, the borrower's
-// loans and their modals. The indexer's candidate (status, UTXOs) is untrusted: it only decides what to
-// show and which action to offer. Every action loads its offer fresh through the gate, and its
-// builder checks every outpoint it is given. The rules that read outpoints from the candidate are
-// in `./candidate`.
+// loans and their modals. The indexer's candidate (status, UTXOs) is untrusted: it only decides
+// what to show and which action to offer. Every action loads its offer fresh through the gate, and
+// its builder checks every outpoint it is given. The rules that read outpoints from the candidate
+// are in `./candidate`.
 import type { ReactNode } from 'react'
 
 import type {
