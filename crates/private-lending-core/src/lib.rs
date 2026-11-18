@@ -42,7 +42,7 @@ pub use lender_terms::{
 pub use marker::Marker;
 pub use offer::{NewOffer, OfferError, OfferPinned, OpenError, OpenedOffer};
 pub use pinned::PinnedOutput;
-pub use secrets::{OfferSecrets, PinnedRole};
+pub use secrets::{OfferSecrets, PinnedRole, expiry_hash};
 pub use terms::{OfferTerms, SignedTerms, TERMS_VERSION, TermsError};
 
 /// The BIP340-style tagged hash `SHA256(SHA256(tag) ‖ SHA256(tag) ‖ data)`, where `data` is the

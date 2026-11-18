@@ -2,6 +2,7 @@
 mod common;
 
 mod failure_flows;
+mod hidden_expiry;
 mod offer_acceptance_success_flows;
 mod offer_cancellation_success_flows;
 mod offer_creation_flows;

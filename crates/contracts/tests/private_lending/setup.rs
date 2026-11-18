@@ -11,7 +11,7 @@ use lending_contracts::programs::private_lending::{
 };
 use lending_contracts::programs::program::SimplexProgram;
 use lending_contracts::utils::confidential::{
-    ConfidentialTransaction, PinnedOutput, PinnedOutputExt,
+    ConfidentialTransaction, ConfidentialTransactionError, PinnedOutput, PinnedOutputExt,
 };
 use private_lending_core::{LendingKey, NewOffer, OfferTerms};
 
@@ -304,7 +304,8 @@ pub(super) fn setup_pending_private_offer(
         terms,
     )?;
 
-    let parameters = PrivateLendingParameters::from_terms(&terms, new_offer.pinned, network);
+    let parameters =
+        PrivateLendingParameters::from_terms(&terms, new_offer.pinned, &new_offer.secrets, network);
 
     let offer = PrivateLendingOffer::new_pending(parameters);
 
@@ -517,6 +518,15 @@ pub(super) fn claim_asset_auth_output(
     );
 
     broadcast(&ctx, keeper)
+}
+
+/// Asserts that the program of one of the transaction's inputs rejects it.
+pub(super) fn assert_program_rejects(result: Result<impl Sized, ConfidentialTransactionError>) {
+    match result {
+        Err(ConfidentialTransactionError::Program(_)) => {}
+        Err(error) => panic!("expected the program to reject the transaction, got: {error}"),
+        Ok(_) => panic!("expected the program to reject the transaction"),
+    }
 }
 
 pub(super) fn get_active_offer(setup: &PrivateOfferSetup) -> PrivateLendingOffer {

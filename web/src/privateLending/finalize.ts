@@ -16,7 +16,7 @@ import {
 import {
   buildPrivateLendingWitness,
   PRIVATE_LENDING_BRANCH_SPENDS_ACTIVE,
-  type PrivateLendingBranch,
+  type PrivateLendingWitness,
 } from '@/simplicity/private-lending/witness'
 import { buildScriptAuthWitness } from '@/simplicity/script-auth/witness'
 import { buildCovenantSpendInfo } from '@/simplicity/taproot'
@@ -60,7 +60,7 @@ export function pinnedAuthCovenant(
 }
 
 /**
- * Finalizes the offer's input `inputIndex` on `branch`: the pending offer (acceptance,
+ * Finalizes the offer's input `inputIndex` with `witness`: the pending offer (acceptance,
  * cancellation) or the active one (repayment, liquidation), as `active` says.
  */
 export function finalizePrivateOfferInput(
@@ -70,8 +70,9 @@ export function finalizePrivateOfferInput(
   active: boolean,
   prevouts: TxOut[],
   inputIndex: number,
-  branch: PrivateLendingBranch,
+  witness: PrivateLendingWitness,
 ): Transaction {
+  const { branch } = witness
   if (PRIVATE_LENDING_BRANCH_SPENDS_ACTIVE[branch] !== active) {
     throw new Error(`${branch} spends the ${active ? 'pending' : 'active'} offer`)
   }
@@ -83,7 +84,7 @@ export function finalizePrivateOfferInput(
       spendInfo.controlBlock(program.cmr),
       prevouts,
       inputIndex,
-      buildPrivateLendingWitness(branch),
+      buildPrivateLendingWitness(witness),
       deps.network,
       deps.lwk.SimplicityLogLevel.None,
     ),

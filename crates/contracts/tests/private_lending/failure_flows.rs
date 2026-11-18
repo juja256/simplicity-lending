@@ -8,14 +8,13 @@ use lending_contracts::programs::private_lending::{
 use lending_contracts::programs::program::SimplexProgram;
 use lending_contracts::programs::script_auth::{ScriptAuth, ScriptAuthWitnessParams};
 use lending_contracts::utils::confidential::{
-    ConfidentialTransaction, ConfidentialTransactionError, PinnedOutput, PinnedOutputExt,
+    ConfidentialTransaction, PinnedOutput, PinnedOutputExt,
 };
 
-use super::offer_liquidation_success_flows::build_liquidation;
 use super::setup::{
-    PrivateOfferSetup, accept_private_offer, add_lender_principal, broadcast, build_full_repayment,
-    default_offer_parameters, find_explicit_utxo, find_pinned_utxo, fund_lender, get_active_offer,
-    setup_pending_private_offer,
+    PrivateOfferSetup, accept_private_offer, add_lender_principal, assert_program_rejects,
+    broadcast, build_full_repayment, default_offer_parameters, find_explicit_utxo,
+    find_pinned_utxo, fund_lender, get_active_offer, setup_pending_private_offer,
 };
 
 /// An acceptance in which the lender pays the principal as `principal` instead of the pinned
@@ -134,14 +133,6 @@ fn build_repayment_with(
     ));
 
     Ok(ctx)
-}
-
-fn assert_program_rejects(result: Result<impl Sized, ConfidentialTransactionError>) {
-    match result {
-        Err(ConfidentialTransactionError::Program(_)) => {}
-        Err(error) => panic!("expected the program to reject the transaction, got: {error}"),
-        Ok(_) => panic!("expected the program to reject the transaction"),
-    }
 }
 
 /// The honest control of the acceptance failures: with the pinned principal, the transaction that
@@ -319,38 +310,6 @@ fn private_offer_repayment_fails_with_wrong_debt_slot(
     let ctx = build_full_repayment(&wrong_debt_offer, wrong_debt_offer_utxo, borrower, &lender)?;
 
     assert_program_rejects(ctx.finalize(borrower));
-
-    Ok(())
-}
-
-#[simplex::test]
-fn private_offer_liquidation_fails_before_expiration_time(
-    context: simplex::TestContext,
-) -> anyhow::Result<()> {
-    let provider = context.get_default_provider();
-    let lender = context.random_signer();
-
-    let mut setup = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
-    let parameters = setup.parameters;
-
-    let acceptance_tx = accept_private_offer(&context, &mut setup, &lender)?;
-
-    setup.offer = get_active_offer(&setup);
-
-    assert!(provider.fetch_tip_height()? < parameters.loan_expiration_time);
-
-    // the program accepts the lock time, but the network refuses a transaction not final yet
-    let result = build_liquidation(&setup, &acceptance_tx, &lender)?.broadcast(&lender);
-
-    assert!(matches!(
-        result,
-        Err(ConfidentialTransactionError::Provider(_))
-    ));
-    assert!(
-        !provider
-            .fetch_scripthash_utxos(&setup.offer.get_script_pubkey())?
-            .is_empty()
-    );
 
     Ok(())
 }

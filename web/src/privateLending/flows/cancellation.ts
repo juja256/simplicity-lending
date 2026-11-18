@@ -248,7 +248,7 @@ export async function buildPrivateCancellation(
         false,
         prevouts(),
         CANCELLATION_INPUT.offer,
-        'OfferCancellation',
+        { branch: 'OfferCancellation' },
       )
       const finalizedTx = finalizeScriptAuthInput(
         deps,

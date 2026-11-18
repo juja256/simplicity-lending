@@ -9,7 +9,12 @@ pub enum PrivateLendingWitnessBranch {
     /// Reserved for a later contract version: the program always rejects it.
     PartialRepayment,
     FullRepayment,
-    Liquidation,
+    /// The program checks that `SHA-256(salt ‖ expiry)` is its `EXPIRY_HASH` and that the
+    /// transaction is locked to at least `expiry`.
+    Liquidation {
+        salt: [u8; 32],
+        expiry: u32,
+    },
 }
 
 impl PrivateLendingWitnessBranch {
@@ -19,7 +24,9 @@ impl PrivateLendingWitnessBranch {
             PrivateLendingWitnessBranch::OfferCancellation => Left(Right(())),
             PrivateLendingWitnessBranch::PartialRepayment => Right(Left(Left(()))),
             PrivateLendingWitnessBranch::FullRepayment => Right(Left(Right(()))),
-            PrivateLendingWitnessBranch::Liquidation => Right(Right(())),
+            PrivateLendingWitnessBranch::Liquidation { salt, expiry } => {
+                Right(Right((*salt, *expiry)))
+            }
         };
 
         Box::new(PrivateLendingWitness { path })

@@ -307,7 +307,7 @@ export async function buildPrivateAcceptance(
         false,
         prevouts(),
         ACCEPTANCE_INPUT.offer,
-        'OfferAcceptance',
+        { branch: 'OfferAcceptance' },
       )
       const finalizedTx = finalizeScriptAuthInput(
         deps,
