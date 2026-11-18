@@ -41,8 +41,9 @@ pub enum VerifyError {
 /// [`open_creation_as_lender`] checks the borrower's signature, the pinned collateral, the terms,
 /// the lender NFT's unique issuance at input 1 and the NFT outputs. This adds that:
 /// - output 3 is at the pending offer address that the parameters, rebuilt with
-///   [`PrivateLendingParameters::from_terms`] from the opened terms and pinned outputs, give:
-///   otherwise the borrower pinned other outputs, such as a smaller repayment, than the terms show;
+///   [`PrivateLendingParameters::from_terms`] from the opened terms, pinned outputs and secrets,
+///   give: otherwise the borrower pinned other outputs, such as a smaller repayment, than the terms
+///   show, or another expiry hash, which the lender could not open to liquidate;
 /// - output 1 locks the lender NFT to that offer (`script_auth` of its script hash), which the
 ///   acceptance unlocks.
 ///
@@ -86,8 +87,12 @@ fn verify_addresses(
     creation_tx: &Transaction,
     network: SimplicityNetwork,
 ) -> Result<(OpenedOffer, PrivateLendingParameters), VerifyError> {
-    let parameters =
-        PrivateLendingParameters::from_terms(&opened.signed_terms.terms, opened.pinned, network);
+    let parameters = PrivateLendingParameters::from_terms(
+        &opened.signed_terms.terms,
+        opened.pinned,
+        &opened.secrets,
+        network,
+    );
     let offer = PrivateLendingOffer::new_pending(parameters);
 
     let script_at = |index: usize| {

@@ -16,7 +16,7 @@ import { buildAssetAuthArguments } from '@/simplicity/asset-auth/arguments'
 import { buildScriptAuthArguments } from '@/simplicity/script-auth/arguments'
 import { buildCovenantSpendInfo, UNSPENDABLE_TAPROOT_PUBKEY } from '@/simplicity/taproot'
 import { hexToBytes } from '@/utils/hex'
-import { toBytes32, toUint32, toUint64 } from '@/utils/uint'
+import { toBytes32, toUint64 } from '@/utils/uint'
 import type { ContractArguments } from '@/wasm/private-lending/private_lending_wasm'
 
 import { CREATION_OUTPUT, NFT_AMOUNT } from './layout'
@@ -34,7 +34,8 @@ export interface PrivateOfferArguments {
   activeCollateralCommitment: string
   principalCommitment: string
   repaymentCommitment: string
-  loanExpirationTime: number
+  /** The SHA-256 of the expiry salt and the expiry: the program never takes the expiry itself. */
+  expiryHash: string
 }
 
 export interface PrivateOfferScripts {
@@ -56,7 +57,7 @@ export function toPrivateOfferArguments(args: ContractArguments): PrivateOfferAr
     activeCollateralCommitment: args.activeCollateralCommitment,
     principalCommitment: args.principalCommitment,
     repaymentCommitment: args.repaymentCommitment,
-    loanExpirationTime: args.loanExpirationTime,
+    expiryHash: args.expiryHash,
   }
 }
 
@@ -144,10 +145,7 @@ export function privateOfferScripts(
       .addValue('ACTIVE_COLLATERAL_COMMITMENT', u256(args.activeCollateralCommitment))
       .addValue('PRINCIPAL_COMMITMENT', u256(args.principalCommitment))
       .addValue('REPAYMENT_COMMITMENT', u256(args.repaymentCommitment))
-      .addValue(
-        'LOAN_EXPIRATION_TIME',
-        SimplicityTypedValue.fromU32(toUint32(args.loanExpirationTime, 'loanExpirationTime')),
-      )
+      .addValue('EXPIRY_HASH', u256(args.expiryHash))
       .addValue('PRINCIPAL_OUTPUT_SCRIPT_HASH', u256(principalOutputScriptHash))
       .addValue('REPAYMENT_OUTPUT_SCRIPT_HASH', u256(repaymentOutputScriptHash)),
   )

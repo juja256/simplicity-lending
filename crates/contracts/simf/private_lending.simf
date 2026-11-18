@@ -247,7 +247,18 @@ fn get_liquidation_lender_nft_indexes(start_input_index: u32, start_output_index
     (safe_add_32(start_input_index, 1), start_output_index)
 }
 
-fn liquidate_offer() {
+// SHA-256 of the salt and the expiry, a 4-byte big-endian block height
+fn get_expiry_hash(salt: u256, expiry: u32) -> u256 {
+    let hash_ctx1: Ctx8 = jet::sha_256_ctx_8_init();
+    let hash_ctx2: Ctx8 = jet::sha_256_ctx_8_add_32(hash_ctx1, salt);
+    let hash_ctx3: Ctx8 = jet::sha_256_ctx_8_add_4(hash_ctx2, expiry);
+
+    jet::sha_256_ctx_8_finalize(hash_ctx3)
+}
+
+// The program carries only the expiry's salted hash: a spend through another branch reveals a CMR
+// that commits to EXPIRY_HASH, from which nobody without the salt can find the expiry.
+fn liquidate_offer(salt: u256, expiry: u32) {
     let (lending_input_index, lending_output_index): (u32, u32) = (jet::current_index(), 0);
     let (
         lender_nft_input_index,
@@ -261,7 +272,8 @@ fn liquidate_offer() {
         get_script_hash_for_storage(true, param::REPAYMENT_COMMITMENT)
     );
 
-    jet::check_lock_height(param::LOAN_EXPIRATION_TIME);
+    assert!(jet::eq_256(get_expiry_hash(salt, expiry), param::EXPIRY_HASH));
+    jet::check_lock_height(expiry);
 
     ensure_input_commitment(lending_input_index, param::ACTIVE_COLLATERAL_COMMITMENT);
 
@@ -361,7 +373,7 @@ fn main() {
                 },
             }
         },
-        Right(active_offer_params: Either<Either<(), ()>, ()>) => {
+        Right(active_offer_params: Either<Either<(), ()>, (u256, u32)>) => {
             match active_offer_params {
                 Left(repayment_params: Either<(), ()>) => {
                     match repayment_params {
@@ -374,8 +386,10 @@ fn main() {
                         },
                     }
                 },
-                Right(params: ()) => {
-                    liquidate_offer();
+                Right(liquidation_params: (u256, u32)) => {
+                    let (salt, expiry): (u256, u32) = liquidation_params;
+
+                    liquidate_offer(salt, expiry);
                 }
             }
         },

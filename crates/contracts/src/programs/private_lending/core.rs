@@ -173,6 +173,7 @@ impl PrivateLendingOffer {
         let expected = PrivateLendingParameters::from_terms(
             &new_offer.signed_terms.terms,
             new_offer.pinned,
+            &new_offer.secrets,
             self.parameters.network,
         );
         assert!(
@@ -334,7 +335,9 @@ impl PrivateLendingOffer {
     }
 
     /// Spends the active offer after its expiration (input 0) and burns the lender NFT
-    /// (output 0). The caller adds the lender NFT input (input 1) and takes the collateral.
+    /// (output 0). The offer input's witness reveals the expiry salt and the expiration, and the
+    /// transaction is locked to the expiration. The caller adds the lender NFT input (input 1) and
+    /// takes the collateral.
     ///
     /// # Panics
     /// Panics if the offer is pending or the transaction already has inputs or outputs.
@@ -345,7 +348,8 @@ impl PrivateLendingOffer {
             "Liquidation must be the first attachment"
         );
 
-        let locktime = LockTime::from_height(self.parameters.loan_expiration_time).unwrap();
+        let expiry = self.parameters.loan_expiration_time;
+        let locktime = LockTime::from_height(expiry).unwrap();
 
         let active_offer_input = PartialInput::new(active_offer_utxo)
             .with_sequence(Sequence::ENABLE_LOCKTIME_NO_RBF)
@@ -354,7 +358,11 @@ impl PrivateLendingOffer {
         self.add_program_input_from_partial_input(
             ctx,
             active_offer_input,
-            PrivateLendingWitnessBranch::Liquidation.build_witness(),
+            PrivateLendingWitnessBranch::Liquidation {
+                salt: self.parameters.expiry_salt,
+                expiry,
+            }
+            .build_witness(),
         );
 
         ctx.add_output(PartialOutput::new(

@@ -5,6 +5,7 @@
 // of a directory entry the core signed (`checkDirectoryEntryParity`), the rules of the app's
 // lending-key holder (`checkLendingKeyHolder`, `checkSyncInSession`) and the PSET builder's
 // `'none'` blinding mode (`checkPsetBuilderNoneBlinding`).
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -42,6 +43,10 @@ import {
   toPrivateOfferArguments,
   verifyOfferAddresses,
 } from '../src/simplicity/private-lending/scripts'
+import {
+  buildPrivateLendingWitness,
+  type PrivateLendingWitness,
+} from '../src/simplicity/private-lending/witness'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const webRoot = path.resolve(here, '..')
@@ -59,7 +64,7 @@ interface Fixture {
     active_collateral_commitment: string
     principal_commitment: string
     repayment_commitment: string
-    loan_expiration_time: number
+    expiry_hash: string
   }
   principal_output_script_hash: string
   repayment_output_script_hash: string
@@ -149,7 +154,24 @@ function expectedArguments(): PrivateOfferArguments {
     activeCollateralCommitment: a.active_collateral_commitment,
     principalCommitment: a.principal_commitment,
     repaymentCommitment: a.repayment_commitment,
-    loanExpirationTime: a.loan_expiration_time,
+    expiryHash: a.expiry_hash,
+  }
+}
+
+function expiryHashOf(salt: string, expiry: number): string {
+  const height = Buffer.alloc(4)
+  height.writeUInt32BE(expiry)
+  return createHash('sha256')
+    .update(Buffer.concat([Buffer.from(salt, 'hex'), height]))
+    .digest('hex')
+}
+
+function buildsWitness(witness: PrivateLendingWitness): boolean {
+  try {
+    buildPrivateLendingWitness(witness)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -208,6 +230,26 @@ async function main(): Promise<void> {
       `${JSON.stringify(got)} != ${JSON.stringify(expected)}`,
     )
   }
+
+  // The liquidation's witness carries the salt and the expiry that open the program's expiry hash.
+  equal('expiry salt of both sides', asBorrower.expirySalt(), asLender.expirySalt())
+  equal(
+    'expiry hash is the SHA-256 of the salt and the big-endian expiry',
+    expiryHashOf(asLender.expirySalt(), asLender.loanExpirationTime()),
+    expected.expiryHash,
+  )
+  check(
+    'the liquidation witness takes the salt and the expiry',
+    buildsWitness({
+      branch: 'Liquidation',
+      salt: asLender.expirySalt(),
+      expiry: asLender.loanExpirationTime(),
+    }),
+  )
+  check(
+    'the liquidation witness refuses a short salt',
+    !buildsWitness({ branch: 'Liquidation', salt: asLender.expirySalt().slice(2), expiry: 1 }),
+  )
 
   // The blinder strings of the wasm are in LWK's format: LWK secrets built from them commit to
   // the same asset and value as the creation transaction's pending collateral output.

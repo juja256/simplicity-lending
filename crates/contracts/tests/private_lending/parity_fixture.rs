@@ -45,7 +45,7 @@ fn expected_fixture(parameters: &PrivateLendingParameters, creation_tx: &Transac
             "active_collateral_commitment": hex::encode(arguments.active_collateral_commitment),
             "principal_commitment": hex::encode(arguments.principal_commitment),
             "repayment_commitment": hex::encode(arguments.repayment_commitment),
-            "loan_expiration_time": arguments.loan_expiration_time,
+            "expiry_hash": hex::encode(arguments.expiry_hash),
         },
         "principal_output_script_hash":
             hex::encode(parameters.get_principal_output_asset_auth().get_script_hash()),

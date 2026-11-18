@@ -367,7 +367,7 @@ export async function buildPrivateRepayment(
         true,
         prevouts(),
         REPAYMENT_INPUT.offer,
-        'FullRepayment',
+        { branch: 'FullRepayment' },
       )
       const txid = finalizedTx.txid().toString()
       if (txid !== builtTxid) throw new Error('Finalizing changed the repayment')

@@ -4,9 +4,9 @@ use elements::encode::deserialize;
 use elements::hex::ToHex;
 use elements::{Transaction, confidential};
 use private_lending_core::{
-    CreationError, OfferPinned, OfferTerms, OpenedOffer as CoreOpenedOffer, PinnedOutput,
-    PinnedRole as CorePinnedRole, lift_lending_key, open_creation_as_borrower,
-    open_creation_as_lender,
+    CreationError, OfferPinned, OfferSecrets, OfferTerms, OpenedOffer as CoreOpenedOffer,
+    PinnedOutput, PinnedRole as CorePinnedRole, expiry_hash, lift_lending_key,
+    open_creation_as_borrower, open_creation_as_lender,
 };
 use wasm_bindgen::prelude::*;
 
@@ -126,6 +126,13 @@ impl OpenedOffer {
         self.offer.signed_terms.terms.loan_expiration_time
     }
 
+    /// The salt of the contract's expiry hash, hex: the liquidation's witness carries it with the
+    /// expiration.
+    #[wasm_bindgen(js_name = expirySalt)]
+    pub fn expiry_salt(&self) -> String {
+        encode_hex(&self.offer.secrets.expiry_salt())
+    }
+
     #[wasm_bindgen(js_name = borrowerNft)]
     pub fn borrower_nft(&self) -> String {
         self.offer.signed_terms.terms.borrower_nft.to_string()
@@ -183,7 +190,11 @@ impl OpenedOffer {
     /// The arguments of the offer's contract.
     #[wasm_bindgen(js_name = contractArguments)]
     pub fn contract_arguments(&self) -> ContractArguments {
-        ContractArguments::new(&self.offer.signed_terms.terms, &self.offer.pinned)
+        ContractArguments::new(
+            &self.offer.signed_terms.terms,
+            &self.offer.pinned,
+            &self.offer.secrets,
+        )
     }
 
     pub fn pinned(&self, role: PinnedRole) -> PinnedOutputInfo {
@@ -212,10 +223,11 @@ pub struct ContractArguments {
     principal_commitment: String,
     repayment_commitment: String,
     loan_expiration_time: u32,
+    expiry_hash: String,
 }
 
 impl ContractArguments {
-    pub(crate) fn new(terms: &OfferTerms, pinned: &OfferPinned) -> Self {
+    pub(crate) fn new(terms: &OfferTerms, pinned: &OfferPinned, secrets: &OfferSecrets) -> Self {
         Self {
             borrower_nft_asset_id: encode_hex(&terms.borrower_nft.into_inner().0),
             lender_nft_asset_id: encode_hex(&terms.lender_nft.into_inner().0),
@@ -224,6 +236,10 @@ impl ContractArguments {
             principal_commitment: encode_hex(&pinned.principal.commitment_hash()),
             repayment_commitment: encode_hex(&pinned.repayment.commitment_hash()),
             loan_expiration_time: terms.loan_expiration_time,
+            expiry_hash: encode_hex(&expiry_hash(
+                &secrets.expiry_salt(),
+                terms.loan_expiration_time,
+            )),
         }
     }
 }
@@ -260,9 +276,18 @@ impl ContractArguments {
         self.repayment_commitment.clone()
     }
 
+    /// The expiration, which the program does not take: it is in the liquidation's witness and
+    /// its lock time.
     #[wasm_bindgen(getter, js_name = loanExpirationTime)]
     pub fn loan_expiration_time(&self) -> u32 {
         self.loan_expiration_time
+    }
+
+    /// `EXPIRY_HASH`, the SHA-256 of the expiry salt and the expiration, which the program takes
+    /// in place of the expiration.
+    #[wasm_bindgen(getter, js_name = expiryHash)]
+    pub fn expiry_hash(&self) -> String {
+        self.expiry_hash.clone()
     }
 }
 
@@ -363,6 +388,7 @@ pub(crate) mod tests {
             a.principal_commitment(),
             a.repayment_commitment(),
             a.loan_expiration_time().to_string(),
+            a.expiry_hash(),
         ]
     }
 
@@ -386,7 +412,7 @@ pub(crate) mod tests {
         // input 0 of the fixture's creation transaction, as "<txid>:<vout>"
         assert_eq!(
             as_lender.first_input(),
-            "e9c3ff06972d7e7ef13b315c654bc5b6a199babf498f25dbf934ead44bc88b51:0"
+            "9af01d6eb39322db2b839e0474d9ef06cd362ff6e0bc8a6e93a3c45196ef3cc2:0"
         );
     }
 
@@ -430,7 +456,9 @@ pub(crate) mod tests {
             got.repayment_commitment(),
             encode_hex(&expected.repayment_commitment)
         );
-        assert_eq!(got.loan_expiration_time(), expected.loan_expiration_time);
+        assert_eq!(got.loan_expiration_time(), parameters.loan_expiration_time);
+        assert_eq!(got.expiry_hash(), encode_hex(&expected.expiry_hash));
+        assert_eq!(offer.expiry_salt(), encode_hex(&parameters.expiry_salt));
     }
 
     #[test]
