@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use elements::confidential::Nonce;
+use elements::confidential::{AssetBlindingFactor, Nonce, ValueBlindingFactor};
 use elements::locktime::LOCK_TIME_THRESHOLD;
 use elements::secp256k1_zkp::{PublicKey, SECP256K1, SecretKey, XOnlyPublicKey};
 use elements::{AssetId, OutPoint, TxOutSecrets};
@@ -69,6 +69,43 @@ impl OfferPinned {
             ),
         }
     }
+
+    /// The collateral of the loan after `installments` installments, with asset blinder
+    /// `a_c + i` and value blinder `r_c − i·c` modulo the curve order, from the active
+    /// collateral's `a_c` and `r_c` and its amount `c`; after none it is the active collateral.
+    ///
+    /// Each installment re-blinds the collateral by this public step, because secp256k1-zkp
+    /// refuses a surjection proof for an output whose asset commitment is an input's. The asset
+    /// commitment then moves by `G` at every step
+    /// ([`asset_plus_generator`](crate::asset_plus_generator)), and the value commitment stays the
+    /// active collateral's: `c·(A_c + G) + (r_c − c)·G = c·A_c + r_c·G`.
+    pub fn collateral_after(&self, installments: u32) -> PinnedOutput {
+        let active = self.active_collateral;
+        let steps = u128::from(installments);
+
+        // elements adds value blinders only, so the asset blinder is added as one
+        let mut abf =
+            ValueBlindingFactor::from_slice(active.asset_blinding_factor.into_inner().as_ref())
+                .expect("an asset blinder is a scalar");
+        abf += small_scalar(steps);
+        let mut vbf = active.value_blinding_factor;
+        vbf += -small_scalar(steps * u128::from(active.amount));
+
+        PinnedOutput {
+            asset_blinding_factor: AssetBlindingFactor::from_slice(abf.into_inner().as_ref())
+                .expect("a scalar is an asset blinder"),
+            value_blinding_factor: vbf,
+            ..active
+        }
+    }
+}
+
+/// `value` as a scalar. Every `u128` is below the curve order.
+fn small_scalar(value: u128) -> ValueBlindingFactor {
+    let mut bytes = [0; 32];
+    bytes[16..].copy_from_slice(&value.to_be_bytes());
+
+    ValueBlindingFactor::from_slice(&bytes).expect("a u128 is below the curve order")
 }
 
 /// An offer a borrower is about to create: everything its creation transaction needs.

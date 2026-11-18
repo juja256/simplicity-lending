@@ -1,10 +1,11 @@
 //! Cryptography of Simplicity Lending private offers: lending keys, per-offer secrets, signed
 //! terms, the marker, pinned outputs, building offers, and finding, opening and checking them in
-//! their creation transactions; and the terms lenders publish in the directory, with the check of
-//! a proposal against them.
+//! their creation transactions; a loan's debt as a curve point, with the installments that pay it;
+//! and the terms lenders publish in the directory, with the check of a proposal against them.
 //!
-//! The crate depends only on `elements` and `rand`, so the contracts crate and the browser's wasm
-//! module run the same code.
+//! The crate depends only on `elements`, `rand` and `k256` (whose field arithmetic tells whether a
+//! commitment's `y` is a square), so the contracts crate and the browser's wasm module run the same
+//! code.
 //!
 //! Signing the terms ([`SignedTerms::sign`]) draws its auxiliary randomness from `rand`'s thread
 //! RNG, as does a caller that passes `rand::thread_rng()` to [`blind_pset`]. The thread RNG seeds
@@ -14,6 +15,7 @@
 
 mod blind;
 mod creation;
+mod debt;
 mod directory;
 mod keys;
 mod lender_terms;
@@ -29,11 +31,15 @@ pub use blind::{BlindPsetError, PinnedBlinding, RewindError, blind_pset, rewind}
 pub use creation::{
     CreationError, FoundOffer, find_offer, open_creation_as_borrower, open_creation_as_lender,
 };
+pub use debt::{
+    DebtError, DebtOpening, InstallmentError, asset_plus_generator, debt_after, debt_hash,
+    open_installment, sweep_opening, zero_debt_blinder, zero_debt_key,
+};
 pub use directory::{
     DIRECTORY_TAG, DirectoryAction, DirectorySignError, directory_message, sign_directory_action,
     verify_directory_action,
 };
-pub use keys::{LendingKey, ephemeral_key, lift_lending_key};
+pub use keys::{LendingKey, ephemeral_key, installment_ephemeral_key, lift_lending_key};
 pub use lender_terms::{
     BLOCKS_PER_DAY, BLOCKS_PER_YEAR, COLLATERAL_SCALE, LENDER_TERMS_VERSION, LenderTerms,
     LenderTermsError, MAX_PAIRS, MAX_TERM_DAYS, PairTerms, Proposal, TermBreach, apr_bps,
