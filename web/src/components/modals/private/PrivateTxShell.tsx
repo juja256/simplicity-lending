@@ -26,7 +26,10 @@ export interface PrivateTxShellProps {
    * broadcasting it again, as saved.
    */
   unsentTx?: PrivateTxRecord
-  /** Builds, signs, saves and broadcasts, through `usePrivateTransaction().run`. */
+  /**
+   * Builds, signs, saves and broadcasts, through `usePrivateTransaction().run`, which fails with a
+   * `PrivateBroadcastError` when it saved a transaction but did not broadcast it.
+   */
   execute: () => Promise<{ txid: string }>
   /** Must resolve before a saved transaction is broadcast again, such as a check of the tip. */
   beforeBroadcast?: () => Promise<void>
@@ -52,8 +55,9 @@ interface Unsent {
 
 /**
  * A private transaction in a modal: its details, then on confirm `execute`, with the stepper of
- * `OfferActionShell`. If only the broadcast fails, the signed transaction is saved, and the modal
- * offers to broadcast it again (never to rebuild it) or to discard it.
+ * `OfferActionShell`. If the transaction was saved but the check before its broadcast or the
+ * broadcast failed (a `PrivateBroadcastError`), the modal offers to broadcast it again (never to
+ * rebuild it) or to discard it.
  */
 export default function PrivateTxShell({
   isOpen,
@@ -91,8 +95,8 @@ export default function PrivateTxShell({
     onError: keepUnsent,
   })
 
-  // A failed broadcast returns to the form, which then offers to broadcast again, unless the
-  // saved transaction can no longer be sent: then it offers only "Discard".
+  // A failed check or broadcast returns to the form, which then offers to broadcast again, unless
+  // the saved transaction can no longer be sent: then it offers only "Discard".
   const retryStatus: MutationStatus =
     retry.error instanceof PrivateBroadcastError ? 'idle' : retry.status
   const blocked = unsent !== null && unsentBlockedNote !== null

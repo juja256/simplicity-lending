@@ -253,6 +253,18 @@ function runAddresses(name: Wallet): AddressCursor {
   })
 }
 
+/**
+ * The first stage, if any, whose record is `built` or `broadcast`: its transaction may spend coins
+ * a split would spend too, so no split is built until that stage is resumed or its record dropped.
+ */
+function unfinishedStage(): { stage: Stage; status: 'built' | 'broadcast' } | undefined {
+  for (const stage of STAGE_NAMES) {
+    const status = getRecord(stage)?.status
+    if (status === 'built' || status === 'broadcast') return { stage, status }
+  }
+  return undefined
+}
+
 async function walletsStage(ctx: Context): Promise<void> {
   checkWalletIdentities(ctx, true)
   for (const name of NAMES) {
@@ -280,6 +292,14 @@ async function walletsStage(ctx: Context): Promise<void> {
     if (coins >= target) {
       out(`${name}: ${coins} confirmed tL-BTC coins, no split needed`)
       continue
+    }
+    const unfinished = unfinishedStage()
+    if (unfinished !== undefined) {
+      console.error(
+        `${name}: cannot split, ${unfinished.stage}'s record is ${unfinished.status}: ` +
+          `resume or drop ${unfinished.stage} before splitting`,
+      )
+      process.exit(1)
     }
     if (record !== undefined) {
       out(`${name}: the split ${record.txid} was spent since; splitting again`)
@@ -2098,8 +2118,11 @@ async function shortProposalStage(ctx: Context): Promise<void> {
 /**
  * Removes an unfinished `short-proposal` record whose offer can no longer be accepted (the tip at
  * or past its expiry), so the stage makes a new one: resumed, it would at best confirm a proposal
- * the demo cannot accept, and the demo would wait for its timeout. A confirmed record is the
- * demo's to remove.
+ * the demo cannot accept, and the demo would wait for its timeout. The chain is asked first: a
+ * record whose transaction it knows, in the mempool or a block, is kept for the stage to resume,
+ * as dropping it would lose track of a creation that locks the collateral. That is a `broadcast`
+ * record, or a `built` one whose broadcast went through before its status was saved. A confirmed
+ * record is the demo's to remove.
  */
 async function dropExpiredShortProposal(ctx: Context): Promise<void> {
   const record = getRecord('short-proposal')
@@ -2109,11 +2132,33 @@ async function dropExpiredShortProposal(ctx: Context): Promise<void> {
   opened.free()
   const tip = await ctx.chain.tipHeight()
   if (tip < expiry) return
+  if (await chainKnows(ctx, record.txid)) {
+    out(
+      `short-proposal: the unfinished ${record.txid} expired at block ${expiry} (tip ${tip}), ` +
+        'but the chain knows it; resuming it',
+    )
+    return
+  }
   out(
     `short-proposal: the unfinished ${record.txid} expired at block ${expiry} (tip ${tip}); ` +
       'making a new one',
   )
   removeRecord('short-proposal')
+}
+
+/**
+ * Whether esplora knows the transaction `txid`, in its mempool or a block: it answers 404 for one
+ * it does not. Any other failure throws.
+ */
+async function chainKnows(ctx: Context, txid: string): Promise<boolean> {
+  try {
+    await ctx.chain.fetchTimelock(txid)
+    return true
+  } catch (error) {
+    // The chain's GET fails with `GET <route>: <status> <body>`.
+    if (error instanceof Error && error.message.startsWith(`GET /tx/${txid}: 404`)) return false
+    throw error
+  }
 }
 
 /** An e2e offer, which the borrower created for the lender. */
