@@ -43,8 +43,8 @@ Builds on [the v1 design](2026-10-28-private-lending-design.md) and
      proportion needs a BP++ circuit (products of hidden values under different asset
      generators) and the verifier taking commitments from the transaction.
    - The phase 5 design note (below) builds (a). It closes the loan by equality instead of the
-     BIP340 signature under `D_final`, and by a BIP340 signature under `D` when the debt is
-     already zero, decided 2026-11-18.
+     BIP340 signature under `D_final`, and by revealing the blinder `k` of `D = k·G` when the debt
+     is already zero, decided 2026-11-18.
    - Lessons from the public contract's partial repayment, which can lock the collateral forever
      (`docs/security/2026-11-07-public-lending-partial-repayment-lock.md`):
      - each party's exit must not depend on an invariant the other party can break: liquidation
@@ -269,7 +269,7 @@ professional tool. Choices marked *(proposed)* were not discussed and need confi
 ## Phase 5 design note: the contract revision (items 1 and 3(a))
 
 Decided with the user on 2026-11-18; this note is the gate of the plan's phase 5. It keeps items 1
-and 3(a) as written except in how the loan closes: by equality, or by a BIP340 signature under `D`
+and 3(a) as written except in how the loan closes: by equality, or by revealing the debt's blinder
 when the debt is already zero (below), not by a BIP340 signature under `D_final`.
 
 ### Notation
@@ -316,7 +316,7 @@ receiver of what is released:
 | Cancellation | 0 pending offer, 1 lender NFT, 2 borrower NFT | 0 and 1 burn both NFTs | none |
 | Installment | 0 borrower NFT, 1 loan | 0 borrower NFT, 1 loan, 2 installment | `D` |
 | Full repayment | 0 borrower NFT, 1 loan | 0 borrower NFT burn, 1 repayment | `h` |
-| Zero-debt close | 0 borrower NFT, 1 loan | 0 borrower NFT burn | `D`, signature |
+| Zero-debt close | 0 borrower NFT, 1 loan | 0 borrower NFT burn, 1 `OP_RETURN` of `k` | `D` |
 | Liquidation | 0 loan, 1 lender NFT | 0 lender NFT burn | `h`, salt, expiry |
 
 Acceptance and cancellation are v1's. The other four branches check:
@@ -340,8 +340,8 @@ Acceptance and cancellation are v1's. The other four branches check:
   1. Input 1's script hash is the storage address (active, `h(A, D)`), with `D` the witness's
      point in its Elements encoding.
   2. The borrower NFT is burned in output 0.
-  3. The witness's signature is a valid BIP340 signature over `jet::sig_all_hash()` under the
-     x-coordinate of `D`.
+  3. Output 1 is an `OP_RETURN` whose first datum is a 32-byte push, read as a nonzero scalar `k`.
+  4. `k·G` has the x-coordinate of `D` (`jet::generate`, then `jet::gej_x_equiv`).
 - **Liquidation**, run at index 0:
   1. Input 0's script hash is the storage address (active, `h`) for the witness's `h`, which shows
      only that the loan is active.
@@ -391,19 +391,16 @@ would need a confidential output of amount zero. Elements rejects a spendable ou
 proof allows zero, and rust-elements proves a minimum of 1 (`TxOut::RANGEPROOF_MIN_VALUE`). Item
 3(a)'s signature under `D − V` fails there too, because any payment `V` carries at least 1.
 - The zero-debt close therefore has no repayment output: the borrower burns the borrower NFT and
-  signs the transaction under `D`.
-- A valid signature under `D`'s x-coordinate shows that the signer knows a `k` with `k·G = ±D`. If
-  any debt remained, `k` would reveal the discrete logarithm of `A` to base `G`.
-- BIP340 lifts the x-coordinate to the point with even `y`, so the borrower signs with whichever of
-  `r − r_p` and its negation gives that point. The x-coordinate is the same in Elements' encoding
-  and in BIP340, so this check needs no encoding conversion.
-- The signature only proves that the debt is zero; spending the borrower NFT authorizes the close.
-  The lender can compute the key too, because it rewinds the installments, but it cannot spend the
-  borrower NFT.
-- `jet::sig_all_hash()` commits to every output's range and surjection proofs (simplicity-sys
-  0.8.0, `elements/env.c`), so the app signs after blinding, and a rebuilt transaction needs a new
-  signature. The app signs in software with the key from the rebuilt debt; neither the wallet nor
-  the Jade takes part. Witnesses do not enter the hash, so the wallet's signatures do not affect it.
+  reveals the debt's blinder `k = r − r_p` in an `OP_RETURN` at output 1.
+- A `k` with `k·G = ±D` exists only when no debt remains: otherwise `k` would reveal the discrete
+  logarithm of `A` to base `G`. Comparing x-coordinates accepts `k` and `−k` alike, and the
+  x-coordinate is the same in Elements' encoding and on the curve, so the check needs no encoding
+  conversion. Of the two, the borrower reveals whichever it likes.
+- The revealed `k` lets the lender sweep after a zero-debt close; see "The final claim sweeps with
+  the combined opening". A signature under `D` would prove the same fact without revealing `k`,
+  and then the lender could never spend an installment it cannot open, at no cost to the borrower.
+- Revealing `k` is safe. The close needs the borrower NFT, so nobody else can build another close
+  from it, and once the loan is closed `k` opens nothing that holds value.
 - The app never builds the zero-debt state, because an amount equal to the remaining debt becomes
   the full repayment. The close exists so that a hand-built installment does not cost the borrower
   the collateral. *(My call:)* the borrower app offers the zero-debt close for a loan whose rebuilt
@@ -473,6 +470,11 @@ creation's `ephemeral_key`. A borrower who loses `d` and `r` cannot close the lo
 collateral at liquidation, so the borrower must rebuild both from the seed alone. The derived key
 also answers item 6's sender-recovery question for repayments.
 
+The lender also tracks the debt as a point, `D_k = D_{k−1} − V_k` from `D₀` and the installments'
+value commitments, with the conversions of "Elements commitments in Simplicity". Liquidating needs
+`h(A, D)` for the storage it spends, so the lender's exit must not depend on opening every
+installment.
+
 Two builds of one installment with the same inputs and different amounts would reuse the range
 proof's nonce, which can leak the amounts if both builds become public. The app rebroadcasts a
 saved build instead of rebuilding it, as it does for creations and acceptances.
@@ -497,6 +499,10 @@ the borrower nothing beyond an honest repayment. The combined opening avoids thi
 - All repayment outputs of a loan, the installments and the full repayment, add up to `D₀`, whose
   opening `(R, r₀)` the lender knows. The final repayment and every unclaimed installment
   therefore add up to `(R − Σ claimed p, r₀ − Σ claimed r)`.
+- After a zero-debt close the installments alone add up to `D₀ − D`, where `D = k'·G` is the debt
+  the close spent and `k'` is the revealed `k` or `−k`, whichever gives `D`. The unclaimed ones
+  then add up to `(R − Σ claimed p, r₀ − Σ claimed r − k')`, and the lender's final claim sweeps
+  them with that opening.
 - They all carry the asset commitment `A`, so a transaction's balance depends only on that sum.
   The final claim gives one of these inputs the combined opening and the others an amount and
   value blinder of zero.
@@ -518,9 +524,8 @@ NFT is a repayment, anything else a liquidation, so it would read an installment
 In v2 a burned borrower NFT is the full repayment, a burned lender NFT a liquidation, and an
 unburned borrower NFT an installment. An installment moves the active offer to output 1 and adds
 the installment at output 2, a new kind of UTXO that the API serves. The zero-debt close also burns
-the borrower NFT but has no repayment output: the indexer tells it from the full repayment by
-output 1's script, which only in the full repayment is the lender NFT's burn lock (computable from
-the lender NFT). The plan's file list for phase 5 omits the indexer, but it is in scope.
+the borrower NFT but has no repayment output: the indexer tells it from the full repayment by its
+output 1, an `OP_RETURN`. The plan's file list for phase 5 omits the indexer, but it is in scope.
 
 **The app.**
 - The borrower's repay form takes an amount and shows the amount paid so far and the remaining
@@ -546,13 +551,15 @@ The plan's done-when, made concrete:
   - a liveness property test runs random installment sequences, and after each one the full
     repayment and the liquidation after the term both succeed;
   - a zero-debt state, reached by an installment of the exact remaining debt with another
-    blinder, closes with the zero-debt close; the zero-debt close fails while debt remains, with
-    a signature by another key, and with a signature over another transaction;
+    blinder, closes with the zero-debt close whether it reveals `k` or `−k`; the zero-debt close
+    fails while debt remains, with a `k` of another point, with `k = 0`, and without the
+    `OP_RETURN`;
   - the installment branch runs within the transaction's cost budget.
 - The client refuses an overpayment (a core or web test).
 - A final claim sweeps installments whose range proofs the lender cannot rewind, balanced by the
   combined opening, and the transaction is valid (a contract test on the regtest node, with two
-  such installments).
+  such installments, after a full repayment and after a zero-debt close).
+- The lender computes the storage of a loan whose installments it cannot open, and liquidates it.
 - `pnpm parity` and every e2e stage pass, including a new `repay-partial` stage: an installment, its
   claim, and the full repayment whose claim sweeps an unclaimed installment.
 
