@@ -1316,31 +1316,597 @@ The phase review follows (whole branch, Opus).
 
 ## Phase 5: The contract revision (spec items 1 and 3a)
 
-Branch `v2/phase-5-contract`.
+Branch `v2/phase-5-contract`, from `v2/main` after phase 4 was merged into it.
 
-- **Gate at phase start:** a design note (in the spec) for the contract change: item 1's
-  parameter `H(salt ‖ expiry)` with the salt derived from the offer's shared secret and the
-  expiry and salt in the liquidation witness, placed in the pruned subtree of the time check;
-  item 3(a)'s debt point `D = d·A + r·G` in storage, the installment branch `D' = D − V_p`, the
-  pinned asset commitment `A` for every repayment output, the close by a BIP340 signature under
-  `D_final`, the point-at-infinity case, and liquidation that ignores the debt (item 3's lessons).
-  A derived salt leaves the terms encoding as it is.
-- Files: `crates/contracts/simf/private_lending.simf` and its program in
-  `crates/contracts/src/programs/private_lending/`; `private-lending-core` (offer parameters,
-  pinned outputs, secrets); the wasm; the web Simplicity bindings, the flows (a new
-  `flows/partialRepayment.ts`) and the repay UI; the parity fixtures and the e2e stages.
-- **Carried from phase 2:** the header comment of `private_lending.simf` still points at the
-  deleted `lending.simf`; rewrite it with the revision (editing the source changes the program
-  id, so phase 2 left it). Remove the dead features `lending` and `pre_lock` from
-  `crates/contracts/Cargo.toml`.
-- **Done when:** contract tests show, for item 1, that with the expiry fixed a different salt
-  changes the CMR revealed at acceptance and repayment (the salt enters the pruned subtree), that
-  recomputing that CMR from the public parameters over a range of candidate expiries, with no
-  salt or a guessed one, matches none of them, and that a liquidation witness with a wrong salt or
-  expiry fails; for item 3(a), a liveness property test runs random installment sequences,
-  and after each one the full repayment and the liquidation after the term still succeed; an
-  overpayment is refused in the client; `pnpm parity` and every e2e stage pass, including a new
-  `repay-partial` stage.
+The design is the spec's "Phase 5 design note" (`86e31b7`, revised in `9307a02`): the branch
+checks, the formulas, the client rules and the done-when tests are there and are not repeated
+here. Every implementer reads it before their task. The note replaced this section's gate: the
+loan closes by equality, or by revealing the debt's blinder `k` when the debt is already zero, not
+by a BIP340 signature under `D_final`.
+
+Decided at phase start (2026-11-18), including the note's "Left to the builder":
+- **The witness path** keeps v1's shape and carries each branch's data, with a debt point as a
+  commitment in Elements' encoding, `(u1, u256)` (the low bit of the prefix, and `x`):
+  `Either<Either<(), ()>, Either<Either<(u1, u256), Either<u256, (u1, u256)>>, (u256, u256, u32)>>`.
+  Acceptance `Left(Left(()))`; cancellation `Left(Right(()))`; installment `Right(Left(Left(D)))`;
+  full repayment `Right(Left(Right(Left(h))))`; zero-debt close `Right(Left(Right(Right(D))))`;
+  liquidation `Right(Right((h, salt, expiry)))`.
+- **Parameters.** `EXPIRY_HASH: u256` replaces `LOAN_EXPIRATION_TIME`; new `REPAYMENT_ASSET:
+  (u1, u256)` (`A` in the same encoding) and `INSTALLMENT_OUTPUT_SCRIPT_HASH: u256`;
+  `ACTIVE_COLLATERAL_COMMITMENT` stays for acceptance only.
+- **Square-ness** is tested with `jet::fe_square_root`, with no root hints in the witness. If the
+  installment branch goes over the cost budget, task 4 switches to hints (`s² = ±y`) and says so
+  in its report.
+- **Derived values.** The salt is `OfferSecrets::derive("expiry-salt")`, and `EXPIRY_HASH =
+  SHA-256(salt ‖ expiry_be32)`. The installment's ephemeral key is
+  `tagged_hash("simplicity-lending/private/v1/installment-ephemeral", borrower_sk ‖ loan txid ‖
+  loan vout_le32 ‖ first wallet input txid ‖ vout_le32 ‖ SHA-256(output 0's script))`, in
+  `ephemeral_key`'s byte order. *(My call:)* the note proposed the first three parts; output 0's
+  script, the borrower NFT's fresh receive address, makes every build differ, so a rebuilt
+  installment never reuses a range proof nonce, and the chain still shows it. Tags keep the `v1/`
+  prefix. Each installment's value blinder is random; the rewind recovers it.
+- **Layouts** (change and fee follow every list):
+  - installment: inputs 0 borrower NFT, 1 loan, 2… principal coins, then fee coins (input 2 is the
+    "first wallet input"); outputs 0 borrower NFT (explicit, to a fresh receive address),
+    1 successor loan, 2 installment, 3 principal change if any;
+  - zero-debt close: inputs 0 borrower NFT, 1 loan, then fee coins; outputs 0 borrower NFT burn,
+    1 `OP_RETURN` with one 32-byte push of `k`, 2 the collateral to the borrower;
+  - claims: inputs 0 lender NFT, 1… the locked outputs (installments, and the full repayment at
+    the final claim), then fee coins; outputs 0 the lender NFT (back to the lender, or burned at
+    the final claim), 1 what was claimed, to the lender;
+  - liquidation: v1's inputs 0 loan, 1 lender NFT and outputs 0 lender NFT burn, 1 collateral,
+    then the installments that open as inputs 2… and their sum as output 2.
+- **The indexer** records an installment as a new UTXO type `installment` in a candidate's
+  `utxos`, with no new endpoint. It reads an active offer's spend this way. Output 0 burns the
+  borrower NFT: the zero-debt close if output 1 is an `OP_RETURN` (`repaid`, no repayment UTXO),
+  else the full repayment (`repaid`, repayment UTXO at 1). Output 0 holds the borrower NFT
+  unburned: an installment (active offer at 1, installment at 2). Anything else: a liquidation, as
+  in v1.
+- **Client rules beyond the note** *(my call)*. Past the loan's expiry the repay form offers only
+  the full repayment: "The term has ended: the lender can take the collateral at any time. Repay
+  in full to get it back." An unsent saved installment of a loan blocks any new build for that
+  loan until it is broadcast again or discarded.
+- **E2E.** A new stage `repay-partial` (and `repay-partial-dry`) runs on the `accept` loan after
+  `claim-principal` and before `repay`: installment 1, the lender's claim of it, installment 2 left
+  unclaimed. `repay` then pays the rest, and `claim-repayment` sweeps installment 2 with the
+  repayment. A liquidation with installments is covered by the contract tests only.
+- **Names.** The flow is `flows/installment.ts` (this section first said `partialRepayment.ts`):
+  the note calls every payment that leaves debt an installment.
+- **The indexer is in scope** (task 7), though this section's first file list left it out.
+- **Carried from phase 2:** `crates/contracts/Cargo.toml` loses the dead features `lending` and
+  `pre_lock` (task 2); the header comment of `private_lending.simf` is rewritten with the revision
+  (task 4).
+- **Carried from phase 4's review:** task 1.
+
+### Phase 5 review focus
+
+1. Installments before the principal is claimed: the borrower NFT then sits at an installment's
+   output 0, and the principal stays locked to it. The full repayment and the zero-debt close burn
+   the NFT, so they must refuse until the principal is claimed. Task 8 tests it.
+2. A loan outpoint from the indexer that is not the loan: an output someone sent to the loan's
+   address, or one whose history does not lead back to the acceptance. The app must refuse to pay
+   or liquidate against it. Tasks 6 and 8 test it.
+3. A borrower on a new device, with no saved records: the app must rebuild the remaining debt and
+   its blinder from the seed and the chain alone, or the loan can never close. Task 6 tests it.
+4. An installment after the term: the lender can liquidate at any moment and keep it. The repay
+   form refuses it (above). Task 10 tests it.
+5. A retried installment: while a saved installment of a loan is unsent, the app offers only to
+   broadcast it again or to discard it, never a second build. Task 10 tests it.
+
+### Task 1: Carried from phase 4's review
+
+**Files:** Modify `web/src/privateLending/hooks/usePrivateTransaction.ts`,
+`web/src/components/modals/private/PrivateTxShell.tsx`, `web/src/areas/lend/useCreationHeights.ts`,
+`web/src/areas/lend/TermsBadge.tsx`, `web/src/areas/lend/ProposalsPage.tsx`,
+`web/scripts/e2e-private-lending.ts`. Create `web/src/privateLending/sendSaved.ts`,
+`web/src/privateLending/sendSaved.test.ts`.
+
+**Interfaces (produces):**
+- `sendSaved(txid: string, beforeBroadcast: (() => Promise<void>) | undefined, broadcast: () =>
+  Promise<void>): Promise<void>`, used by both `run` and `retryBroadcast`. A failing
+  `beforeBroadcast` (a stale term, a tip-fetch error) throws `PrivateBroadcastError` with the
+  saved txid and the check's message, so the shell shows the saved transaction ("Broadcast
+  again", or only "Discard" when blocked), never the build button again.
+- `useCreationHeights` returns `ReadonlyMap<string, CreationHeight>`, with `type CreationHeight =
+  { kind: 'confirmed'; height: number } | { kind: 'unconfirmed' } | { kind: 'failed' }`.
+  `TermsBadge` takes `pending?: 'unconfirmed' | 'failed'` and shows "Not confirmed yet" or "Could
+  not read the chain" (default tone); the skeleton stays only while the first answer loads.
+  Review stays disabled in all three cases.
+
+- [ ] **Step 1: Write the failing tests** in `sendSaved.test.ts`: a throwing `beforeBroadcast`
+  gives a `PrivateBroadcastError` whose `txid` is the saved one and whose message is the check's,
+  and `broadcast` is never called; a passing one calls `broadcast` once.
+- [ ] **Step 2: Run them to see them fail.** `cd web && pnpm test`. Expected: FAIL.
+- [ ] **Step 3: Implement**, and in the e2e script:
+  - `dropExpiredShortProposal` asks the chain about a `broadcast` record first. A transaction the
+    chain knows (in the mempool or a block) keeps its record for the stage to resume; only an
+    unknown one is removed.
+  - `walletsStage` refuses to split while another stage's record is `built` or `broadcast`. It
+    prints "resume or drop <stage> before splitting" and exits 1.
+- [ ] **Step 4: Check.** `pnpm test && VITE_DEBUG_MNEMONIC= pnpm build && pnpm lint`. Expected:
+  pass.
+- [ ] **Step 5: Commit** `web: a failed check before broadcast keeps the saved transaction`
+
+### Task 2: The hidden expiry (item 1) (**Review now**: a wrong salt or hash makes every loan impossible to liquidate)
+
+**Files:**
+- Modify: `crates/contracts/simf/private_lending.simf` (liquidation only),
+  `crates/contracts/Cargo.toml` (the dead features go),
+  `crates/contracts/src/programs/private_lending/{params,witness,core,verify}.rs`
+- Modify: `crates/private-lending-core/src/{secrets,lib}.rs`
+- Modify: `crates/private-lending-wasm/src/{open,build}.rs`
+- Modify: `web/src/simplicity/private-lending/{scripts,witness}.ts`,
+  `web/src/privateLending/{finalize,flows/*}.ts` (the witness they pass),
+  `web/scripts/check-private-lending-parity.ts`,
+  `web/scripts/fixtures/private-lending-parity.json` (regenerated)
+- Create: `crates/contracts/tests/private_lending/hidden_expiry.rs`; modify its `mod.rs`,
+  `setup.rs`, `parity_fixture.rs`, `offer_liquidation_success_flows.rs`, `failure_flows.rs`
+
+**Interfaces (produces):**
+- Core: `OfferSecrets::expiry_salt(&self) -> [u8; 32]` and `pub fn expiry_hash(salt: &[u8; 32],
+  expiry: u32) -> [u8; 32]`, exported.
+- `PrivateLendingParameters { …, loan_expiration_time: u32, expiry_salt: [u8; 32], … }`;
+  `from_terms(terms: &OfferTerms, pinned: OfferPinned, secrets: &OfferSecrets, network)`;
+  `build_arguments` sets `expiry_hash` in place of `loan_expiration_time`.
+- `PrivateLendingWitnessBranch::Liquidation { salt: [u8; 32], expiry: u32 }`; task 4 adds the
+  debt hash. `attach_liquidation` fills it from the parameters.
+- Wasm: `ContractArguments.expiryHash` (getter, hex) next to `loanExpirationTime`;
+  `OpenedOffer.expirySalt(): string` (hex).
+- Web: `PrivateOfferArguments.expiryHash: string`. `buildPrivateLendingWitness(witness:
+  PrivateLendingWitness)` takes a union keyed by `branch`; here `Liquidation` carries `salt: string`
+  and `expiry: number`, and the other branches carry nothing yet. `finalizePrivateOfferInput`
+  takes that union in place of the branch name.
+
+- [ ] **Step 1: Write the failing tests** in `hidden_expiry.rs` (regtest, `#[simplex::test]`):
+  - `salt_changes_the_revealed_cmr`: two offers with the same terms and expiry but different
+    salts reveal different CMRs at acceptance and at the full repayment.
+  - `candidate_expiries_do_not_match`: from an acceptance's public arguments, the program compiled
+    with `EXPIRY_HASH` from no salt (`SHA-256(expiry_be32)`), from a zero salt and from another
+    offer's salt matches the revealed CMR for no expiry within ±1 000 blocks of the true one. As
+    a control, the true salt at the true expiry matches.
+  - `liquidation_fails_with_a_wrong_salt`, `liquidation_fails_with_a_wrong_expiry`,
+    `liquidation_fails_before_the_expiry`.
+
+  In the core: `expiry_salt_known_answer` (frozen hex for the bytes 0x80..=0x9f, as the existing
+  known-answer test) and `expiry_hash_is_sha256_of_salt_and_big_endian_height`.
+- [ ] **Step 2: Run them to see them fail.** Rename
+  `crates/contracts/tests/lending_security_audit.rs` aside, then `cd crates/contracts &&
+  simplex build && simplex test`, and
+  `cargo test -p private-lending-core`. Expected: FAIL.
+- [ ] **Step 3: Implement.** Regenerate the fixture with `WRITE_PARITY_FIXTURE=1 simplex test
+  write_private_lending_parity_fixture`, then `cd web && pnpm build:wasm`. The liquidation flow
+  passes `opened.expirySalt()` and `loanExpirationTime()`.
+- [ ] **Step 4: Check.** `simplex test`; `cargo test --workspace` without the regtest tests;
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings`; `cd web && pnpm parity &&
+  pnpm test && VITE_DEBUG_MNEMONIC= pnpm build && pnpm lint`. Rename the audit file back.
+  Expected: pass.
+- [ ] **Step 5: Commit** `contracts, core, web: the expiry hides behind a salted hash (item 1)`
+
+### Task 3: The debt as a point, in the core (**Review now**: this arithmetic mirrors the program's; a conversion error sends a loan to an address nobody can spend)
+
+**Files:** Create `crates/private-lending-core/src/debt.rs`; modify
+`crates/private-lending-core/src/{keys,offer,lib}.rs` and `crates/private-lending-core/Cargo.toml`
+(`k256 = { version = "0.13", default-features = false, features = ["arithmetic"] }`, for
+`FieldElement::sqrt` as the square-ness test).
+
+**Interfaces (produces):**
+- `pub struct DebtOpening { pub amount: u64, pub blinder: ValueBlindingFactor }` with
+  `DebtOpening::of(pinned: &PinnedOutput) -> Self`, `after(self, payment: DebtOpening) ->
+  Option<DebtOpening>` (`None` when the payment is larger; the blinders subtract modulo `n`) and
+  `commitment(&self, repayment: &PinnedOutput) -> confidential::Value`, the point under `A`
+  (`repayment`'s asset id and asset blinder), with amount 0 allowed.
+- `pub enum DebtError { NotConfidential, NotOnCurve, Infinity, NotThisDebt }`.
+- `pub fn debt_after(debt: &confidential::Value, payment: &confidential::Value) ->
+  Result<confidential::Value, DebtError>`: `D − V` through the note's conversions, `Infinity` when
+  they are equal.
+- `pub fn debt_hash(asset: &confidential::Asset, debt: &confidential::Value) -> [u8; 32]`:
+  `h(A, D)`.
+- `pub fn asset_plus_generator(asset: &confidential::Asset) -> Result<confidential::Asset,
+  DebtError>`: `A_c + G`.
+- `OfferPinned::collateral_after(&self, installments: u32) -> PinnedOutput`: asset blinder
+  `a_c + i`, value blinder `r_c − i·c`; `i = 0` is `active_collateral`.
+- `pub fn zero_debt_key(opening: &DebtOpening) -> Option<[u8; 32]>` (`Some` only at amount 0) and
+  `pub fn zero_debt_blinder(k: &[u8; 32], debt: &confidential::Value) ->
+  Result<ValueBlindingFactor, DebtError>` (`k` or `−k`, whichever gives `debt` exactly).
+- `pub fn sweep_opening(start: DebtOpening, claimed: &[DebtOpening], zero_debt:
+  Option<ValueBlindingFactor>) -> Option<DebtOpening>`: the note's combined opening, `(R, r₀)`
+  minus the claimed openings, minus `(0, k')` after a zero-debt close.
+- `pub fn installment_ephemeral_key(borrower: &LendingKey, loan: OutPoint, first_wallet_input:
+  OutPoint, nft_receiver: &Script) -> SecretKey`, as decided above.
+- `pub fn open_installment(txout: &TxOut, shared_secret: SecretKey, repayment: &PinnedOutput) ->
+  Result<DebtOpening, InstallmentError>`. It rewinds the range proof and checks that the asset id
+  and asset blinder are `A`'s and that the opening gives the output's commitments. The shared
+  secret comes from `OfferSecrets::for_borrower` (derived key, lender key) or
+  `OfferSecrets::for_lender` (lender key, the output's nonce).
+
+- [ ] **Step 1: Write the failing tests** in `debt.rs` and `keys.rs`, with a seeded RNG:
+  - `conversion_round_trips_both_prefix_bits`: value commitments with prefixes `0x08` and
+    `0x09`, and generators with `0x0a` and `0x0b`.
+  - `debt_after_matches_the_openings`: `D(d, r) − V(p, r_p)` equals `D(d − p, r − r_p)` over 200
+    cases covering both bits of each operand.
+  - `debt_after_refuses_infinity`.
+  - `start_debt_hash_is_the_repayment_commitment`: `debt_hash(A, D₀)` equals
+    `pinned.repayment.commitment_hash()`.
+  - `collateral_after_keeps_the_value_commitment`: for `i` in 0..=5 the value commitment is
+    unchanged, and step `i + 1`'s asset commitment is `asset_plus_generator` of step `i`'s.
+  - `zero_debt_blinder_takes_either_sign` and `zero_debt_blinder_refuses_another_point`.
+  - `sweep_opening_balances`: the swept commitments add up to the sweep opening's commitment,
+    with and without a zero-debt close.
+  - `open_installment_for_both_parties`: an installment blinded with the derived key opens for the
+    borrower and the lender, and one blinded to another key opens for neither.
+  - `opening_after_refuses_overpayment`.
+  - `installment_ephemeral_key_known_answer`.
+- [ ] **Step 2: Run them to see them fail.** `cargo test -p private-lending-core`. Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Check.** `cargo test -p private-lending-core -p private-lending-wasm`, clippy as in
+  task 2, and `cd web && pnpm build:wasm` (k256 builds for wasm32). Expected: pass.
+- [ ] **Step 5: Commit** `core: the debt as a point, and the installment's derived values`
+
+### Task 4: Installments, the full repayment of the rest and the zero-debt close (**Review now**: a wrong check locks the collateral or pays the lender short)
+
+**Files:**
+- Modify: `crates/contracts/simf/private_lending.simf` (the branches of the note, and the header
+  comment rewritten for the revision),
+  `crates/contracts/src/programs/private_lending/{params,witness,core}.rs`
+- Create, in `crates/contracts/tests/private_lending/`: `offer_installment_flows.rs`,
+  `zero_debt_close_flows.rs`, `liveness.rs`; modify `mod.rs`, `setup.rs`,
+  `offer_full_repayment_success_flows.rs`,
+  `offer_liquidation_success_flows.rs`, `failure_flows.rs`, `parity_fixture.rs`
+- Modify: `crates/private-lending-wasm/src/open.rs` (`ContractArguments`),
+  `web/src/simplicity/private-lending/{scripts,witness}.ts`,
+  `web/src/privateLending/flows/{repayment,liquidation}.ts`, the parity script and fixture
+- Modify: `docs/docs/private-loans/protocol.md`, `docs/docs/simplicity.md` (the contract's branches)
+
+**Interfaces:**
+- Consumes: task 3's `DebtOpening`, `debt_after`, `debt_hash`, `collateral_after`,
+  `zero_debt_key`.
+- Produces:
+  - `PrivateLendingParameters::get_installment_output_asset_auth(&self) -> AssetAuth` (lender
+    NFT, 1, no burn); `build_arguments` adds `repayment_asset` and
+    `installment_output_script_hash`.
+  - `PrivateLendingWitnessBranch`: `Installment { debt: confidential::Value }`,
+    `FullRepayment { debt_hash: [u8; 32] }`, `ZeroDebtClose { debt: confidential::Value }`,
+    `Liquidation { debt_hash: [u8; 32], salt: [u8; 32], expiry: u32 }`. `PartialRepayment` goes.
+  - `PrivateLendingOffer::new_active_at(parameters, debt: confidential::Value, installments: u32)
+    -> Self`; `new_active` is `new_active_at(D₀, 0)` and `new_with_storage` goes. Getters
+    `get_debt()` and `get_installments()`; `get_collateral()` gives `collateral_after(i)` when
+    active.
+  - `attach_installment(&self, ctx, borrower_nft_utxo: UTXO, loan_utxo: UTXO,
+    borrower_nft_receiver: Script, payment: PinnedOutput, lender_blinding_key: PublicKey,
+    ephemeral_sk: SecretKey) -> PrivateLendingOffer`: outputs 0 to 2, returning the successor.
+    `payment` carries `A`'s asset id and asset blinder.
+  - `attach_full_repayment(&self, ctx, borrower_nft_utxo, loan_utxo, opening: DebtOpening,
+    lender_blinding_key)`; it panics unless the opening's commitment is the offer's debt.
+  - `attach_zero_debt_close(&self, ctx, borrower_nft_utxo, loan_utxo, opening: DebtOpening)`; it
+    panics unless the amount is 0 and the commitment is the offer's debt.
+  - `attach_liquidation` takes the debt hash from the offer's state.
+  - Wasm `ContractArguments.repaymentAssetPrefixBit: number` (0 or 1) and `repaymentAssetX:
+    string`. Web: `PrivateOfferArguments` gains both; the witness union gains
+    `FullRepayment { debtHash }` and `Liquidation { debtHash, … }`. The flows pass the starting
+    debt hash, `repaymentCommitment`, until tasks 8 and 9.
+
+- [ ] **Step 1: Write the failing tests** (regtest). Each failure case builds the transaction and
+  shows that finalizing refuses it, as in `failure_flows.rs`.
+  - `offer_installment_flows.rs`:
+    - `installments_cover_both_prefix_bits`. Search each installment's blinder off chain so that
+      `D`, `V`, `D'`, `A_c` and `A_c + G` each occur with both prefix bits. Each installment
+      confirms, and its output 1 sits at the storage of `debt_after` and holds
+      `collateral_after(i)`.
+    - `installment_fails_with_another_asset_on_output_2`.
+    - `installment_fails_with_another_script_on_output_2`.
+    - `installment_fails_with_another_successor_storage`.
+    - `installment_fails_with_another_successor_collateral`: the asset commitment plus `2G`, or
+      the same asset with another value commitment.
+    - `installment_fails_at_the_point_at_infinity`.
+    - `installment_fails_without_the_borrower_nft`.
+    - `full_repayment_after_installments_pays_the_rest`: the lender's openings add up to `R`.
+    - `full_repayment_fails_with_another_commitment`: the remaining amount with another blinder,
+      and one unit more.
+    - `installment_runs_within_the_cost_budget`: it confirms, and the test prints its weight and
+      cost.
+  - `zero_debt_close_flows.rs`:
+    - `zero_debt_state_closes_revealing_k` and `zero_debt_state_closes_revealing_minus_k`: the
+      state comes from an installment of the exact rest with another blinder.
+    - `zero_debt_close_fails_while_debt_remains`.
+    - `zero_debt_close_fails_with_k_of_another_point`.
+    - `zero_debt_close_fails_with_k_zero`.
+    - `zero_debt_close_fails_without_the_op_return`.
+  - `liveness.rs`, `liveness_after_random_installments`:
+    - The seed is printed, and `LIVENESS_SEED` replays a run.
+    - It runs three loans whose term has already passed (mine past it first), each with up to
+      five installments of random amounts below the remaining debt.
+    - After every installment, a full repayment and a liquidation of the current state both
+      finalize, so the program runs on each.
+    - Each loan's last state broadcasts its full repayment.
+- [ ] **Step 2: Run them to see them fail.** As in task 2. Expected: FAIL.
+- [ ] **Step 3: Implement.** Regenerate the parity fixture and rebuild the wasm, as in task 2.
+- [ ] **Step 4: Check.** As in task 2. Expected: pass. The e2e runs from task 8 on: its stages
+  need loans made with the new program.
+- [ ] **Step 5: Commit** `contracts: installments, the full repayment of the rest and the zero-debt close (item 3a)`
+
+### Task 5: The lender's claims and sweeps, in the contract tests
+
+**Files:** Create `crates/contracts/tests/private_lending/claim_flows.rs`; modify `mod.rs` and
+`setup.rs` (a `claim_locked_outputs(keeper, nft: &AssetAuth, locked: &[(UTXO, TxOutSecrets)],
+burn: bool) -> anyhow::Result<Transaction>` helper, the lender NFT at input 0).
+
+**Interfaces:** Consumes `sweep_opening`, `open_installment`, `zero_debt_blinder`, `debt_after`
+(task 3) and the attaches of task 4.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `lender_claims_one_installment_and_keeps_the_nft`.
+  - `final_claim_sweeps_unopenable_installments_after_full_repayment`: two installments are
+    blinded with random nonces that the lender's key does not open. The final claim gives the
+    sweep opening to one input and zero to the others. It confirms, and the lender holds `R` in
+    total.
+  - `final_claim_sweeps_after_a_zero_debt_close`: the lender reads `k` from output 1 of the close.
+  - `lender_liquidates_a_loan_it_cannot_open`: the lender computes the storage with `debt_after`
+    from `D₀` and the value commitments alone, liquidates after the term, and sweeps the
+    installments that open.
+- [ ] **Step 2: Run them to see them fail.** `simplex test`. Expected: FAIL.
+- [ ] **Step 3: Implement the helper.** If blinding refuses input secrets that do not open their
+  inputs' commitments (rust-elements' `blind_last` or the core's `blind_pset`), stop and report:
+  the combined opening then needs another way to balance, and that is the user's call.
+- [ ] **Step 4: Check.** `simplex test`. Expected: pass.
+- [ ] **Step 5: Commit** `contracts: the lender's final claim sweeps with the combined opening`
+
+### Task 6: The wasm: the loan's state, installment plans and sweeps
+
+**Files:** Create `crates/private-lending-wasm/src/loan.rs`; modify
+`crates/private-lending-wasm/src/{lib,open}.rs` (the `OpenedOffer` remembers which party opened
+it), `web/src/simplicity/private-lending/scripts.ts`,
+`crates/contracts/tests/private_lending/parity_fixture.rs` (the fixture gains an acceptance and an
+installment from regtest, with their expected values),
+`web/scripts/fixtures/private-lending-parity.json`, `web/scripts/check-private-lending-parity.ts`.
+
+**Interfaces (produces; JS names):**
+- `scripts.ts`: `PrivateOfferScripts.installmentOutputScriptHash`, `activeOfferAt(debtHash:
+  string): Script` and `activeSpendInfoAt(debtHash: string): StateTaprootSpendInfo`.
+- `OpenedOffer.loanState(key: LendingKey, acceptanceTxHex: string, installmentTxHexes: string[]):
+  LoanState`. It checks four things, failing with `loan-mismatch: …` that names the installment:
+  - the acceptance's output 0 is the active collateral;
+  - each installment's input 1 is the previous loan outpoint;
+  - each installment's output 1 carries `collateral_after(j)` exactly;
+  - each installment's output 2 carries `A`.
+
+  The debt follows by `debt_after`, and each installment is opened for the party that opened the
+  offer.
+- `LoanState`:
+  - getters `installmentCount: number`, `loanOutpoint: string`, `debtCommitment: string` (33-byte
+    hex), `debtHash: string`, `paid: bigint` (the sum the party opened), `remaining: bigint |
+    undefined` (known when every installment opened);
+  - `debtHashAt(j: number): string`, the storage of loan output `j` (0 is the acceptance's);
+  - `installment(j): InstallmentInfo`, with `outpoint: string` and `amount: bigint | undefined`;
+  - `loanInputSecret(inputIndex: number): InputSecret` and `collateral(): PinnedOutputInfo`.
+- Borrower only (otherwise `bad-input`):
+  - `planInstallment(amount: bigint, firstWalletInput: string, nftReceiverScript: string):
+    InstallmentPlan`, which refuses 0 and anything at or above the remaining debt;
+  - `repaymentBlinding(outputIndex: number): PinnedBlinding`, which refuses a remaining debt of 0;
+  - `zeroDebtKey(): string`, only when the remaining debt is 0.
+- `InstallmentPlan`: `debtWitness: string`, `successorDebtHash: string`,
+  `installmentBlinding(outputIndex): PinnedBlinding` (the derived key, the lender's blinding key),
+  `successorBlinding(outputIndex): PinnedBlinding`, `installment: PinnedOutputInfo`.
+- Lender only: `LoanState.sweep(closeTxHex: string | undefined, unspent: string[]): Sweep`.
+  - `closeTxHex` is the full repayment or the zero-debt close; `undefined` (for a liquidation)
+    sweeps only the installments that open.
+  - `Sweep` has `outpoints(): string[]`, `amount: bigint` and `inputSecret(position: number,
+    inputIndex: number): InputSecret`.
+
+- [ ] **Step 1: Write the failing tests** (native, in `loan.rs`):
+  - `borrower_rebuilds_its_plan_from_the_chain`: a plan's transaction, read back as the borrower,
+    gives the same remaining amount and blinder.
+  - `loan_state_refuses_a_foreign_loan_output`: an output at the loan's address with other
+    commitments.
+  - `loan_state_refuses_a_broken_chain`.
+  - `lender_without_openings_still_knows_the_storage`: `remaining` is `undefined`, and `debtHash`
+    is right.
+  - `plan_refuses_zero_and_overpayment`.
+  - `sweep_balances`.
+
+  In the parity script: `scripts.activeOfferAt(state.debtHashAt(1))` equals the contract's script
+  for the fixture's installment; `installmentOutputScriptHash` equals the contract's; `loanState`
+  of the fixture agrees for both parties.
+- [ ] **Step 2: Run them to see them fail.** `cargo test -p private-lending-wasm`. Expected: FAIL.
+- [ ] **Step 3: Implement**; regenerate the fixture; `pnpm build:wasm`.
+- [ ] **Step 4: Check.** `cargo test -p private-lending-wasm`, clippy, `pnpm parity`. Expected:
+  pass.
+- [ ] **Step 5: Commit** `wasm: the loan's state, installment plans and the lender's sweep`
+
+### Task 7: The indexer reads installments and the zero-debt close
+
+**Files:** Create `crates/indexer/migrations/20261118120000_private_installments.sql` (`ALTER TYPE
+private_utxo_type ADD VALUE 'installment'`); modify `crates/indexer/src/models/private_offer.rs`,
+`crates/indexer/src/indexer/trackers/private_offers/core.rs`,
+`crates/indexer/tests/private_offers_indexing.rs`, `.sqlx/` (`cargo sqlx prepare --workspace`),
+the OpenAPI schema, `web/src/api/indexer/private.ts`.
+
+**Interfaces (produces):** `PrivateUtxoType::Installment` (`installment` in the API);
+`ActiveSpend { Installment, FullRepayment, ZeroDebtClose, Liquidation }`, read as decided above.
+
+- [ ] **Step 1: Write the failing tests.** In `core.rs`, one `classify_active_spend` test per case.
+  In `private_offers_indexing.rs`:
+  - `installment_keeps_the_offer_active`: the active offer moves to vout 1, and an installment is
+    recorded at vout 2;
+  - `zero_debt_close_is_repaid_without_a_repayment_utxo`;
+  - `claimed_installment_is_spent`.
+- [ ] **Step 2: Run them to see them fail.** `cargo test -p lending-indexer`, with `DATABASE_URL`
+  on a scratch database (never `lending-indexer-testnet`). Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Check.** `cargo test -p lending-indexer`, clippy, `cargo sqlx prepare --workspace
+  --check`, `cd web && pnpm build`. Expected: pass.
+- [ ] **Step 5: Commit** `indexer: installments and the zero-debt close`
+
+### Task 8: The borrower's flows: installment, the full repayment of the rest, the zero-debt close
+
+**Files:** Create `web/src/privateLending/loan.ts`, `web/src/privateLending/loan.test.ts`,
+`web/src/privateLending/flows/installment.ts`, `web/src/privateLending/flows/zeroDebtClose.ts`;
+modify `web/src/privateLending/flows/repayment.ts`, `web/src/privateLending/finalize.ts`,
+`web/src/simplicity/private-lending/{witness,layout}.ts`,
+`web/scripts/e2e-private-lending.ts` (stages `repay-partial-dry` and `repay-partial`, the
+borrower's part; `repay` on the loan's state).
+
+**Interfaces:**
+- Consumes: task 6's `loanState`, `planInstallment`, `repaymentBlinding`, `zeroDebtKey`,
+  `loanInputSecret`, `activeOfferAt` and `activeSpendInfoAt`.
+- Produces:
+  - `loan.ts`:
+    - `interface Loan { state: LoanState; acceptanceTxid: string; installmentTxids: string[] }`.
+    - `loadLoan(deps, offer: VerifiedOffer, key: LendingKey, loanOutpoint: string):
+      Promise<Loan>` walks back from `loanOutpoint` with `deps.fetchTx`: each transaction's input
+      1 is the previous loan output, until the acceptance. It requires each loan output's script
+      to be `offer.scripts.activeOfferAt(state.debtHashAt(j))`.
+    - `principalClaimedBefore(deps, offer, nftOutpoint: string): Promise<boolean>` walks the
+      borrower NFT back through installments' output 0. A principal claim's output 0 gives
+      `true`; the creation's output 0, or any output but 0, gives `false`.
+  - `finalizePrivateOfferInput` takes the spend info of the loan output it spends
+    (`activeSpendInfoAt` of its debt hash) in place of the `active` flag.
+  - `layout.ts`: `INSTALLMENT_INPUT`, `INSTALLMENT_OUTPUT`, `ZERO_DEBT_CLOSE_INPUT`,
+    `ZERO_DEBT_CLOSE_OUTPUT`, as decided above.
+  - `witness.ts`: the union with all six branches, and weights for `Installment` and
+    `ZeroDebtClose` from the regtest witnesses of task 4 plus 10 %; task 11 replaces them with
+    testnet measurements.
+  - Flows:
+    - `buildPrivateInstallment(deps, offer, loan, params: { amount: bigint;
+      borrowerNftOutpoint: string; principalCoins; feeCoins }):
+      Promise<UpdatedPset<InstallmentSummary>>`;
+    - `buildPrivateRepayment(deps, offer, loan, params)` repays `loan.state.remaining` at
+      `loan.state.loanOutpoint`;
+    - `buildZeroDebtClose(deps, offer, loan, params: { borrowerNftOutpoint; feeCoins;
+      collateralReceiver })`.
+
+    All three refuse before building unless `principalClaimedBefore` holds (the error
+    `PrincipalNotClaimedError`, generalized). Each keeps both `assertSpendLayout` checks.
+
+- [ ] **Step 1: Write the failing tests** in `loan.test.ts`, with a fake `fetchTx` and the wasm
+  loaded in Node (`web/src/test/wasm.ts`):
+  - `principalClaimedBefore` holds through two installments;
+  - it fails when the walk reaches the creation, and for an outpoint other than output 0;
+  - `loadLoan` refuses a loan outpoint whose script is not the active offer at its debt;
+  - `loadLoan` on the parity fixture's installment gives the fixture's debt hash.
+- [ ] **Step 2: Run them to see them fail.** `pnpm test`. Expected: FAIL.
+- [ ] **Step 3: Implement**, and the e2e stages:
+  - `repay-partial-dry` builds an installment of a third of the remaining debt without sending
+    it;
+  - `repay-partial` pays it and then a second installment, saving both;
+  - `repay` pays the rest.
+- [ ] **Step 4: Check.** `pnpm test && VITE_DEBUG_MNEMONIC= pnpm build && pnpm lint && pnpm parity`;
+  the e2e stages `create`, `accept`, `claim-principal`, `repay-partial` and `repay` from an empty
+  state on testnet. Expected: pass, and `repay` pays `R` minus the two installments.
+- [ ] **Step 5: Commit** `web: the borrower pays in installments and closes the loan`
+
+### Task 9: The lender's flows: claims, the final sweep, liquidation
+
+**Files:** Create `web/src/privateLending/flows/claimInstallments.ts`; modify
+`web/src/privateLending/flows/{claimRepayment,liquidation}.ts`,
+`web/src/simplicity/private-lending/layout.ts`, `web/scripts/e2e-private-lending.ts`.
+
+**Interfaces:**
+- Consumes: `loadLoan` (task 8); `LoanState.installment`, `sweep` (task 6).
+- Produces:
+  - `buildInstallmentClaim(deps, offer, loan, params: { installments: string[];
+    lenderNftOutpoint: string; feeCoins }): Promise<UpdatedPset<ClaimSummary>>`: installments
+    the lender opened, with the NFT back to the lender.
+  - `buildFinalClaim(deps, offer, loan, params: { closeTxid: string; unspentInstallments:
+    string[]; lenderNftOutpoint: string; feeCoins })`: the sweep after a full repayment or a
+    zero-debt close. It replaces `buildRepaymentClaim`.
+  - `buildPrivateLiquidation(deps, offer, loan, params)` takes the liquidation witness from
+    `loan.state.debtHash`, the salt and the expiry, and sweeps the installments that open from
+    `params.unspentInstallments`.
+  - `layout.ts`: `CLAIM_INPUT = { lenderNft: 0, firstLocked: 1 }`, `CLAIM_OUTPUT = { lenderNft: 0,
+    claimed: 1 }`, `LIQUIDATION_INPUT.firstInstallment = 2`, `LIQUIDATION_OUTPUT.installments = 2`.
+
+- [ ] **Step 1: Write the failing checks** in the e2e:
+  - `repay-partial` runs the lender's claim of installment 1 between the two installments;
+  - `claim-repayment` uses `buildFinalClaim` and must sweep installment 2 with the repayment,
+    the lender's total being `R`;
+  - `liquidate-dry` builds with the new witness.
+- [ ] **Step 2: Run to see them fail.** The stages, as in task 8. Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Check.** `pnpm test && VITE_DEBUG_MNEMONIC= pnpm build && pnpm lint`; every e2e
+  stage from an empty state. Expected: pass.
+- [ ] **Step 5: Commit** `web: the lender claims installments and sweeps at the end`
+
+### Task 10: The repay form, the borrower's loans and the lender's book
+
+**Files:** Create `web/src/privateLending/repayPlan.ts`, `web/src/privateLending/repayPlan.test.ts`,
+`web/src/privateLending/hooks/useLoan.ts`,
+`web/src/components/modals/private/{ClaimInstallmentsModal,CloseZeroDebtModal}.tsx`; modify
+`RepayPrivateOfferModal.tsx`, `ClaimRepaymentModal.tsx`, `LiquidatePrivateOfferModal.tsx`,
+`web/src/privateLending/offerView.ts` and its test, `web/src/areas/borrow/MyLoansPage.tsx`,
+`web/src/areas/lend/{LoanBookPage,bookSummary}.ts(x)` and `bookSummary.test.ts`,
+`docs/docs/private-loans/guide.md`.
+
+**Interfaces:**
+- `repayPlan(input: { remaining: bigint; amountText: string; decimals: number; tipHeight:
+  number; expiry: number }): RepayPlan`, with `RepayPlan = { kind: 'installment'; amount: bigint }
+  | { kind: 'full'; amount: bigint } | { kind: 'refused'; message: string }`. Below the remaining
+  debt is an installment; equal to it is the full repayment. Messages:
+  - zero: "Enter an amount above zero";
+  - above: "That is more than you owe: at most <remaining>";
+  - too many decimals: "<asset> has <n> decimals";
+  - an installment at or past the expiry: the message decided above.
+- `useLoan(item)`: the `Loan` of an active offer for either party, by `loadLoan`, keyed by its loan
+  outpoint.
+- `borrowerView`:
+  - the status "active, <paid> of <R> repaid, due in <n> days";
+  - the action `repay`, the amount form, defaulting to the remaining debt;
+  - `closeZeroDebt`, "Close the loan", when the remaining debt is 0;
+  - a saved unsent installment offers only "Broadcast again" and "Discard".
+- `lenderView`: "Claim" for opened unclaimed installments; "Claim repayment" after a close (the
+  sweep); "Liquidate".
+- The loan book gains "Repaid" (the opened sum), "Remaining" ("at most …" when an installment does
+  not open) and "Claimable" (opened and unclaimed; "amount unknown" for the rest).
+  `bookSummary` gains `repaid` and `claimable`.
+- The repay modal shows the amount paid so far and the remaining debt, and states that
+  installments are not refunded if the loan is liquidated.
+
+- [ ] **Step 1: Write the failing tests:**
+  - `repayPlan.test.ts`:
+    - the remaining amount gives `full`, and one unit less gives `installment`;
+    - 0, one unit more, and one decimal too many are refused;
+    - past the expiry, an installment is refused and the full repayment is not.
+  - `offerView.test.ts`:
+    - a zero remaining debt gives `closeZeroDebt`;
+    - an unsent installment gives only open and discard;
+    - the lender's claimable installments give "Claim".
+  - `bookSummary.test.ts`: the new sums.
+- [ ] **Step 2: Run them to see them fail.** `pnpm test`. Expected: FAIL.
+- [ ] **Step 3: Implement**, and the guide's repayment section in the borrower's words.
+- [ ] **Step 4: Check.** `pnpm test && VITE_DEBUG_MNEMONIC= pnpm build && pnpm lint`, the docs
+  build. Expected: pass.
+- [ ] **Step 5: Commit** `web: installments in the repay form, My loans and the loan book`
+
+### Task 11: Testnet weights and the demo
+
+**Files:** Modify `web/src/simplicity/private-lending/witness.ts` (the weights),
+`web/scripts/demo/demo.spec.ts`.
+
+- [ ] **Step 1:** Replace the `Installment`, `FullRepayment`, `ZeroDebtClose` and `Liquidation`
+  weights with the serialized script witness of a testnet transaction from the e2e run, plus
+  10 %, citing each transaction as the existing entries do. A testnet zero-debt close needs a
+  hand-built state; if none exists, keep task 8's regtest figure and say so in the comment.
+- [ ] **Step 2:** The demo's borrower repays half the debt as an installment, the lender claims it,
+  and the borrower repays the rest. The lender's final claim finds nothing left to sweep, and the
+  loan book shows the loan repaid.
+- [ ] **Step 3: Check.** `pnpm demo:testnet` (fresh indexer database at the tip; fund the wallets
+  if `pnpm e2e:private wallets` reports a shortfall). Expected: pass.
+- [ ] **Step 4: Commit** `web: testnet weights of the new branches, and installments in the demo`
+
+### Task 12: Verify the phase
+
+- [ ] **Step 1:** `cargo test --workspace` without the regtest tests; `cd crates/contracts &&
+  simplex build && simplex test` (the audit file renamed aside); `cargo clippy --workspace
+  --all-targets --all-features -- -D warnings`.
+- [ ] **Step 2:** `cd web && pnpm test && VITE_DEBUG_MNEMONIC= pnpm build && pnpm lint && pnpm
+  parity && pnpm check:config`; every e2e stage from an empty state with a fresh local indexer
+  database (port 8001).
+- [ ] **Step 3:** `pnpm demo:testnet` on the final tree; look at the screenshots of the repay form
+  and the loan book.
+- [ ] **Step 4:** The migration on a copy of the dev database (never `lending-indexer-testnet`);
+  `docker --context default compose build`; the docs build. Commit `docs: v2 phase 5 verified`
+  with the results.
+
+The phase review follows (whole branch, Opus).
 
 ## Phase 6: Private messages (spec item 6)
 
@@ -1401,5 +1967,10 @@ proposed for `main`. Each check names the screen of the app as phase 4 leaves it
    loans and proposals only, no error toast from A's scan. Optionally, with a Jade, unplug it
    during "Connecting…" after the PIN with `/v1/server_recipient` throttled, replug and connect
    again: the connect works, and a reload does not resume the unplugged session.
+4. **A Jade signs the final claim that sweeps** (phase 5). As the borrower, pay an installment
+   and then the rest; as the lender with a Jade, leave the installment unclaimed and claim the
+   repayment in the console. Expected: the Jade shows the outputs and signs; the claim confirms
+   with the installment swept into it, and the loan book shows the loan repaid with nothing left
+   to claim.
 
 Record the results in the commit that ticks them off.
