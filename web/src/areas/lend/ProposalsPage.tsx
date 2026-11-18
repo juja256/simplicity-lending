@@ -42,7 +42,7 @@ import LedgerTable, { ActionCell, Cell, type LedgerColumn } from './LedgerTable'
 import { type ProposalFigures, proposalFigures } from './proposalFigures'
 import SummaryStrip from './SummaryStrip'
 import TermsBadge from './TermsBadge'
-import { useCreationHeights } from './useCreationHeights'
+import { type CreationHeight, useCreationHeights } from './useCreationHeights'
 
 /** A proposal is accepted here; the loan book tracks the rest. */
 const PROPOSAL_ACTIONS: OfferActions<LenderAction, 'private_accept_offer'> = {
@@ -77,9 +77,21 @@ function grouped(decimal: string): string {
 
 const MISSING = <span className='text-muted'>–</span>
 
+/** The block a creation confirmed in, by esplora; undefined until esplora reports it. */
+function confirmedHeight(height: CreationHeight | undefined): number | undefined {
+  return height?.kind === 'confirmed' ? height.height : undefined
+}
+
+/** Why a creation has no height yet, for its badge: undefined while esplora's answer loads. */
+function pendingOf(height: CreationHeight | undefined): 'unconfirmed' | 'failed' | undefined {
+  return height === undefined || height.kind === 'confirmed' ? undefined : height.kind
+}
+
 interface ProposalRowProps {
   item: OpenedOfferItem
   figures: ProposalFigures | undefined
+  /** What esplora answered about the creation, for the badge while there are no figures. */
+  creationHeight: CreationHeight | undefined
   borrowerName: string | undefined
   tipHeight: number
   checkFailed: boolean
@@ -90,6 +102,7 @@ interface ProposalRowProps {
 function ProposalRow({
   item,
   figures,
+  creationHeight,
   borrowerName,
   tipHeight,
   checkFailed,
@@ -130,7 +143,11 @@ function ProposalRow({
         {figures === undefined ? MISSING : formatDays(figures.termBlocks / BLOCKS_PER_DAY)}
       </Cell>
       <Cell className='min-w-48'>
-        <TermsBadge verdict={figures?.verdict} failed={checkFailed} />
+        <TermsBadge
+          verdict={figures?.verdict}
+          failed={checkFailed}
+          pending={pendingOf(creationHeight)}
+        />
       </Cell>
       {/* Review waits for the check against the lender's terms, which the acceptance shows. */}
       <ActionCell state={state} isDisabled={figures?.verdict === undefined} onOpen={onOpen} />
@@ -185,7 +202,13 @@ export default function ProposalsPage() {
           ? []
           : proposals.map(item => [
               item.txid,
-              proposalFigures(wasm, item.terms, creationHeights.get(item.txid), own?.check, PAIR),
+              proposalFigures(
+                wasm,
+                item.terms,
+                confirmedHeight(creationHeights.get(item.txid)),
+                own?.check,
+                PAIR,
+              ),
             ]),
       ),
     [wasm, proposals, creationHeights, own],
@@ -236,6 +259,7 @@ export default function ProposalsPage() {
             key={item.txid}
             item={item}
             figures={figures.get(item.txid)}
+            creationHeight={creationHeights.get(item.txid)}
             borrowerName={borrowerName(item)}
             tipHeight={tipHeight}
             checkFailed={checkFailed}
