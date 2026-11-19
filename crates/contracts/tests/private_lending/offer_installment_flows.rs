@@ -44,7 +44,7 @@ fn negated(value: &confidential::Value) -> confidential::Value {
 }
 
 /// An installment of `amount` with a random blinder.
-fn random_payment(amount: u64) -> DebtOpening {
+pub(super) fn random_payment(amount: u64) -> DebtOpening {
     DebtOpening {
         amount,
         blinder: ValueBlindingFactor::new(&mut rand::thread_rng()),
@@ -68,7 +68,10 @@ fn payment_with_bits(loan: &Loan, amount: u64, v_bit: u8, left_bit: u8) -> DebtO
 }
 
 /// What the lender opens of `txout`, an installment or a repayment blinded to its lending key.
-fn open_as_lender(setup: &PrivateOfferSetup, txout: &TxOut) -> anyhow::Result<DebtOpening> {
+pub(super) fn open_as_lender(
+    setup: &PrivateOfferSetup,
+    txout: &TxOut,
+) -> anyhow::Result<DebtOpening> {
     let nonce = txout
         .nonce
         .commitment()
