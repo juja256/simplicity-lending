@@ -140,6 +140,23 @@ mod tests {
     }
 
     #[test]
+    fn openapi_utxo_types_include_the_installment() {
+        let spec = ApiDoc::openapi();
+        let schemas = spec.components.expect("components").schemas;
+        let utxo_type = serde_json::to_value(&schemas["PrivateUtxoType"]).expect("serialize");
+        assert_eq!(
+            utxo_type["enum"],
+            serde_json::json!([
+                "pending_offer",
+                "active_offer",
+                "principal",
+                "repayment",
+                "installment"
+            ])
+        );
+    }
+
+    #[test]
     fn openapi_operation_ids_are_unique() {
         let spec = ApiDoc::openapi();
         let mut seen = std::collections::HashMap::<String, String>::new();

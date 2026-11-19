@@ -97,6 +97,7 @@ export const PRIVATE_UTXO_LABEL: Record<PrivateUtxoType, string> = {
   active_offer: 'loan',
   principal: 'principal',
   repayment: 'repayment',
+  installment: 'installment',
 }
 
 /** The status an offer shows: the indexer's status, or `claimed` for a claimed repayment. */
