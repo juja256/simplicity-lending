@@ -267,6 +267,42 @@ fn installment_fails_with_another_successor_storage(
     Ok(())
 }
 
+/// The storage authenticates the witness's debt: a borrower cannot pay against a debt of its own
+/// choosing, even with the successor at the storage the program computes from that debt, so that
+/// every later check passes.
+#[simplex::test]
+fn installment_fails_with_another_debt_in_the_witness(
+    context: simplex::TestContext,
+) -> anyhow::Result<()> {
+    let borrower = context.get_default_signer();
+    let (setup, _lender, loan) = accepted_loan(&context)?;
+    let parameters = setup.parameters;
+    let honest = InstallmentParts::honest(&loan, borrower, random_payment(1_000))?;
+    assert_honest_parts_pass(&setup, &loan, &honest, borrower)?;
+
+    let v = honest.installment.value_commitment();
+    for debt in [
+        // −D, the other prefix bit of the loan's debt
+        negated(&loan.offer.get_debt()),
+        // a debt of one unit, which the installment more than pays
+        repayment_output(&parameters, random_payment(1)).value_commitment(),
+    ] {
+        let left = debt_after(&debt, &v)?;
+        let parts = InstallmentParts {
+            debt,
+            successor_script: PrivateLendingOffer::new_active_at(parameters, left, 1)
+                .get_script_pubkey(),
+            ..honest.clone()
+        };
+
+        assert_program_rejects(
+            build_installment_with(&setup, &loan, &parts, borrower)?.finalize(borrower),
+        );
+    }
+
+    Ok(())
+}
+
 #[simplex::test]
 fn installment_fails_with_another_successor_collateral(
     context: simplex::TestContext,

@@ -64,20 +64,35 @@ pub(super) fn build_liquidation_with(
     let loan = Loan::accepted(setup.parameters, acceptance_tx);
     let mut ctx = build_liquidation_at(&loan, lender)?;
 
+    set_liquidation_witness(
+        &mut ctx,
+        PrivateLendingWitnessBranch::Liquidation {
+            debt_hash: loan.offer.get_debt_hash(),
+            salt,
+            expiry,
+        },
+        lock_time,
+    )?;
+
+    Ok(ctx)
+}
+
+/// Gives the loan input (input 0) of the liquidation `ctx` the witness of `branch` and locks it
+/// to `lock_time`.
+pub(super) fn set_liquidation_witness(
+    ctx: &mut ConfidentialTransaction,
+    branch: PrivateLendingWitnessBranch,
+    lock_time: u32,
+) -> anyhow::Result<()> {
     let loan_input = &mut ctx.inputs_mut()[LIQUIDATION_LOAN_INPUT];
     loan_input.partial_input.locktime = LockTime::from_height(lock_time)?;
     loan_input
         .program_input
         .as_mut()
         .expect("the loan input runs the program")
-        .witness = PrivateLendingWitnessBranch::Liquidation {
-        debt_hash: loan.offer.get_debt_hash(),
-        salt,
-        expiry,
-    }
-    .build_witness();
+        .witness = branch.build_witness();
 
-    Ok(ctx)
+    Ok(())
 }
 
 #[simplex::test]

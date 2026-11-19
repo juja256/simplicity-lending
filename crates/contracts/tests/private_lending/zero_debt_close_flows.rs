@@ -5,7 +5,7 @@
 //! borrower may reveal `k` or `−k`.
 
 use simplex::signer::Signer;
-use simplex::simplicityhl::elements::confidential::ValueBlindingFactor;
+use simplex::simplicityhl::elements::confidential::{self, ValueBlindingFactor};
 use simplex::transaction::{PartialInput, PartialOutput, RequiredSignature};
 
 use lending_contracts::programs::private_lending::PrivateLendingWitnessBranch;
@@ -122,12 +122,13 @@ fn build_zero_debt_close(
 }
 
 /// A zero-debt close of `loan` built by hand, before finalization: the loan input takes the
-/// witness of `key`, and output 1 is `key_output`, or, without one, the collateral back to the
-/// borrower, which otherwise follows at output 2. `attach_zero_debt_close` reveals the debt's
-/// blinder in both.
+/// witness of `debt` and `key`, and output 1 is `key_output`, or, without one, the collateral back
+/// to the borrower, which otherwise follows at output 2. `attach_zero_debt_close` takes the loan's
+/// debt and reveals its blinder.
 fn build_zero_debt_close_with(
     loan: &Loan,
     borrower: &Signer,
+    debt: confidential::Value,
     key: [u8; 32],
     key_output: Option<PartialOutput>,
 ) -> anyhow::Result<ConfidentialTransaction> {
@@ -147,11 +148,7 @@ fn build_zero_debt_close_with(
     loan.offer.add_program_input(
         &mut ctx,
         loan.utxo.clone(),
-        PrivateLendingWitnessBranch::ZeroDebtClose {
-            debt: loan.offer.get_debt(),
-            key,
-        }
-        .build_witness(),
+        PrivateLendingWitnessBranch::ZeroDebtClose { debt, key }.build_witness(),
     );
     if let Some(key_output) = key_output {
         ctx.add_output(key_output);
@@ -170,7 +167,14 @@ fn key_reveal(key: &[u8; 32]) -> PartialOutput {
 fn assert_true_key_passes(loan: &Loan, borrower: &Signer) -> anyhow::Result<()> {
     let key = zero_debt_key(&loan.opening).expect("a zero debt");
 
-    build_zero_debt_close_with(loan, borrower, key, Some(key_reveal(&key)))?.finalize(borrower)?;
+    build_zero_debt_close_with(
+        loan,
+        borrower,
+        loan.offer.get_debt(),
+        key,
+        Some(key_reveal(&key)),
+    )?
+    .finalize(borrower)?;
 
     Ok(())
 }
@@ -225,7 +229,13 @@ fn zero_debt_state_closes_revealing_minus_k(context: simplex::TestContext) -> an
 
     let minus_k = negated_key(loan.opening.blinder);
     let close_tx = broadcast(
-        &build_zero_debt_close_with(&loan, borrower, minus_k, Some(key_reveal(&minus_k)))?,
+        &build_zero_debt_close_with(
+            &loan,
+            borrower,
+            loan.offer.get_debt(),
+            minus_k,
+            Some(key_reveal(&minus_k)),
+        )?,
         borrower,
     )?;
 
@@ -257,10 +267,40 @@ fn zero_debt_close_fails_while_debt_remains(context: simplex::TestContext) -> an
     let key = *loan.opening.blinder.into_inner().as_ref();
     for key in [key, negated_key(loan.opening.blinder)] {
         assert_program_rejects(
-            build_zero_debt_close_with(&loan, borrower, key, Some(key_reveal(&key)))?
-                .finalize(borrower),
+            build_zero_debt_close_with(
+                &loan,
+                borrower,
+                loan.offer.get_debt(),
+                key,
+                Some(key_reveal(&key)),
+            )?
+            .finalize(borrower),
         );
     }
+
+    Ok(())
+}
+
+/// The storage authenticates the witness's debt: a borrower who still owes cannot close the loan
+/// with a zero debt of its own choosing, `k'·G` with its key `k'`, which every later check accepts.
+#[simplex::test]
+fn zero_debt_close_fails_with_a_forged_debt(context: simplex::TestContext) -> anyhow::Result<()> {
+    let borrower = context.get_default_signer();
+    let (_setup, _lender, loan) = accepted_loan(&context)?;
+    assert!(loan.opening.amount > 0);
+
+    let forged = DebtOpening {
+        amount: 0,
+        blinder: ValueBlindingFactor::new(&mut rand::thread_rng()),
+    };
+    let debt = forged.commitment(&loan.parameters().pinned.repayment);
+    let key = zero_debt_key(&forged).expect("a zero debt");
+    assert_eq!(zero_debt_blinder(&key, &debt), Ok(forged.blinder));
+
+    assert_program_rejects(
+        build_zero_debt_close_with(&loan, borrower, debt, key, Some(key_reveal(&key)))?
+            .finalize(borrower),
+    );
 
     Ok(())
 }
@@ -278,8 +318,14 @@ fn zero_debt_close_fails_with_k_of_another_point(
         .into_inner()
         .as_ref();
     assert_program_rejects(
-        build_zero_debt_close_with(&loan, borrower, other, Some(key_reveal(&other)))?
-            .finalize(borrower),
+        build_zero_debt_close_with(
+            &loan,
+            borrower,
+            loan.offer.get_debt(),
+            other,
+            Some(key_reveal(&other)),
+        )?
+        .finalize(borrower),
     );
 
     Ok(())
@@ -293,8 +339,14 @@ fn zero_debt_close_fails_with_k_zero(context: simplex::TestContext) -> anyhow::R
 
     let zero = [0; 32];
     assert_program_rejects(
-        build_zero_debt_close_with(&loan, borrower, zero, Some(key_reveal(&zero)))?
-            .finalize(borrower),
+        build_zero_debt_close_with(
+            &loan,
+            borrower,
+            loan.offer.get_debt(),
+            zero,
+            Some(key_reveal(&zero)),
+        )?
+        .finalize(borrower),
     );
 
     Ok(())
@@ -320,8 +372,14 @@ fn zero_debt_close_fails_with_k_at_or_above_the_order(
 
     for key in [order_plus(K), CURVE_ORDER] {
         assert_program_rejects(
-            build_zero_debt_close_with(&loan, borrower, key, Some(key_reveal(&key)))?
-                .finalize(borrower),
+            build_zero_debt_close_with(
+                &loan,
+                borrower,
+                loan.offer.get_debt(),
+                key,
+                Some(key_reveal(&key)),
+            )?
+            .finalize(borrower),
         );
     }
 
@@ -346,7 +404,8 @@ fn zero_debt_close_fails_without_the_op_return(
         Some(PartialOutput::new_metadata(b"burn")),
     ] {
         assert_program_rejects(
-            build_zero_debt_close_with(&loan, borrower, key, key_output)?.finalize(borrower),
+            build_zero_debt_close_with(&loan, borrower, loan.offer.get_debt(), key, key_output)?
+                .finalize(borrower),
         );
     }
 

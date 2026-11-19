@@ -1,6 +1,7 @@
 use simplex::program::ProgramError;
 use simplex::signer::Signer;
 use simplex::simplicityhl::elements::bitcoin::PublicKey;
+use simplex::simplicityhl::elements::confidential;
 use simplex::simplicityhl::elements::encode::serialize;
 use simplex::simplicityhl::elements::secp256k1_zkp::Secp256k1;
 use simplex::simplicityhl::elements::{
@@ -637,11 +638,13 @@ pub(super) fn pay_installment(
     ))
 }
 
-/// The first input and the outputs of an installment, which its failure tests change.
-/// [`InstallmentParts::honest`] gives those of [`build_installment`], with the successor's storage
-/// and collateral from the core's `debt_after` and `collateral_after`.
+/// The witness, the first input and the outputs of an installment, which its failure tests
+/// change. [`InstallmentParts::honest`] gives those of [`build_installment`], with the successor's
+/// storage and collateral from the core's `debt_after` and `collateral_after`.
 #[derive(Clone)]
 pub(super) struct InstallmentParts {
+    /// The debt the loan input's witness claims: the loan's.
+    pub debt: confidential::Value,
     /// Input 0 and output 0: the borrower NFT, back to the borrower.
     pub first_input: UTXO,
     pub first_output: PartialOutput,
@@ -665,6 +668,7 @@ impl InstallmentParts {
         let left = debt_after(&loan.offer.get_debt(), &installment.value_commitment())?;
 
         Ok(InstallmentParts {
+            debt: loan.offer.get_debt(),
             first_input: borrower_nft(borrower, &parameters)?,
             first_output: PartialOutput::new(
                 borrower.get_address().script_pubkey(),
@@ -684,8 +688,8 @@ impl InstallmentParts {
 
 /// An installment on `loan` built by hand from `parts`, before finalization, where
 /// [`build_installment`] uses `attach_installment`: the loan input takes the installment witness
-/// of the loan's debt, and a principal coin of the borrower pays what output 2 holds of the
-/// principal asset.
+/// of `parts.debt`, and a principal coin of the borrower pays what output 2 holds of the principal
+/// asset.
 pub(super) fn build_installment_with(
     setup: &PrivateOfferSetup,
     loan: &Loan,
@@ -717,10 +721,7 @@ pub(super) fn build_installment_with(
     loan.offer.add_program_input(
         &mut ctx,
         loan.utxo.clone(),
-        PrivateLendingWitnessBranch::Installment {
-            debt: loan.offer.get_debt(),
-        }
-        .build_witness(),
+        PrivateLendingWitnessBranch::Installment { debt: parts.debt }.build_witness(),
     );
     ctx.add_pinned_output(
         parts.successor_script.clone(),
