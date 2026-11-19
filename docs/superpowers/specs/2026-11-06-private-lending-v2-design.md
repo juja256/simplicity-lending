@@ -316,7 +316,7 @@ receiver of what is released:
 | Cancellation | 0 pending offer, 1 lender NFT, 2 borrower NFT | 0 and 1 burn both NFTs | none |
 | Installment | 0 borrower NFT, 1 loan | 0 borrower NFT, 1 loan, 2 installment | `D` |
 | Full repayment | 0 borrower NFT, 1 loan | 0 borrower NFT burn, 1 repayment | `h` |
-| Zero-debt close | 0 borrower NFT, 1 loan | 0 borrower NFT burn, 1 `OP_RETURN` of `k` | `D` |
+| Zero-debt close | 0 borrower NFT, 1 loan | 0 borrower NFT burn, 1 `OP_RETURN` of `k` | `D`, `k` |
 | Liquidation | 0 loan, 1 lender NFT | 0 lender NFT burn | `h`, salt, expiry |
 
 Acceptance and cancellation are v1's. The other four branches check:
@@ -340,7 +340,10 @@ Acceptance and cancellation are v1's. The other four branches check:
   1. Input 1's script hash is the storage address (active, `h(A, D)`), with `D` the witness's
      point in its Elements encoding.
   2. The borrower NFT is burned in output 0.
-  3. Output 1 is an `OP_RETURN` whose first datum is a 32-byte push, read as a nonzero scalar `k`.
+  3. Output 1 is exactly `OP_RETURN <k>`, one 32-byte push of the witness's `k`, with `0 < k < n`
+     (`k` is not reduced modulo `n`). Simplicity reads an `OP_RETURN`'s data only as a hash, so the
+     witness carries `k`, and the program compares output 1's script hash with that of
+     `OP_RETURN <k>`.
   4. `k·G` has the x-coordinate of `D` (`jet::generate`, then `jet::gej_x_equiv`).
 - **Liquidation**, run at index 0:
   1. Input 0's script hash is the storage address (active, `h`) for the witness's `h`, which shows

@@ -1326,13 +1326,14 @@ by a BIP340 signature under `D_final`.
 
 Decided at phase start (2026-11-18), including the note's "Left to the builder":
 - **The witness path** keeps v1's shape and carries each branch's data, with a debt point as a
-  commitment in Elements' encoding, `(u1, u256)` (the low bit of the prefix, and `x`):
-  `Either<Either<(), ()>, Either<Either<(u1, u256), Either<u256, (u1, u256)>>, (u256, u256, u32)>>`.
+  commitment in Elements' encoding, `(bool, u256)` (the low bit of the prefix, and `x`; a `bool`
+  because simplex 0.0.5's generated `u1` conversion panics on 0, task 4):
+  `Either<Either<(), ()>, Either<Either<(bool, u256), Either<u256, ((bool, u256), u256)>>, (u256, u256, u32)>>`.
   Acceptance `Left(Left(()))`; cancellation `Left(Right(()))`; installment `Right(Left(Left(D)))`;
-  full repayment `Right(Left(Right(Left(h))))`; zero-debt close `Right(Left(Right(Right(D))))`;
+  full repayment `Right(Left(Right(Left(h))))`; zero-debt close `Right(Left(Right(Right((D, k)))))`;
   liquidation `Right(Right((h, salt, expiry)))`.
 - **Parameters.** `EXPIRY_HASH: u256` replaces `LOAN_EXPIRATION_TIME`; new `REPAYMENT_ASSET:
-  (u1, u256)` (`A` in the same encoding) and `INSTALLMENT_OUTPUT_SCRIPT_HASH: u256`;
+  (bool, u256)` (`A` in the same encoding) and `INSTALLMENT_OUTPUT_SCRIPT_HASH: u256`;
   `ACTIVE_COLLATERAL_COMMITMENT` stays for acceptance only.
 - **Square-ness** is tested with `jet::fe_square_root`, with no root hints in the witness. If the
   installment branch goes over the cost budget, task 4 switches to hints (`s² = ±y`) and says so
@@ -1350,7 +1351,8 @@ Decided at phase start (2026-11-18), including the note's "Left to the builder":
     "first wallet input"); outputs 0 borrower NFT (explicit, to a fresh receive address),
     1 successor loan, 2 installment, 3 principal change if any;
   - zero-debt close: inputs 0 borrower NFT, 1 loan, then fee coins; outputs 0 borrower NFT burn,
-    1 `OP_RETURN` with one 32-byte push of `k`, 2 the collateral to the borrower;
+    1 `OP_RETURN` with one 32-byte push of `k` (also in the witness), 2 the collateral to the
+    borrower;
   - claims: inputs 0 lender NFT, 1… the locked outputs (installments, and the full repayment at
     the final claim), then fee coins; outputs 0 the lender NFT (back to the lender, or burned at
     the final claim), 1 what was claimed, to the lender;
