@@ -126,7 +126,7 @@ jobs:
         shell: bash
         run: |
           cd crates/contracts
-          simplex test
+          RUST_TEST_THREADS=8 simplex test
 
       - name: Check that queries are fresh
         run: cargo sqlx prepare --workspace --check -- --all-targets
