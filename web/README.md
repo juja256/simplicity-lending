@@ -363,7 +363,11 @@ part:
    than 1 day"; as its term is 15 blocks, the lender accepts it at once, after ticking "Accept
    outside my terms";
 4. the lender accepts the borrower's proposal, within its terms; the borrower receives the
-   principal and repays; the lender claims the repayment;
+   principal; the repay form opens on the whole repayment, and the borrower pays half of it as an
+   installment, which the loan book shows as repaid and claimable; the lender claims it; the
+   borrower repays the rest, and the lender's final claim takes that repayment, with no
+   installment left to sweep: the loan book then shows the loan claimed, repaid in full, with
+   nothing left to claim;
 5. once the short loan expired, the lender liquidates it, and the loan book shows it liquidated;
 6. each borrower page has no horizontal scroll at 375 px, and every page of both areas gets a
    screenshot.
@@ -376,8 +380,8 @@ It needs:
   demo's own transactions. On top of those, the borrower needs the short proposal's creation,
   42 000 tL-sats (as any creation in `STAGE_NEEDS`), and the demo loan's collateral,
   0.00001 tL-BTC, and its interest; the lender needs the demo loan's principal, 0.1 TEST, and the
-  short proposal's, 1 000 TEST units; and each needs the fees of its own transactions, three for
-  the borrower and four for the lender;
+  short proposal's, 1 000 TEST units; and each needs the fees of its own transactions, four for
+  the borrower and five for the lender;
 - the local testnet indexer (above), indexing, on a fresh database that starts at the tip
   (`INDEXER__LAST_INDEXED_HEIGHT`), after an earlier run's last transaction: the demo finds its
   loans by their amounts, so an earlier run's loans would match too. The dev server proxies it

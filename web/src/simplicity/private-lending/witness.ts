@@ -95,21 +95,24 @@ export const PRIVATE_LENDING_BRANCH_SPENDS_ACTIVE: Record<PrivateLendingBranch, 
 
 // `PsetInputSpec.maxWeightToSatisfy` for the private lending covenant input, per branch: the
 // serialized script witness (witness data + program + CMR + control block, with length prefixes)
-// plus 10 %, rounded up. These are regtest measurements, from the contract tests' transactions of
-// this program (`simplicity_spend` prints them); phase 5's task 11 replaces them with testnet ones.
+// of a real broadcast transaction of this program, plus 10 %, rounded up. Each is a testnet
+// transaction of the private lending e2e or of the scripted demo, except the zero-debt close,
+// which no testnet run has made.
 export const PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY: Record<PrivateLendingBranch, number> = {
-  // 2 998 (1 + 2 861 + 32 + 97 bytes)
+  // testnet acceptance 59289a8a…c607: 2 998 (1 + 2 861 + 32 + 97 bytes)
   OfferAcceptance: 3298,
-  // 2 881 (1 + 2 744 + 32 + 97 bytes)
+  // testnet cancellation 93e7cc4c…6634: 2 881 (1 + 2 744 + 32 + 97 bytes)
   OfferCancellation: 3170,
-  // 4 027 to 4 060 (33 + 3 858…3 891 + 32 + 97 bytes): the pruned program varies with the
-  // branches its square-ness tests take, so this is the largest seen
-  Installment: 4466,
-  // 2 971 (33 + 2 802 + 32 + 97 bytes)
+  // testnet installment 6254ad10…104c: 4 095 (33 + 3 926 + 32 + 97 bytes). The pruned program
+  // varies with the branches its square-ness tests take: this is the largest of five testnet
+  // installments, which weighed 4 026 to 4 095
+  Installment: 4505,
+  // testnet repayment 9b7e98ee…7e2c: 2 971 (33 + 2 802 + 32 + 97 bytes)
   FullRepayment: 3269,
-  // 3 362 (65 + 3 161 + 32 + 97 bytes)
+  // regtest, from the contract tests' zero-debt close (`simplicity_spend` prints it): 3 362
+  // (65 + 3 161 + 32 + 97 bytes)
   ZeroDebtClose: 3699,
-  // 2 816 (69 + 2 611 + 32 + 97 bytes)
+  // testnet liquidation af4c39b7…e8d1: 2 816 (69 + 2 611 + 32 + 97 bytes)
   Liquidation: 3098,
 }
 
