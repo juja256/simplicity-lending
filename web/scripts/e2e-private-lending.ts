@@ -33,7 +33,7 @@ import {
   requestDirectoryChallenge,
 } from '@/api/indexer/private'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
-import { AddressCursor } from '@/privateLending/addressCursor'
+import { AddressCursor, GAP_LIMIT } from '@/privateLending/addressCursor'
 import {
   borrowerNftOutpoint as candidateBorrowerNftOutpoint,
   repaymentBorrowerNftOutpoint,
@@ -52,12 +52,13 @@ import { buildPrivateCancellation } from '@/privateLending/flows/cancellation'
 import { buildPrincipalClaim } from '@/privateLending/flows/claimPrincipal'
 import { buildRepaymentClaim } from '@/privateLending/flows/claimRepayment'
 import { buildPrivateCreation } from '@/privateLending/flows/creation'
+import { buildPrivateInstallment } from '@/privateLending/flows/installment'
 import {
   buildPrivateLiquidation,
   ExpiryNotReachedError,
   type LiquidationParams,
 } from '@/privateLending/flows/liquidation'
-import { buildPrivateRepayment, PrincipalNotClaimedError } from '@/privateLending/flows/repayment'
+import { buildPrivateRepayment } from '@/privateLending/flows/repayment'
 import { outpointOf } from '@/privateLending/flows/shared'
 import { type InspectedOutput, inspectPset } from '@/privateLending/inspectPset'
 import {
@@ -74,6 +75,7 @@ import {
   termBlocksOf,
   unitsToDecimal,
 } from '@/privateLending/lenderTerms'
+import { loadLoan, type Loan, PrincipalNotClaimedError } from '@/privateLending/loan'
 import { checkAgainstTerms, proposalOfOffer } from '@/privateLending/proposalCheck'
 import { walletReceiver } from '@/privateLending/receiver'
 import {
@@ -95,6 +97,8 @@ import {
   CANCELLATION_INPUT,
   CANCELLATION_OUTPUT,
   CREATION_OUTPUT,
+  INSTALLMENT_INPUT,
+  INSTALLMENT_OUTPUT,
   LIQUIDATION_INPUT,
   LIQUIDATION_OUTPUT,
   NFT_AMOUNT,
@@ -824,11 +828,11 @@ function witnessWeight(items: string[]): number {
 
 /**
  * The index of the wallet's receive address whose unconfidential script is `script`, up to the
- * last unused one; undefined if none is.
+ * last unused one, or `beyond` indices past it; undefined if none is.
  */
-function walletAddressIndex(wallet: SeedWallet, script: string): number | undefined {
+function walletAddressIndex(wallet: SeedWallet, script: string, beyond = 0): number | undefined {
   const lastUnused = wallet.wollet.address(null).index()
-  for (let index = 0; index <= lastUnused; index += 1) {
+  for (let index = 0; index <= lastUnused + beyond; index += 1) {
     const address = wallet.wollet.address(index).address().toUnconfidential()
     if (address.scriptPubkey().toString() === script) return index
   }
@@ -993,8 +997,24 @@ async function acceptDryStage(ctx: Context): Promise<void> {
   out(`\naccept-dry: ok (${txid} finalized, not saved or broadcast)`)
 }
 
-/** The borrower NFT's outpoint: creation output 0, or the claim's output 0 once it confirmed. */
+/** The records of the installments of the `create` loan, in chain order. */
+const INSTALLMENT_RECORDS = ['repay-partial-1', 'repay-partial-2'] as const satisfies Stage[]
+
+/** The txids of the installments whose records are confirmed, in chain order. */
+function confirmedInstallments(): string[] {
+  return INSTALLMENT_RECORDS.flatMap(stage => {
+    const record = getRecord(stage)
+    return record?.status === 'confirmed' ? [record.txid] : []
+  })
+}
+
+/**
+ * The borrower NFT's outpoint: creation output 0, the claim's output 0 once it confirmed, and the
+ * last confirmed installment's output 0 after it.
+ */
 function borrowerNftOutpoint(): string {
+  const installment = confirmedInstallments().at(-1)
+  if (installment !== undefined) return `${installment}:${INSTALLMENT_OUTPUT.borrowerNft}`
   const claim = getRecord('claim-principal')
   if (claim?.status === 'confirmed') return `${claim.txid}:${PRINCIPAL_CLAIM_OUTPUT.borrowerNft}`
   const create = getRecord('create')
@@ -1120,6 +1140,331 @@ async function claimPrincipalDryStage(ctx: Context): Promise<void> {
   out(`\nclaim-principal-dry: ok (${txid} finalized, not saved or broadcast)`)
 }
 
+/**
+ * The `create` loan's output now, from the records: the acceptance's output 0, or the last
+ * confirmed installment's output 1.
+ */
+function recordedLoanOutpoint(): string {
+  const installment = confirmedInstallments().at(-1)
+  return installment !== undefined
+    ? `${installment}:${INSTALLMENT_OUTPUT.loan}`
+    : `${requireAcceptance()}:${ACCEPTANCE_OUTPUT.activeOffer}`
+}
+
+/**
+ * The `create` loan's output as the app finds it: the unspent active offer of its candidate on the
+ * local testnet indexer. Polls for up to 5 minutes until the indexer lists the loan output of the
+ * records, and every confirmed installment as an `installment` UTXO, then returns it.
+ */
+async function indexedLoanOutpoint(ctx: Context): Promise<string> {
+  const creationTxid = requireConfirmed('create')
+  const expected = recordedLoanOutpoint()
+  const installments = confirmedInstallments()
+    .map(txid => `${txid}:${INSTALLMENT_OUTPUT.installment}`)
+    .sort()
+  let seen = 'nothing'
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 10_000))
+    let candidate: PrivateCandidateDetails
+    try {
+      candidate = await fetchPrivateCandidate(creationTxid, ctx.apiUrl)
+    } catch (error) {
+      seen = indexerErrorMessage(error) ?? (error instanceof Error ? error.message : String(error))
+      continue
+    }
+    const loan = unspentUtxo(candidate, 'active_offer')
+    const listed = candidate.utxos
+      .filter(utxo => utxo.utxo_type === 'installment')
+      .map(utxoOutpoint)
+      .sort()
+    seen = `the loan at ${loan ? utxoOutpoint(loan) : 'none'}, installments [${listed.join(', ')}]`
+    if (
+      loan !== undefined &&
+      utxoOutpoint(loan) === expected &&
+      isDeepStrictEqual(listed, installments)
+    ) {
+      out(`indexer ${ctx.apiUrl}: ${seen}`)
+      return expected
+    }
+  }
+  throw new Error(
+    `the indexer at ${ctx.apiUrl} lists ${seen}, not the loan at ${expected} with installments ` +
+      `[${installments.join(', ')}]: let it catch up`,
+  )
+}
+
+/** The `create` loan at `loanOutpoint`, read on chain for `role` with its lending key. */
+async function loadE2eLoan(
+  ctx: Context,
+  offer: VerifiedOffer,
+  role: Wallet,
+  loanOutpoint: string,
+): Promise<Loan> {
+  const wallet = ctx.wallets[role]
+  return loadLoan(flowDeps(wallet, ctx.chain), offer, wallet.lendingKey, loanOutpoint)
+}
+
+/** The installment's inputs that LWK sized with a max-weight-to-satisfy constant. */
+const INSTALLMENT_WEIGHTS: WeightedInput[] = [
+  {
+    index: INSTALLMENT_INPUT.borrowerNft,
+    name: 'borrower NFT (p2wpkh)',
+    limit: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
+  },
+  {
+    index: INSTALLMENT_INPUT.loan,
+    name: 'loan (Installment)',
+    limit: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.Installment,
+  },
+]
+
+/**
+ * The stage's own checks of a blinded installment PSET: the borrower NFT back to a borrower
+ * address, explicit; the successor loan with the collateral's value commitment under another asset
+ * commitment, blinded to the lender; the installment at the installment lock under `A`, blinded to
+ * the lender.
+ */
+function assertInstallmentOutputs(
+  pset: lwk.Pset,
+  offer: VerifiedOffer,
+  loan: Loan,
+  amount: bigint,
+  borrower: SeedWallet,
+): void {
+  const opened = offer.opened
+  const outputs = inspectPset(wasm, pset.toString()).outputs
+  const nft = outputs[INSTALLMENT_OUTPUT.borrowerNft]
+  const successor = outputs[INSTALLMENT_OUTPUT.loan]
+  const installment = outputs[INSTALLMENT_OUTPUT.installment]
+  const collateral = loan.state.collateral()
+  const checks: [string, boolean][] = [
+    [
+      'output 0 is the borrower NFT to a borrower address, explicit',
+      nft !== undefined &&
+        walletAddressIndex(borrower, nft.script, GAP_LIMIT) !== undefined &&
+        nft.asset === opened.borrowerNft() &&
+        nft.amount === NFT_AMOUNT &&
+        nft.blindingKey === null &&
+        nft.assetCommitment === null &&
+        nft.amountCommitment === null,
+    ],
+    [
+      "output 1 is the successor loan: the collateral's value commitment under a new asset " +
+        'commitment, blinded to the lender',
+      successor !== undefined &&
+        successor.script !== offer.scripts.activeOfferAt(loan.state.debtHash).toString() &&
+        successor.asset === collateral.asset &&
+        successor.amount === collateral.amount &&
+        successor.amountCommitment === collateral.valueCommitment &&
+        successor.assetCommitment !== null &&
+        successor.assetCommitment !== collateral.assetCommitment &&
+        successor.blindingKey === opened.lenderBlindingKey() &&
+        successor.ecdhPubkey !== null,
+    ],
+    [
+      'output 2 is the installment at the installment lock, under A, blinded to the lender',
+      installment !== undefined &&
+        scriptHash(installment.script) === offer.scripts.installmentOutputScriptHash &&
+        installment.asset === opened.principalAsset() &&
+        installment.amount === amount &&
+        installment.assetCommitment === opened.pinned(wasm.PinnedRole.Repayment).assetCommitment &&
+        installment.blindingKey === opened.lenderBlindingKey() &&
+        installment.ecdhPubkey !== null,
+    ],
+  ]
+  for (const [what, ok] of checks) {
+    if (!ok) throw new Error(`installment PSET: not true that ${what}`)
+    out(`  ok: ${what}`)
+  }
+}
+
+/**
+ * Reads the loan again with the finalized installment `tx` after `loan`'s, as each party reads it
+ * once it confirms: the borrower must rebuild its debt, rewinding the installment's range proof
+ * with the key it derives, and the lender must open the installment's amount; the successor must
+ * be at the loan's script of the debt left. Run before saving: the covenant does not check the
+ * range proof's nonce, and an installment the borrower cannot rewind leaves a loan it can never
+ * close.
+ */
+async function assertInstallmentReadsBack(
+  ctx: Context,
+  loan: Loan,
+  owed: bigint,
+  amount: bigint,
+  tx: lwk.Transaction,
+): Promise<void> {
+  const acceptance = (await ctx.chain.fetchTx(loan.acceptanceTxid)).toString()
+  const installments = [
+    ...(await Promise.all(loan.installmentTxids.map(txid => ctx.chain.fetchTx(txid)))).map(
+      installment => installment.toString(),
+    ),
+    tx.toString(),
+  ]
+  const j = installments.length
+  const txid = tx.txid().toString()
+  for (const role of NAMES) {
+    const offer = await loadCreatedOffer(ctx, role)
+    const state = offer.opened.loanState(ctx.wallets[role].lendingKey, acceptance, installments)
+    const successor = tx.outputs[INSTALLMENT_OUTPUT.loan]
+    if (
+      state.installmentCount !== j ||
+      state.loanOutpoint !== `${txid}:${INSTALLMENT_OUTPUT.loan}` ||
+      state.installment(j).amount !== amount ||
+      state.remaining !== owed - amount ||
+      successor?.scriptPubkey().toString() !==
+        offer.scripts.activeOfferAt(state.debtHash).toString()
+    ) {
+      throw new Error(
+        `the ${role} reads installment ${j} back as ${state.installment(j).amount} paid and ` +
+          `${state.remaining} owed, not ${amount} and ${owed - amount}, at ${state.loanOutpoint}`,
+      )
+    }
+    out(
+      `  ok: the ${role} reads installment ${j} back from the chain: ${amount} paid, ` +
+        `${state.remaining} owed, the loan at its debt's script`,
+    )
+  }
+}
+
+/**
+ * The borrower's installment of a third of what `loan` owes: built, checked by the stage, signed,
+ * finalized (which runs the covenant) and read back by both parties.
+ */
+async function buildSignedInstallment(
+  ctx: Context,
+  offer: VerifiedOffer,
+  loan: Loan,
+): Promise<{ hex: string; txid: string; amount: bigint }> {
+  const { borrower } = ctx.wallets
+  const owed = loan.state.remaining
+  if (owed === undefined) throw new Error('the borrower cannot read what the loan owes')
+  const amount = owed / 3n
+  out(
+    `the loan owes ${owed} of ${offer.opened.repaymentAmount()} after ` +
+      `${loan.state.installmentCount} installments: paying ${amount}`,
+  )
+  const principalCoins = pickCoins(
+    borrower,
+    TESTNET_ASSETS.principal,
+    amount,
+    'borrower installment',
+  )
+  const feeCoins = pickCoins(borrower, TESTNET_ASSETS.policy, FEE_BUDGET, 'borrower fee')
+  out(`principal coins ${principalCoins.map(outpointOf).join(', ')}`)
+  out(`fee coins       ${feeCoins.map(outpointOf).join(', ')}`)
+
+  const built = await buildPrivateInstallment(flowDeps(borrower, ctx.chain), offer, loan, {
+    amount,
+    borrowerNftOutpoint: borrowerNftOutpoint(),
+    principalCoins,
+    feeCoins,
+  })
+  out('blinded installment PSET:')
+  describeOutputs(built.pset, {
+    borrowerNft: offer.opened.borrowerNft(),
+    lenderNft: offer.opened.lenderNft(),
+  })
+  assertDistinctOutputScripts(built.pset, 'the installment')
+  assertInstallmentOutputs(built.pset, offer, loan, amount, borrower)
+  const { finalizedTx, summary } = built.finalize(borrower.signer.sign(built.pset))
+  assertFinalizedWeights(finalizedTx, INSTALLMENT_WEIGHTS)
+  await assertInstallmentReadsBack(ctx, loan, owed, amount, finalizedTx)
+  out(
+    `finalized: installment ${summary.installmentOutpoint} (${amount} TEST units), the loan at ` +
+      `${summary.loanOutpoint}, ${summary.remaining} owed`,
+  )
+  return { hex: finalizedTx.toString(), txid: finalizedTx.txid().toString(), amount }
+}
+
+/**
+ * Checks a confirmed installment, the `j`-th, on chain: the loan read from its output 1 has it as
+ * its last installment, the borrower NFT is back at a borrower address and the borrower's TEST
+ * balance fell by its amount (when `before` was read before building it).
+ */
+async function checkConfirmedInstallment(
+  ctx: Context,
+  offer: VerifiedOffer,
+  j: number,
+  txid: string,
+  before: bigint | undefined,
+): Promise<void> {
+  const { borrower } = ctx.wallets
+  await borrower.sync()
+  const loan = await loadE2eLoan(ctx, offer, 'borrower', `${txid}:${INSTALLMENT_OUTPUT.loan}`)
+  const amount = loan.state.installment(j).amount
+  if (loan.state.installmentCount !== j || amount === undefined) {
+    throw new Error(`${txid} is not the opened installment ${j} of the loan`)
+  }
+  out(
+    `installment ${j}: ${amount} TEST units at ${txid}:${INSTALLMENT_OUTPUT.installment}; ` +
+      `${loan.state.paid} paid, ${loan.state.remaining} owed`,
+  )
+  const tx = await ctx.chain.fetchTx(txid)
+  const nft = tx.outputs[INSTALLMENT_OUTPUT.borrowerNft]
+  if (
+    nft?.asset()?.toString() !== offer.opened.borrowerNft() ||
+    nft.value() !== NFT_AMOUNT ||
+    walletAddressIndex(borrower, nft.scriptPubkey().toString()) === undefined
+  ) {
+    throw new Error('the confirmed installment does not pay the borrower NFT to the borrower')
+  }
+  out(`borrower NFT back at ${txid}:${INSTALLMENT_OUTPUT.borrowerNft} (a borrower address)`)
+  const after = confirmedBalance(borrower, TESTNET_ASSETS.principal)
+  if (before !== undefined) {
+    out(`borrower TEST (confirmed): ${before} -> ${after}`)
+    if (before - after !== amount) {
+      throw new Error(`the borrower's TEST balance fell by ${before - after}, not ${amount}`)
+    }
+  } else {
+    out(`borrower TEST (confirmed): ${after}`)
+  }
+  await assertWitnessWeights(ctx, txid, INSTALLMENT_WEIGHTS)
+}
+
+/**
+ * The borrower pays two installments on the `create` loan, after the principal claim, each a third
+ * of what the loan owes then. Each has its own record (`repay-partial-1`, `repay-partial-2`), so a
+ * crash never rebuilds one: an installment built again would reuse its range proof's nonce. Each
+ * reads the loan output from the indexer, as the app does.
+ */
+async function repayPartialStage(ctx: Context): Promise<void> {
+  const { borrower } = ctx.wallets
+  requireConfirmed('claim-principal')
+  const offer = await loadCreatedOffer(ctx, 'borrower')
+  for (const [index, stage] of INSTALLMENT_RECORDS.entries()) {
+    out(`-- ${stage}`)
+    let hex: string | undefined
+    let before: bigint | undefined
+    if (!getRecord(stage)) {
+      requireStageNeed(ctx, stage)
+      const loan = await loadE2eLoan(ctx, offer, 'borrower', await indexedLoanOutpoint(ctx))
+      before = confirmedBalance(borrower, TESTNET_ASSETS.principal)
+      hex = (await buildSignedInstallment(ctx, offer, loan)).hex
+    }
+    const txid = await submitStage(
+      ctx.chain,
+      stage,
+      () => {
+        if (hex === undefined) throw new Error('unreachable: a record exists')
+        return hex
+      },
+      out,
+    )
+    await checkConfirmedInstallment(ctx, offer, index + 1, txid, before)
+  }
+  out('\nrepay-partial: ok')
+}
+
+/** An installment built, checked, signed, finalized and read back, but never saved or broadcast. */
+async function repayPartialDryStage(ctx: Context): Promise<void> {
+  requireStageNeed(ctx, 'repay-partial-1')
+  requireConfirmed('claim-principal')
+  const offer = await loadCreatedOffer(ctx, 'borrower')
+  const loan = await loadE2eLoan(ctx, offer, 'borrower', await indexedLoanOutpoint(ctx))
+  const { txid } = await buildSignedInstallment(ctx, offer, loan)
+  out(`\nrepay-partial-dry: ok (${txid} finalized, not saved or broadcast)`)
+}
+
 /** Whether an inspected output is an explicit OP_RETURN that burns exactly one unit of `nft`. */
 function burnsNft(output: InspectedOutput | undefined, nft: string): boolean {
   return (
@@ -1145,13 +1490,14 @@ function burnsNftOnChain(tx: lwk.Transaction, vout: number, nft: string): boolea
 }
 
 /**
- * The stage's own checks of a blinded repayment PSET: the borrower NFT burned, the pinned
- * repayment at the offer's repayment asset_auth, blinded to the lender, and the collateral back
- * to the borrower, blinded to its wallet.
+ * The stage's own checks of a blinded repayment PSET: the borrower NFT burned, the debt (what the
+ * loan owes under `A`, its value commitment the loan's debt) at the offer's repayment asset_auth,
+ * blinded to the lender, and the collateral back to the borrower, blinded to its wallet.
  */
 function assertRepaymentOutputs(
   pset: lwk.Pset,
   offer: VerifiedOffer,
+  loan: Loan,
   collateralReceiver: lwk.Address,
 ): void {
   const opened = offer.opened
@@ -1164,8 +1510,12 @@ function assertRepaymentOutputs(
       burnsNft(outputs[REPAYMENT_OUTPUT.borrowerNftBurn], opened.borrowerNft()),
     ],
     [
-      'output 1 is the repayment asset_auth with the pinned repayment, blinded to the lender',
-      pinnedMatches(opened.pinned(wasm.PinnedRole.Repayment), repayment) &&
+      'output 1 is the repayment asset_auth with the debt, blinded to the lender',
+      repayment !== undefined &&
+        repayment.asset === opened.principalAsset() &&
+        repayment.amount === loan.state.remaining &&
+        repayment.assetCommitment === opened.pinned(wasm.PinnedRole.Repayment).assetCommitment &&
+        repayment.amountCommitment === loan.state.debtCommitment &&
         scriptHash(repayment.script) === offer.scripts.repaymentOutputScriptHash &&
         repayment.blindingKey === opened.lenderBlindingKey() &&
         repayment.ecdhPubkey !== null,
@@ -1175,7 +1525,7 @@ function assertRepaymentOutputs(
       collateral !== undefined &&
         collateral.script === collateralReceiver.scriptPubkey().toString() &&
         collateral.asset === opened.collateralAsset() &&
-        collateral.amount === opened.collateralAmount() &&
+        collateral.amount === loan.state.collateral().amount &&
         collateral.blindingKey !== null &&
         collateral.assetCommitment !== null &&
         collateral.amountCommitment !== null &&
@@ -1203,28 +1553,24 @@ const REPAYMENT_WEIGHTS: WeightedInput[] = [
 ]
 
 /**
- * The borrower's full repayment of the `create` offer, accepted and with its principal claimed:
- * built, checked by the stage, signed and finalized (which runs the covenant).
+ * The borrower's full repayment of what the `create` loan owes, its principal claimed: built,
+ * checked by the stage, signed and finalized (which runs the covenant).
  */
 async function buildSignedRepayment(
   ctx: Context,
   offer: VerifiedOffer,
-  acceptTxid: string,
+  loan: Loan,
 ): Promise<{ hex: string; txid: string }> {
   const { borrower } = ctx.wallets
+  const owed = loan.state.remaining
+  if (owed === undefined) throw new Error('the borrower cannot read what the loan owes')
   const collateralReceiver = walletReceiver(borrower)
-  const principalCoins = pickCoins(
-    borrower,
-    TESTNET_ASSETS.principal,
-    offer.opened.repaymentAmount(),
-    'borrower repayment',
-  )
+  const principalCoins = pickCoins(borrower, TESTNET_ASSETS.principal, owed, 'borrower repayment')
   const feeCoins = pickCoins(borrower, TESTNET_ASSETS.policy, FEE_BUDGET, 'borrower fee')
   out(`principal coins ${principalCoins.map(outpointOf).join(', ')}`)
   out(`fee coins       ${feeCoins.map(outpointOf).join(', ')}`)
 
-  const built = await buildPrivateRepayment(flowDeps(borrower, ctx.chain), offer, {
-    activeOfferOutpoint: `${acceptTxid}:${ACCEPTANCE_OUTPUT.activeOffer}`,
+  const built = await buildPrivateRepayment(flowDeps(borrower, ctx.chain), offer, loan, {
     borrowerNftOutpoint: borrowerNftOutpoint(),
     principalCoins,
     feeCoins,
@@ -1236,7 +1582,7 @@ async function buildSignedRepayment(
     lenderNft: offer.opened.lenderNft(),
   })
   assertDistinctOutputScripts(built.pset, 'the repayment')
-  assertRepaymentOutputs(built.pset, offer, collateralReceiver)
+  assertRepaymentOutputs(built.pset, offer, loan, collateralReceiver)
   const { finalizedTx, summary } = built.finalize(borrower.signer.sign(built.pset))
   assertFinalizedWeights(finalizedTx, REPAYMENT_WEIGHTS)
   out(
@@ -1246,9 +1592,28 @@ async function buildSignedRepayment(
   return { hex: finalizedTx.toString(), txid: finalizedTx.txid().toString() }
 }
 
+/**
+ * What the loan owed, and the installments paid before, as `loan` reads them: the full repayment
+ * pays the rest of `R`, `R` minus the installments.
+ */
+function describeRest(offer: VerifiedOffer, loan: Loan): bigint {
+  const owed = loan.state.remaining
+  const repayment = offer.opened.repaymentAmount()
+  if (owed === undefined || owed + loan.state.paid !== repayment) {
+    throw new Error(
+      `the loan owes ${owed} after paying ${loan.state.paid}, not the rest of ${repayment}`,
+    )
+  }
+  out(
+    `the loan owes ${owed}: ${repayment} minus ${loan.state.paid} paid in ` +
+      `${loan.state.installmentCount} installments`,
+  )
+  return owed
+}
+
 async function repayStage(ctx: Context): Promise<void> {
   const { borrower } = ctx.wallets
-  const acceptTxid = requireAcceptance()
+  requireAcceptance()
   // the borrower NFT and the principal are back in the wallet
   requireConfirmed('claim-principal')
   const offer = await loadCreatedOffer(ctx, 'borrower')
@@ -1256,8 +1621,10 @@ async function repayStage(ctx: Context): Promise<void> {
   let before: bigint | undefined
   if (!getRecord('repay')) {
     requireStageNeed(ctx, 'repay')
+    const loan = await loadE2eLoan(ctx, offer, 'borrower', await indexedLoanOutpoint(ctx))
+    describeRest(offer, loan)
     before = confirmedBalance(borrower, TESTNET_ASSETS.principal)
-    hex = (await buildSignedRepayment(ctx, offer, acceptTxid)).hex
+    hex = (await buildSignedRepayment(ctx, offer, loan)).hex
   }
   const txid = await submitStage(
     ctx.chain,
@@ -1281,6 +1648,16 @@ async function repayStage(ctx: Context): Promise<void> {
     )
   }
   out(`borrower NFT burned at ${txid}:${REPAYMENT_OUTPUT.borrowerNftBurn}`)
+  // the loan output the repayment spent, and what it owed
+  const spent = repayTx.inputs[REPAYMENT_INPUT.offer]?.outpoint()
+  if (spent === undefined) throw new Error('the confirmed repayment has no loan input')
+  const loan = await loadE2eLoan(
+    ctx,
+    offer,
+    'borrower',
+    `${spent.txid().toString()}:${spent.vout()}`,
+  )
+  const repaid = describeRest(offer, loan)
 
   const collateralOutpoint = `${txid}:${REPAYMENT_OUTPUT.collateral}`
   const coin = await waitForWalletCoin(borrower, collateralOutpoint)
@@ -1300,8 +1677,8 @@ async function repayStage(ctx: Context): Promise<void> {
   const after = confirmedBalance(borrower, TESTNET_ASSETS.principal)
   if (before !== undefined) {
     out(`borrower TEST (confirmed): ${before} -> ${after}`)
-    if (before - after !== offer.opened.repaymentAmount()) {
-      throw new Error(`the borrower's TEST balance fell by ${before - after}, not the repayment`)
+    if (before - after !== repaid) {
+      throw new Error(`the borrower's TEST balance fell by ${before - after}, not ${repaid}`)
     }
   } else {
     out(`borrower TEST (confirmed): ${after}`)
@@ -1315,7 +1692,9 @@ async function repayDryStage(ctx: Context): Promise<void> {
   requireStageNeed(ctx, 'repay')
   requireConfirmed('claim-principal')
   const offer = await loadCreatedOffer(ctx, 'borrower')
-  const { txid } = await buildSignedRepayment(ctx, offer, requireAcceptance())
+  const loan = await loadE2eLoan(ctx, offer, 'borrower', await indexedLoanOutpoint(ctx))
+  describeRest(offer, loan)
+  const { txid } = await buildSignedRepayment(ctx, offer, loan)
   out(`\nrepay-dry: ok (${txid} finalized, not saved or broadcast)`)
 }
 
@@ -1345,9 +1724,9 @@ function stopAtBuild(deps: PrivateFlowDeps): PrivateFlowDeps {
  * A hostile indexer cannot steer the borrower into repaying while the principal may be unclaimed:
  * the repayment burns the borrower NFT, the only key to an unclaimed principal. The `create` offer
  * (claimed, then repaid, on chain) is served from candidates wrapped in memory from the honest one,
- * as an active loan with its active offer unspent. The repay inputs are derived from each as the
- * Repay row and modal do (`unspentUtxo` for the active offer, `repaymentBorrowerNftOutpoint` for
- * the borrower NFT), and the builder runs on `stopAtBuild` deps:
+ * as an active loan with its active offer unspent. The borrower NFT is derived from each as the
+ * Repay row and modal do for a loan without installments (`repaymentBorrowerNftOutpoint`), and the
+ * builder runs on `stopAtBuild` deps, with the loan the repayment spent:
  * - the honest principal, spent by the claim: the inputs are derived and the builder passes every
  *   check up to the build (the control);
  * - no principal at all, or one spent by the creation itself: no inputs are derived, and the
@@ -1361,10 +1740,21 @@ function stopAtBuild(deps: PrivateFlowDeps): PrivateFlowDeps {
 async function repayHostileDryStage(ctx: Context): Promise<void> {
   const { borrower } = ctx.wallets
   const creationTxid = requireConfirmed('create')
-  const acceptTxid = requireAcceptance()
+  requireAcceptance()
   const claimTxid = requireConfirmed('claim-principal')
   const repayTxid = requireConfirmed('repay')
   const offer = await loadCreatedOffer(ctx, 'borrower')
+  const repayTx = await ctx.chain.fetchTx(repayTxid)
+  const spent = repayTx.inputs[REPAYMENT_INPUT.offer]?.outpoint()
+  if (spent === undefined) throw new Error('the confirmed repayment has no loan input')
+  const loan = await loadE2eLoan(
+    ctx,
+    offer,
+    'borrower',
+    `${spent.txid().toString()}:${spent.vout()}`,
+  )
+  const owed = loan.state.remaining
+  if (owed === undefined) throw new Error('the borrower cannot read what the loan owed')
   const honest = await fetchPrivateCandidate(creationTxid, ctx.apiUrl)
   const principal = honest.utxos.find(utxo => utxo.utxo_type === 'principal')
   if (principal?.spent_txid !== claimTxid) {
@@ -1389,18 +1779,12 @@ async function repayHostileDryStage(ctx: Context): Promise<void> {
   })
 
   // The builder checks these coins before anything it fetches; a repayment needs them.
-  const principalCoins = pickCoins(
-    borrower,
-    TESTNET_ASSETS.principal,
-    offer.opened.repaymentAmount(),
-    'borrower repayment',
-  )
+  const principalCoins = pickCoins(borrower, TESTNET_ASSETS.principal, owed, 'borrower repayment')
   const feeCoins = pickCoins(borrower, TESTNET_ASSETS.policy, FEE_BUDGET, 'borrower fee')
   const collateralReceiver = walletReceiver(borrower)
   const deps = stopAtBuild(flowDeps(borrower, ctx.chain))
-  const tryBuild = (activeOfferOutpoint: string, borrowerNftOutpoint: string) =>
-    buildPrivateRepayment(deps, offer, {
-      activeOfferOutpoint,
+  const tryBuild = (borrowerNftOutpoint: string) =>
+    buildPrivateRepayment(deps, offer, loan, {
       borrowerNftOutpoint,
       principalCoins,
       feeCoins,
@@ -1410,15 +1794,13 @@ async function repayHostileDryStage(ctx: Context): Promise<void> {
       (error: unknown) => error,
     )
   const repayInputs = (candidate: PrivateCandidateDetails) => {
-    const active = unspentUtxo(candidate, 'active_offer')
-    if (active === undefined) throw new Error('the wrapped candidate lists no unspent active offer')
-    return {
-      activeOfferOutpoint: utxoOutpoint(active),
-      borrowerNftOutpoint: repaymentBorrowerNftOutpoint(creationTxid, candidate),
+    if (unspentUtxo(candidate, 'active_offer') === undefined) {
+      throw new Error('the wrapped candidate lists no unspent active offer')
     }
+    return { borrowerNftOutpoint: repaymentBorrowerNftOutpoint(creationTxid, candidate) }
   }
-  const expectRefusal = async (what: string, active: string, nft: string) => {
-    const outcome = await tryBuild(active, nft)
+  const expectRefusal = async (what: string, nft: string) => {
+    const outcome = await tryBuild(nft)
     if (!(outcome instanceof PrincipalNotClaimedError)) {
       throw new Error(
         `${what}: the builder did not refuse ${nft} as unclaimed before building: ` +
@@ -1430,12 +1812,11 @@ async function repayHostileDryStage(ctx: Context): Promise<void> {
 
   // The control: the honest principal.
   const control = repayInputs(activeWith([principal]))
-  const activeOffer = `${acceptTxid}:${ACCEPTANCE_OUTPUT.activeOffer}`
   const claimNft = `${claimTxid}:${PRINCIPAL_CLAIM_OUTPUT.borrowerNft}`
-  if (control.activeOfferOutpoint !== activeOffer || control.borrowerNftOutpoint !== claimNft) {
+  if (control.borrowerNftOutpoint !== claimNft) {
     throw new Error(`honest: the repay inputs are ${JSON.stringify(control)}`)
   }
-  const reached = await tryBuild(control.activeOfferOutpoint, control.borrowerNftOutpoint)
+  const reached = await tryBuild(control.borrowerNftOutpoint)
   if (!(reached instanceof BuildReached)) {
     throw new Error(`honest: the builder stopped before the build: ${String(reached)}`)
   }
@@ -1456,7 +1837,7 @@ async function repayHostileDryStage(ctx: Context): Promise<void> {
       throw new Error(`${what}: the fallback borrower NFT is ${fallback}, not ${creationNft}`)
     }
     out(`  ${what}: no repay inputs (the Repay row and modal refuse)`)
-    await expectRefusal(what, inputs.activeOfferOutpoint, fallback)
+    await expectRefusal(what, fallback)
   }
 
   // A false claim, at an outpoint that does hold the borrower NFT: the inputs are derived, and the
@@ -1466,12 +1847,11 @@ async function repayHostileDryStage(ctx: Context): Promise<void> {
   if (forged.borrowerNftOutpoint !== `${repayTxid}:${REPAYMENT_OUTPUT.borrowerNftBurn}`) {
     throw new Error(`${what}: the repay inputs take ${forged.borrowerNftOutpoint}`)
   }
-  const repayTx = await ctx.chain.fetchTx(repayTxid)
   if (!burnsNftOnChain(repayTx, REPAYMENT_OUTPUT.borrowerNftBurn, offer.opened.borrowerNft())) {
     throw new Error(`${what}: ${forged.borrowerNftOutpoint} does not hold the borrower NFT`)
   }
   out(`  ${what}: repay inputs take ${forged.borrowerNftOutpoint}, which holds the borrower NFT`)
-  await expectRefusal(what, forged.activeOfferOutpoint, forged.borrowerNftOutpoint)
+  await expectRefusal(what, forged.borrowerNftOutpoint)
 
   out('\nrepay-hostile-dry: ok (nothing built, signed, saved or broadcast)')
 }
@@ -2830,6 +3210,8 @@ const STAGES: Record<string, (ctx: Context) => Promise<void>> = {
   accept: acceptStage,
   'claim-principal-dry': claimPrincipalDryStage,
   'claim-principal': claimPrincipalStage,
+  'repay-partial-dry': repayPartialDryStage,
+  'repay-partial': repayPartialStage,
   'repay-dry': repayDryStage,
   'repay-hostile-dry': repayHostileDryStage,
   repay: repayStage,

@@ -726,6 +726,13 @@ impl InstallmentPlan {
     pub fn installment(&self) -> PinnedOutputInfo {
         PinnedOutputInfo::new(&self.payment)
     }
+
+    /// The successor loan: the collateral after one more installment, which `successorBlinding`
+    /// blinds. A builder checks the blinded output 1 against its commitments.
+    #[wasm_bindgen(getter)]
+    pub fn successor(&self) -> PinnedOutputInfo {
+        PinnedOutputInfo::new(&self.successor_collateral)
+    }
 }
 
 /// What the lender's final claim or liquidation sweeps: the outputs, in the order the PSET spends
@@ -1369,6 +1376,24 @@ mod tests {
         );
         assert_eq!(rebuilt.debt_hash(), plan.successor_debt_hash());
         assert_eq!(tx.output[1].script_pubkey, successor.get_script_pubkey());
+        // the plan's successor collateral is what output 1 holds, and what the next state reads
+        let collateral = plan.successor();
+        assert_eq!(
+            collateral.asset_commitment(),
+            encode_hex(&serialize(&tx.output[1].asset))
+        );
+        assert_eq!(
+            collateral.value_commitment(),
+            encode_hex(&serialize(&tx.output[1].value))
+        );
+        assert_eq!(
+            collateral.asset_commitment(),
+            rebuilt.collateral().asset_commitment()
+        );
+        assert_eq!(
+            collateral.value_commitment(),
+            rebuilt.collateral().value_commitment()
+        );
 
         // the lender reads the same debt
         let as_lender = f.as_lender(&[&f.installment, &tx_hex(&tx)]).unwrap();

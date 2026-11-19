@@ -10,10 +10,21 @@ export type PrivateLendingWitness =
   | { branch: 'OfferAcceptance' }
   | { branch: 'OfferCancellation' }
   /**
+   * The debt the loan's storage holds, `D`: its 33-byte consensus encoding, hex
+   * (`InstallmentPlan.debtWitness`). The covenant checks that the loan input's storage is
+   * `h(A, D)`.
+   */
+  | { branch: 'Installment'; debt: string }
+  /**
    * The debt hash (32 bytes, hex) the loan's storage holds, `h(A, D)`: the covenant checks that
    * the repayment at output 1 has it. Until the first installment it is the repayment commitment.
    */
   | { branch: 'FullRepayment'; debtHash: string }
+  /**
+   * The debt, as for the installment, and the key output 1 reveals (32 bytes, hex,
+   * `LoanState.zeroDebtKey()`): the covenant checks that `k·G` has the debt's x.
+   */
+  | { branch: 'ZeroDebtClose'; debt: string; key: string }
   /**
    * The debt hash the loan's storage holds, then the expiry salt (32 bytes, hex,
    * `OpenedOffer.expirySalt()`) and the loan expiration: the covenant checks that their SHA-256 is
@@ -34,14 +45,35 @@ function u256Literal(hex: string, what: string): string {
   return `0x${normalizeHex(hex)}`
 }
 
-function pathExpression(witness: PrivateLendingWitness): string {
+/**
+ * A debt as the program takes it, `(bool, u256)`: a value commitment's prefix is 08 or 09, and the
+ * bool is its low bit, true exactly when `y` is not a square; x is the 32 bytes after it.
+ */
+function debtLiteral(hex: string): string {
+  const debt = isHexStringOfByteLength(hex, 33) ? normalizeHex(hex) : ''
+  const prefix = debt.slice(0, 2)
+  if (prefix !== '08' && prefix !== '09') {
+    throw new Error('The debt must be a value commitment: 33 bytes of hex, prefix 08 or 09')
+  }
+  return `(${prefix === '09'}, 0x${debt.slice(2)})`
+}
+
+/** The witness's `PATH` value, in the expression syntax of the program's types. */
+export function privateLendingPath(witness: PrivateLendingWitness): string {
   switch (witness.branch) {
     case 'OfferAcceptance':
       return 'Left(Left(()))'
     case 'OfferCancellation':
       return 'Left(Right(()))'
+    case 'Installment':
+      return `Right(Left(Left(${debtLiteral(witness.debt)})))`
     case 'FullRepayment':
       return `Right(Left(Right(Left(${u256Literal(witness.debtHash, 'debt hash')}))))`
+    case 'ZeroDebtClose': {
+      const debt = debtLiteral(witness.debt)
+      const key = u256Literal(witness.key, 'zero-debt key')
+      return `Right(Left(Right(Right((${debt}, ${key})))))`
+    }
     case 'Liquidation': {
       const debtHash = u256Literal(witness.debtHash, 'debt hash')
       const salt = u256Literal(witness.salt, 'expiry salt')
@@ -55,7 +87,9 @@ function pathExpression(witness: PrivateLendingWitness): string {
 export const PRIVATE_LENDING_BRANCH_SPENDS_ACTIVE: Record<PrivateLendingBranch, boolean> = {
   OfferAcceptance: false,
   OfferCancellation: false,
+  Installment: true,
   FullRepayment: true,
+  ZeroDebtClose: true,
   Liquidation: true,
 }
 
@@ -68,8 +102,13 @@ export const PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY: Record<PrivateLendingBranch,
   OfferAcceptance: 3298,
   // 2 881 (1 + 2 744 + 32 + 97 bytes)
   OfferCancellation: 3170,
+  // 4 027 to 4 060 (33 + 3 858…3 891 + 32 + 97 bytes): the pruned program varies with the
+  // branches its square-ness tests take, so this is the largest seen
+  Installment: 4466,
   // 2 971 (33 + 2 802 + 32 + 97 bytes)
   FullRepayment: 3269,
+  // 3 362 (65 + 3 161 + 32 + 97 bytes)
+  ZeroDebtClose: 3699,
   // 2 816 (69 + 2 611 + 32 + 97 bytes)
   Liquidation: 3098,
 }
@@ -79,6 +118,6 @@ export function buildPrivateLendingWitness(
 ): SimplicityWitnessValues {
   return new SimplicityWitnessValues().addValue(
     'PATH',
-    SimplicityTypedValue.parse(pathExpression(witness), SimplicityType.fromString(PATH_TYPE)),
+    SimplicityTypedValue.parse(privateLendingPath(witness), SimplicityType.fromString(PATH_TYPE)),
   )
 }
