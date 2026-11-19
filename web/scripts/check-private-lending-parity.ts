@@ -1,5 +1,8 @@
 // Proves that the browser (LWK + the private-lending wasm) derives the same offer addresses
 // as the Rust code. Run it with `pnpm parity`; it must pass before browser addresses are relied on.
+// It checks two offers, whose `A` has either prefix bit, and the first offer's loan after one
+// installment from regtest: the state both parties read (`checkLoanState`) and the loan's
+// scripts at each debt hash.
 // It also checks, offline, the lender terms arithmetic of the wasm against the core's vectors
 // (`checkLenderTerms`), the app's conversion of typed terms (`checkTermsConversion`), the check
 // of a directory entry the core signed (`checkDirectoryEntryParity`), the rules of the app's
@@ -53,22 +56,24 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const webRoot = path.resolve(here, '..')
 const simfDir = path.resolve(webRoot, '../crates/contracts/simf')
 
+interface FixtureArguments {
+  borrower_nft_asset_id: string
+  lender_nft_asset_id: string
+  pending_collateral_commitment: string
+  active_collateral_commitment: string
+  principal_commitment: string
+  repayment_commitment: string
+  expiry_hash: string
+  repayment_asset_prefix_bit: number
+  repayment_asset_x: string
+}
+
 interface Fixture {
   program_id: string
   borrower_master_blinding_key: string
   lender_master_blinding_key: string
   creation_tx: string
-  arguments: {
-    borrower_nft_asset_id: string
-    lender_nft_asset_id: string
-    pending_collateral_commitment: string
-    active_collateral_commitment: string
-    principal_commitment: string
-    repayment_commitment: string
-    expiry_hash: string
-    repayment_asset_prefix_bit: number
-    repayment_asset_x: string
-  }
+  arguments: FixtureArguments
   principal_output_script_hash: string
   repayment_output_script_hash: string
   installment_output_script_hash: string
@@ -78,6 +83,28 @@ interface Fixture {
   witness_vectors: {
     full_repayment: WitnessVector & { debt_hash: string }
     liquidation: WitnessVector & { debt_hash: string; salt: string; expiry: number }
+  }
+  // The offer's loan on regtest, after its acceptance and one installment, which both parties
+  // open; for each loan output (the acceptance's, then the installment's), the debt hash its
+  // storage holds and its script, from the contract.
+  loan: {
+    acceptance_tx: string
+    installment_txs: string[]
+    installment_outpoint: string
+    installment_amount: number
+    remaining: number
+    loan_outpoint: string
+    debt_commitment: string
+    debt_hashes: string[]
+    loan_script_pubkeys: string[]
+  }
+  // A second offer, whose `A` has the other prefix bit.
+  other_offer: {
+    creation_tx: string
+    arguments: FixtureArguments
+    pending_offer_script_pubkey: string
+    active_offer_script_pubkey: string
+    lender_nft_script_pubkey: string
   }
 }
 
@@ -163,8 +190,7 @@ function equal(name: string, actual: string | number, expected: string | number)
   check(name, actual === expected, `got ${actual}, expected ${expected}`)
 }
 
-function expectedArguments(): PrivateOfferArguments {
-  const a = fixture.arguments
+function expectedArguments(a: FixtureArguments = fixture.arguments): PrivateOfferArguments {
   return {
     borrowerNftAssetId: a.borrower_nft_asset_id,
     lenderNftAssetId: a.lender_nft_asset_id,
@@ -354,6 +380,8 @@ async function main(): Promise<void> {
   )
 
   checkWitnessVectors(scripts, network)
+  checkLoanState(scripts, { lender, asLender }, { borrower, asBorrower })
+  checkOtherPrefixBit(sources, network, lender, borrower)
 
   checkLenderTerms()
   checkTermsConversion()
@@ -415,6 +443,172 @@ function checkWitnessVectors(scripts: PrivateOfferScripts, network: lwk.Network)
       throws(() => run(true)),
     )
   }
+}
+
+/** Whether `compute` throws the wasm's error string with `code`. */
+function throwsCode(code: string, compute: () => unknown): boolean {
+  try {
+    compute()
+    return false
+  } catch (error) {
+    return typeof error === 'string' && error.startsWith(`${code}:`)
+  }
+}
+
+/**
+ * The fixture's loan, read by each party from the acceptance and the installment: the same debt,
+ * storage and installment amount, which the contract gives, for both. The script the web computes
+ * at each debt hash (`activeOfferAt`) is the contract's and the chain's: the acceptance's output 0
+ * and the installment's output 1. The installment's output 2 is at the installment lock.
+ */
+function checkLoanState(
+  scripts: PrivateOfferScripts,
+  { lender, asLender }: { lender: wasm.LendingKey; asLender: wasm.OpenedOffer },
+  { borrower, asBorrower }: { borrower: wasm.LendingKey; asBorrower: wasm.OpenedOffer },
+): void {
+  const { loan } = fixture
+  const acceptance = lwk.Transaction.fromString(loan.acceptance_tx)
+  const installment = lwk.Transaction.fromString(loan.installment_txs[0])
+  const amount = BigInt(loan.installment_amount)
+  const read = (
+    who: string,
+    opened: wasm.OpenedOffer,
+    key: wasm.LendingKey,
+  ): [string, wasm.LoanState] => [
+    who,
+    opened.loanState(key, loan.acceptance_tx, loan.installment_txs),
+  ]
+  const states = [read('lender', asLender, lender), read('borrower', asBorrower, borrower)]
+  for (const [who, state] of states) {
+    const name = (what: string) => `loan state as ${who}: ${what}`
+    equal(name('installments'), state.installmentCount, 1)
+    equal(name('loan outpoint'), state.loanOutpoint, loan.loan_outpoint)
+    equal(name('debt commitment'), state.debtCommitment, loan.debt_commitment)
+    equal(name('debt hash'), state.debtHash, loan.debt_hashes[1])
+    for (const [j, debtHash] of loan.debt_hashes.entries()) {
+      equal(name(`debt hash of loan output ${j}`), state.debtHashAt(j), debtHash)
+    }
+    const first = state.installment(1)
+    equal(name('installment outpoint'), first.outpoint, loan.installment_outpoint)
+    check(name('installment amount'), first.amount === amount, `${first.amount}`)
+    check(name('paid'), state.paid === amount, `${state.paid}`)
+    check(name('remaining'), state.remaining === BigInt(loan.remaining), `${state.remaining}`)
+    check(
+      name('the installments count from 1'),
+      throwsCode('bad-input', () => state.installment(0)),
+    )
+  }
+  equal(
+    'loan state: the debt at acceptance is the repayment commitment',
+    loan.debt_hashes[0],
+    fixture.arguments.repayment_commitment,
+  )
+
+  // the scripts at each debt hash, from the state the lender read
+  const [, state] = states[0]
+  const loanOutputs = [acceptance.outputs[0], installment.outputs[1]]
+  for (const [j, expected] of loan.loan_script_pubkeys.entries()) {
+    const at = scripts.activeOfferAt(state.debtHashAt(j))
+    equal(`loan script at debt hash ${j} is the contract's`, hex(at), expected)
+    equal(`loan script at debt hash ${j} is on chain`, hex(loanOutputs[j].scriptPubkey()), expected)
+    equal(
+      `loan spend info at debt hash ${j}`,
+      hex(scripts.activeSpendInfoAt(state.debtHashAt(j)).scriptPubkey),
+      expected,
+    )
+  }
+  equal(
+    'the active offer is the loan at acceptance',
+    hex(scripts.activeOffer),
+    loan.loan_script_pubkeys[0],
+  )
+  check(
+    'loan script: a malformed debt hash is refused',
+    throws(() => scripts.activeOfferAt(state.debtHashAt(1).slice(2))),
+  )
+  equal(
+    'the installment is at the installment lock',
+    installment.outputs[2].scriptPubkey().jet_sha256_hex(),
+    scripts.installmentOutputScriptHash,
+  )
+
+  // each party's methods refuse the other party
+  const [, borrowerState] = states[1]
+  check(
+    'loan state: the lender plans no installment',
+    throwsCode('bad-input', () =>
+      state.planInstallment(1n, loan.loan_outpoint, '0014' + '00'.repeat(20)),
+    ),
+  )
+  check(
+    'loan state: the borrower sweeps nothing',
+    throwsCode('bad-input', () => borrowerState.sweep(undefined, [])),
+  )
+  check(
+    'loan state: another key than the party is refused',
+    throwsCode('bad-input', () =>
+      asBorrower.loanState(lender, loan.acceptance_tx, loan.installment_txs),
+    ),
+  )
+  check(
+    'loan state: an installment twice is not the loan',
+    throwsCode('loan-mismatch', () =>
+      asLender.loanState(lender, loan.acceptance_tx, [
+        ...loan.installment_txs,
+        ...loan.installment_txs,
+      ]),
+    ),
+  )
+}
+
+/**
+ * The second offer, whose `A` has the other prefix bit than the first's: both prefix bits occur,
+ * and the web's arguments and scripts of this offer are the contract's, so the web's conversion of
+ * the bit to a bool matches Rust's for 0 as for 1.
+ */
+function checkOtherPrefixBit(
+  sources: PrivateLendingSources,
+  network: lwk.Network,
+  lender: wasm.LendingKey,
+  borrower: wasm.LendingKey,
+): void {
+  const other = fixture.other_offer
+  const bits = [fixture.arguments, other.arguments].map(a => a.repayment_asset_prefix_bit)
+  check('both prefix bits of A occur', bits.includes(0) && bits.includes(1), `${bits}`)
+
+  const expected = expectedArguments(other.arguments)
+  for (const [who, opened] of [
+    ['lender', wasm.openCreationAsLender(lender, other.creation_tx)],
+    ['borrower', wasm.openCreationAsBorrower(borrower, other.creation_tx)],
+  ] as const) {
+    const got = toPrivateOfferArguments(opened.contractArguments())
+    check(
+      `other offer: contract arguments as ${who}`,
+      JSON.stringify(got) === JSON.stringify(expected),
+      `${JSON.stringify(got)} != ${JSON.stringify(expected)}`,
+    )
+  }
+  const scripts = privateOfferScripts(sources, expected, network)
+  const bit = expected.repaymentAssetPrefixBit
+  equal(
+    `other offer (A bit ${bit}): pending offer script`,
+    hex(scripts.pendingOffer),
+    other.pending_offer_script_pubkey,
+  )
+  equal(
+    `other offer (A bit ${bit}): active offer script`,
+    hex(scripts.activeOffer),
+    other.active_offer_script_pubkey,
+  )
+  equal(
+    `other offer (A bit ${bit}): lender NFT lock script`,
+    hex(scripts.lenderNftLock),
+    other.lender_nft_script_pubkey,
+  )
+  check(
+    `other offer (A bit ${bit}): creation tx addresses verify`,
+    verifyOfferAddresses(scripts, lwk.Transaction.fromString(other.creation_tx)),
+  )
 }
 
 /**

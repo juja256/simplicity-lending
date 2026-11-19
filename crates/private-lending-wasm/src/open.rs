@@ -2,7 +2,7 @@
 
 use elements::encode::deserialize;
 use elements::hex::ToHex;
-use elements::{Transaction, confidential};
+use elements::{OutPoint, Transaction, confidential};
 use private_lending_core::{
     CreationError, OfferPinned, OfferSecrets, OfferTerms, OpenedOffer as CoreOpenedOffer,
     PinnedOutput, PinnedRole as CorePinnedRole, expiry_hash, lift_lending_key,
@@ -34,11 +34,20 @@ impl From<PinnedRole> for CorePinnedRole {
     }
 }
 
-/// An offer opened from its creation transaction.
+/// The party of an offer: its borrower or its lender.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Party {
+    Borrower,
+    Lender,
+}
+
+/// An offer opened from its creation transaction by one of its parties, which it remembers: a
+/// loan's state reads the installments for that party.
 #[wasm_bindgen]
 pub struct OpenedOffer {
     offer: CoreOpenedOffer,
     first_input: String,
+    party: Party,
 }
 
 impl OpenedOffer {
@@ -46,16 +55,28 @@ impl OpenedOffer {
         &self.offer
     }
 
-    fn new(offer: CoreOpenedOffer, tx: &Transaction) -> Result<Self, String> {
+    /// The party that opened the offer.
+    pub(crate) fn party(&self) -> Party {
+        self.party
+    }
+
+    fn new(offer: CoreOpenedOffer, tx: &Transaction, party: Party) -> Result<Self, String> {
         let outpoint = tx
             .input
             .first()
             .ok_or_else(|| bad_input("the transaction has no inputs"))?
             .previous_output;
-        // not `OutPoint`'s `Display`, which prefixes "[elements]"
-        let first_input = format!("{}:{}", outpoint.txid, outpoint.vout);
-        Ok(Self { offer, first_input })
+        Ok(Self {
+            offer,
+            first_input: outpoint_string(&outpoint),
+            party,
+        })
     }
+}
+
+/// An outpoint as `"<txid>:<vout>"`, not `OutPoint`'s `Display`, which prefixes "[elements]".
+pub(crate) fn outpoint_string(outpoint: &OutPoint) -> String {
+    format!("{}:{}", outpoint.txid, outpoint.vout)
 }
 
 /// The lifted lending key, hex of the 33-byte compressed public key.
@@ -63,17 +84,18 @@ pub(crate) fn lifted(key: &elements::secp256k1_zkp::XOnlyPublicKey) -> String {
     encode_hex(&lift_lending_key(key).serialize())
 }
 
-fn parse_tx(hex: &str) -> Result<Transaction, String> {
+pub(crate) fn parse_tx(hex: &str) -> Result<Transaction, String> {
     deserialize(&decode_hex(hex)?).map_err(|e| bad_input(format!("not a transaction: {e}")))
 }
 
 fn open(
     creation_tx_hex: &str,
+    party: Party,
     open: impl FnOnce(&Transaction) -> Result<CoreOpenedOffer, CreationError>,
 ) -> Result<OpenedOffer, String> {
     let tx = parse_tx(creation_tx_hex)?;
     let offer = open(&tx).map_err(creation_error)?;
-    OpenedOffer::new(offer, &tx)
+    OpenedOffer::new(offer, &tx, party)
 }
 
 /// Opens the offer of a creation transaction as the lender it is addressed to.
@@ -82,7 +104,7 @@ pub fn open_creation_as_lender_hex(
     lender: &LendingKey,
     creation_tx_hex: &str,
 ) -> Result<OpenedOffer, String> {
-    open(creation_tx_hex, |tx| {
+    open(creation_tx_hex, Party::Lender, |tx| {
         open_creation_as_lender(lender.inner(), tx, crate::program_id())
     })
 }
@@ -93,7 +115,7 @@ pub fn open_creation_as_borrower_hex(
     borrower: &LendingKey,
     creation_tx_hex: &str,
 ) -> Result<OpenedOffer, String> {
-    open(creation_tx_hex, |tx| {
+    open(creation_tx_hex, Party::Borrower, |tx| {
         open_creation_as_borrower(borrower.inner(), tx, crate::program_id())
     })
 }
@@ -431,10 +453,12 @@ pub(crate) mod tests {
         );
         assert!(as_lender.repayment_amount() >= as_lender.principal_amount());
         // input 0 of the fixture's creation transaction, as "<txid>:<vout>"
+        let first = tx_of(&hex).input[0].previous_output;
         assert_eq!(
             as_lender.first_input(),
-            "1cd807dc4e8d3e6e854778fb34c99eb061ba4b99d22113e7a35fb8076651ab9f:0"
+            format!("{}:{}", first.txid, first.vout)
         );
+        assert!(!as_lender.first_input().starts_with('['));
     }
 
     #[test]

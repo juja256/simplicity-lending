@@ -15,7 +15,7 @@ import {
 import { buildAssetAuthArguments } from '@/simplicity/asset-auth/arguments'
 import { buildScriptAuthArguments } from '@/simplicity/script-auth/arguments'
 import { buildCovenantSpendInfo, UNSPENDABLE_TAPROOT_PUBKEY } from '@/simplicity/taproot'
-import { hexToBytes } from '@/utils/hex'
+import { hexToBytes, isHexStringOfByteLength } from '@/utils/hex'
 import { toBytes32, toUint64 } from '@/utils/uint'
 import type { ContractArguments } from '@/wasm/private-lending/private_lending_wasm'
 
@@ -47,6 +47,7 @@ export interface PrivateOfferArguments {
 
 export interface PrivateOfferScripts {
   pendingOffer: Script
+  /** The loan at acceptance, whose debt hash is the repayment commitment: `activeOfferAt` of it. */
   activeOffer: Script
   lenderNftLock: Script
   principalOutputScriptHash: string
@@ -54,6 +55,12 @@ export interface PrivateOfferScripts {
   installmentOutputScriptHash: string
   pendingSpendInfo: StateTaprootSpendInfo
   activeSpendInfo: StateTaprootSpendInfo
+  /**
+   * The loan whose storage holds the debt hash `debtHash` (32 bytes, hex), `h(A, D)`: after
+   * installments, `LoanState.debtHashAt(j)` of loan output `j`. Throws on a malformed hash.
+   */
+  activeOfferAt(debtHash: string): Script
+  activeSpendInfoAt(debtHash: string): StateTaprootSpendInfo
   program: SimplicityProgram
 }
 
@@ -98,18 +105,20 @@ function commitment(prefixBit: number, x: string): SimplicityTypedValue {
   ])
 }
 
+/** The program's storage: whether the offer is active, and the debt hash, `h(A, D)`. */
 function storageSpendInfo(
   program: SimplicityProgram,
   isActive: boolean,
-  repaymentCommitment: string,
+  debtHash: string,
 ): StateTaprootSpendInfo {
+  if (!isHexStringOfByteLength(debtHash, 32)) throw new Error('A debt hash is 32 bytes of hex')
   const isActiveSlot = new Uint8Array(32)
   isActiveSlot[31] = isActive ? 1 : 0
 
   return new StateTaprootBuilder()
     .addSimplicityLeaf(2, program.cmr)
     .addDataLeaf(2, isActiveSlot)
-    .addDataLeaf(1, hexToBytes(repaymentCommitment))
+    .addDataLeaf(1, hexToBytes(debtHash))
     .finalize(XOnlyPublicKey.fromString(UNSPENDABLE_TAPROOT_PUBKEY))
 }
 
@@ -177,8 +186,10 @@ export function privateOfferScripts(
       .addValue('INSTALLMENT_OUTPUT_SCRIPT_HASH', u256(installmentOutputScriptHash)),
   )
 
+  // Until the first installment, the debt is the pinned repayment.
   const pendingSpendInfo = storageSpendInfo(program, false, args.repaymentCommitment)
-  const activeSpendInfo = storageSpendInfo(program, true, args.repaymentCommitment)
+  const activeSpendInfoAt = (debtHash: string) => storageSpendInfo(program, true, debtHash)
+  const activeSpendInfo = activeSpendInfoAt(args.repaymentCommitment)
 
   const pendingOffer = pendingSpendInfo.scriptPubkey
   const lenderNftLock = lenderNftLockProgram(sources, pendingOffer)
@@ -194,6 +205,8 @@ export function privateOfferScripts(
     installmentOutputScriptHash,
     pendingSpendInfo,
     activeSpendInfo,
+    activeOfferAt: debtHash => activeSpendInfoAt(debtHash).scriptPubkey,
+    activeSpendInfoAt,
     program,
   }
 }

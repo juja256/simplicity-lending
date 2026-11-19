@@ -39,6 +39,8 @@ panic outside wasm, so native tests call the same functions.
   `rewind-failed`.
 - Addressed to this key but invalid (show as invalid): `terms-invalid`, `collateral-mismatch`,
   `invalid-terms`, `lender-nft-not-unique`, `nft-output-mismatch`.
+- A transaction given as a loan's acceptance, installment or close that is not the loan's:
+  `loan-mismatch`, naming the acceptance or the installment (from 1).
 - Bad caller input: `bad-input`.
 
 The borrower's pre-broadcast self-check of an offer it just built must treat every code as fatal.
@@ -109,6 +111,25 @@ Building and blinding:
   (`ecdhPubkey`), blinding key, blinder index and blind proofs. Absent fields are `null` (an input
   with no sequence is extracted with `0xffffffff`); amounts are decimal strings. `bad-input` for
   inputs whose required lock times conflict.
+
+Loans:
+
+- `OpenedOffer.loanState(key, acceptanceTxHex, installmentTxHexes)`: the `LoanState` after the
+  acceptance and the installments, read with the lending key of the party that opened the offer.
+  Each installment must spend the previous loan output at input 1, hold the collateral after it
+  at output 1 and pay `A` at output 2. The scripts are the caller's to check, against
+  `activeOfferAt(state.debtHashAt(j))` in `web/src/simplicity/private-lending/scripts.ts`.
+- `LoanState` getters: `installmentCount`, `loanOutpoint`, `debtCommitment`, `debtHash`, `paid`
+  (what opened for the party) and `remaining` (`undefined` unless every installment opened);
+  `debtHashAt(j)` (0 the acceptance's loan output), `installment(j)` (from 1),
+  `loanInputSecret(inputIndex)` and `collateral()`.
+- Borrower only, else `bad-input`: `planInstallment(amount, firstWalletInput,
+  nftReceiverScript)`, an `InstallmentPlan` (`debtWitness`, `successorDebtHash`, `installment`,
+  `installmentBlinding(i)`, `successorBlinding(i)`) for an amount above 0 and below the
+  remaining debt; `repaymentBlinding(i)` while an amount is owed; `zeroDebtKey()` once none is.
+- Lender only, else `bad-input`: `sweep(closeTxHex, unspent)`, the `Sweep` (`outpoints()`,
+  `amount`, `inputSecret(position, inputIndex)`) of the final claim after the full repayment or
+  the zero-debt close, or of a liquidation when `closeTxHex` is `undefined`.
 
 LWK helpers:
 
