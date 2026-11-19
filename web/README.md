@@ -178,14 +178,20 @@ With no stage named, every stage below but `short-proposal` runs in this order.
   borrower NFT, and the lender NFT to the lender.
 - `claim-principal`: the borrower claims the principal with its borrower NFT.
 - `repay-partial`: the borrower pays two installments, each a third of what the loan owes then
-  (records `repay-partial-1` and `repay-partial-2`). Each takes the loan's output from the local
-  testnet indexer (below), as the app does, and the stage checks it against the records. Before
-  saving an installment, both parties read the loan back with it from their seeds: the borrower
-  must rebuild what the loan owes, and the lender must open the installment's amount.
+  (records `repay-partial-1` and `repay-partial-2`), and between them the lender claims the first
+  (record `claim-installment-1`): the lender NFT comes back to a lender address, and the lender's
+  wallet receives the installment. Each takes the loan's output, and the claim the unspent
+  installments, from the local testnet indexer (below), as the app does, and the stage checks them
+  against the records. Before saving an installment, both parties read the loan back with it from
+  their seeds: the borrower must rebuild what the loan owes, and the lender must open the
+  installment's amount. The second installment is left unclaimed.
 - `repay`: the borrower repays the rest, `R` minus the installments, taking the loan's output from
   the indexer as `repay-partial` does. The borrower NFT is burned, the repayment, whose value
   commitment is the loan's debt, is locked to the lender NFT, and the collateral comes back.
-- `claim-repayment`: the lender claims the repayment, burning its lender NFT.
+- `claim-repayment`: the lender's final claim, which burns its lender NFT. It reads the loan the
+  repayment spent and the unspent installments from the indexer, and must sweep the unclaimed
+  second installment, then the repayment, with the combined opening. The lender's wallet must then
+  hold `R` from its two claims, which the stage prints one by one.
 - `cancel`: a new offer (record `cancel-create`), which the borrower cancels (record `cancel`).
   Both NFTs are burned and the collateral comes back to the borrower.
 - `liquidate`: a new offer that expires 3 blocks after the tip (`liquidate-create`), which the
@@ -233,7 +239,11 @@ it. `repay-partial-dry` builds the next installment of a third of what the loan 
 back as `repay-partial` does. They run
 only when named, and need the records the real transaction would spend: `cancel-dry` rebuilds the
 cancellation of the `cancel-create` offer, and `liquidate-dry` the liquidation of the
-`liquidate-accept` one, which below the expiry checks the refusal instead.
+`liquidate-accept` one, which below the expiry checks the refusal instead. Before that,
+`liquidate-dry` builds the `create` loan's liquidation after its installments, at its expiry,
+which the tip has not reached, so it needs the `create` and `accept` records too. Finalizing it
+runs the covenant with the debt hash the loan holds after the installments, and the installments
+no claim took are swept. It is never broadcast.
 
 `repay-hostile-dry` checks that a hostile indexer cannot lead the borrower to repay while the
 principal may be unclaimed, which would burn the only key to it. It reads the `create` offer's
@@ -247,10 +257,12 @@ Nothing is built, signed or broadcast.
 
 ### Local testnet indexer
 
-The `scan`, `directory`, `repay-partial`, `repay` and `repay-hostile-dry` stages, and the app on
-testnet (`VITE_API_URL` in `.env.liquidtestnet`, which the e2e script reads too), use a local
-indexer of Liquid testnet with its own database. A `scan` rerun needs a fresh database for the e2e state it reads, indexed from just below that state's
-first creation (`INDEXER__LAST_INDEXED_HEIGHT`, below); the commands use
+The `scan`, `directory`, `repay-partial`, `repay`, `claim-repayment` and `repay-hostile-dry`
+stages, the dry ones of `repay-partial`, `repay` and `claim-repayment`, and the app on testnet
+(`VITE_API_URL` in `.env.liquidtestnet`, which the e2e script reads too), use a local indexer of
+Liquid testnet with its own database. A `scan` rerun needs a fresh database for the e2e state it
+reads, indexed from just below that state's first creation (`INDEXER__LAST_INDEXED_HEIGHT`, below);
+the commands use
 `lending-indexer-testnet-v2p1` as the example name. Never point the indexer tests at that database,
 nor run them while this indexer uses Postgres. From `crates/indexer`, with Postgres on
 `localhost:5432`:
@@ -320,7 +332,7 @@ besides the collateral. From an empty state, the stages need:
 
 - the borrower: 136 000 tL-sats and 100 TEST units (the interest; the installments and the rest of
   the principal come from the claim);
-- the lender: 8 000 tL-sats and 2 000 TEST units.
+- the lender: 10 000 tL-sats and 2 000 TEST units.
 
 The cancellation returns the borrower's collateral, and the liquidation pays its collateral to the
 lender.
