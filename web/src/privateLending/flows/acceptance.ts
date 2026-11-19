@@ -304,7 +304,7 @@ export async function buildPrivateAcceptance(
         deps,
         signed,
         offer,
-        false,
+        offer.scripts.pendingSpendInfo,
         prevouts(),
         ACCEPTANCE_INPUT.offer,
         { branch: 'OfferAcceptance' },

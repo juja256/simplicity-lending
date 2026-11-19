@@ -245,7 +245,7 @@ export async function buildPrivateCancellation(
         deps,
         signed,
         offer,
-        false,
+        offer.scripts.pendingSpendInfo,
         prevouts(),
         CANCELLATION_INPUT.offer,
         { branch: 'OfferCancellation' },

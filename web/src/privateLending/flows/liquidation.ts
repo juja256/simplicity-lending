@@ -295,11 +295,11 @@ export async function buildPrivateLiquidation(
         deps,
         signed,
         offer,
-        true,
+        // the loan at acceptance, whose storage holds the starting debt, the pinned repayment:
+        // the liquidation of a loan with installments comes with its state
+        offer.scripts.activeSpendInfo,
         prevouts(),
         LIQUIDATION_INPUT.offer,
-        // the loan's storage still holds the starting debt, the pinned repayment: the flows of
-        // loans with installments come with their state
         {
           branch: 'Liquidation',
           debtHash: opened.contractArguments().repaymentCommitment,

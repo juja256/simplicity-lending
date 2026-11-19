@@ -1,11 +1,11 @@
 // Finalizing the Simplicity inputs of private offer transactions: the offer itself, the lender
-// NFT at its script_auth lock, and the asset_auth outputs (principal, repayment). Each wraps
-// LWK's `finalizeTransaction`, which runs the program on the transaction and fails if the
-// covenant does not hold. The control block is that of the program's leaf in its spend info.
+// NFT at its script_auth lock, and the asset_auth outputs (principal, repayment, installments).
+// Each wraps LWK's `finalizeTransaction`, which runs the program on the transaction and fails if
+// the covenant does not hold. The control block is that of the program's leaf in its spend info.
 //
 // `prevouts` are the outputs every input of `tx` spends, in input order. LWK consumes them: pass
 // a fresh array (fresh `TxOut` objects, e.g. from `tx.outputs`, which copies) to every call.
-import type { Script, SimplicityProgram, Transaction, TxOut } from 'lwk_wasm'
+import type { Script, SimplicityProgram, StateTaprootSpendInfo, Transaction, TxOut } from 'lwk_wasm'
 
 import { buildAssetAuthWitness } from '@/simplicity/asset-auth/witness'
 import {
@@ -26,17 +26,17 @@ import type { PrivateFlowDeps } from './deps'
 import { wasmStep } from './flows/shared'
 import type { VerifiedOffer } from './verify'
 
-/** The two asset_auth outputs of an offer. */
-export type PinnedAuthOutput = 'principal' | 'repayment'
+/** The asset_auth outputs of an offer. */
+export type PinnedAuthOutput = 'principal' | 'repayment' | 'installment'
 
 function sameScript(a: Script, b: Script): boolean {
   return a.toString() === b.toString()
 }
 
 /**
- * The asset_auth program of the offer's principal output (borrower NFT, no burn) or repayment
- * output (lender NFT, burned), and its script. The script is checked against the hash the offer's
- * contract pins, so a builder can never pay or spend another script.
+ * The asset_auth program of the offer's principal output (borrower NFT, no burn), repayment output
+ * (lender NFT, burned) or installments (lender NFT, no burn), and its script. The script is checked
+ * against the hash the offer's contract pins, so a builder can never pay or spend another script.
  */
 export function pinnedAuthCovenant(
   deps: PrivateFlowDeps,
@@ -44,15 +44,24 @@ export function pinnedAuthCovenant(
   output: PinnedAuthOutput,
 ): { program: SimplicityProgram; script: Script } {
   const args = toPrivateOfferArguments(offer.opened.contractArguments())
-  const program =
-    output === 'principal'
-      ? privateAssetAuthProgram(deps.sources, args.borrowerNftAssetId, false)
-      : privateAssetAuthProgram(deps.sources, args.lenderNftAssetId, true)
+  const [program, pinnedHash] = {
+    principal: () =>
+      [
+        privateAssetAuthProgram(deps.sources, args.borrowerNftAssetId, false),
+        offer.scripts.principalOutputScriptHash,
+      ] as const,
+    repayment: () =>
+      [
+        privateAssetAuthProgram(deps.sources, args.lenderNftAssetId, true),
+        offer.scripts.repaymentOutputScriptHash,
+      ] as const,
+    installment: () =>
+      [
+        privateAssetAuthProgram(deps.sources, args.lenderNftAssetId, false),
+        offer.scripts.installmentOutputScriptHash,
+      ] as const,
+  }[output]()
   const script = buildCovenantSpendInfo(program).scriptPubkey
-  const pinnedHash =
-    output === 'principal'
-      ? offer.scripts.principalOutputScriptHash
-      : offer.scripts.repaymentOutputScriptHash
   if (script.jet_sha256_hex() !== pinnedHash) {
     throw new Error(`The ${output} asset_auth script is not the one the offer's contract pins`)
   }
@@ -60,24 +69,30 @@ export function pinnedAuthCovenant(
 }
 
 /**
- * Finalizes the offer's input `inputIndex` with `witness`: the pending offer (acceptance,
- * cancellation) or the active one (repayment, liquidation), as `active` says.
+ * Finalizes the offer's input `inputIndex` with `witness`. `spendInfo` is that of the output the
+ * input spends: the pending offer (`pendingSpendInfo`, acceptance and cancellation) or the loan
+ * output at its debt hash (`activeSpendInfoAt(debtHash)`, the installment, the full repayment, the
+ * zero-debt close and the liquidation). It must give the script of the input's prevout.
  */
 export function finalizePrivateOfferInput(
   deps: PrivateFlowDeps,
   tx: Transaction,
   offer: VerifiedOffer,
-  active: boolean,
+  spendInfo: StateTaprootSpendInfo,
   prevouts: TxOut[],
   inputIndex: number,
   witness: PrivateLendingWitness,
 ): Transaction {
   const { branch } = witness
-  if (PRIVATE_LENDING_BRANCH_SPENDS_ACTIVE[branch] !== active) {
-    throw new Error(`${branch} spends the ${active ? 'pending' : 'active'} offer`)
+  const spendsPending = sameScript(spendInfo.scriptPubkey, offer.scripts.pendingOffer)
+  if (PRIVATE_LENDING_BRANCH_SPENDS_ACTIVE[branch] === spendsPending) {
+    throw new Error(`${branch} spends the ${spendsPending ? 'active' : 'pending'} offer`)
+  }
+  const prevout = prevouts[inputIndex]
+  if (prevout === undefined || !sameScript(prevout.scriptPubkey(), spendInfo.scriptPubkey)) {
+    throw new Error(`The offer input ${inputIndex} is not locked to the script of its spend info`)
   }
   const { program } = offer.scripts
-  const spendInfo = active ? offer.scripts.activeSpendInfo : offer.scripts.pendingSpendInfo
   return wasmStep(`Finalizing the offer input ${inputIndex} (${branch})`, () =>
     program.finalizeTransaction(
       tx,
@@ -122,8 +137,8 @@ export function finalizeScriptAuthInput(
 }
 
 /**
- * Finalizes the offer's principal or repayment output, spent at `inputIndex` with its NFT at
- * input `nft.inputIndex` going to output `nft.outputIndex` (burned there for the repayment).
+ * Finalizes the offer's principal, repayment or installment output, spent at `inputIndex` with its
+ * NFT at input `nft.inputIndex` going to output `nft.outputIndex` (burned there for the repayment).
  */
 export function finalizeAssetAuthInput(
   deps: PrivateFlowDeps,

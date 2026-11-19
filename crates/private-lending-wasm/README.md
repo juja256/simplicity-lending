@@ -125,8 +125,8 @@ Loans:
   `loanInputSecret(inputIndex)` and `collateral()`.
 - Borrower only, else `bad-input`: `planInstallment(amount, firstWalletInput,
   nftReceiverScript)`, an `InstallmentPlan` (`debtWitness`, `successorDebtHash`, `installment`,
-  `installmentBlinding(i)`, `successorBlinding(i)`) for an amount above 0 and below the
-  remaining debt; `repaymentBlinding(i)` while an amount is owed; `zeroDebtKey()` once none is.
+  `successor`, `installmentBlinding(i)`, `successorBlinding(i)`) for an amount above 0 and below
+  the remaining debt; `repaymentBlinding(i)` while an amount is owed; `zeroDebtKey()` once none is.
 - Lender only, else `bad-input`: `sweep(closeTxHex, unspent)`, the `Sweep` (`outpoints()`,
   `amount`, `inputSecret(position, inputIndex)`) of the final claim after the full repayment or
   the zero-debt close, or of a liquidation when `closeTxHex` is `undefined`.
