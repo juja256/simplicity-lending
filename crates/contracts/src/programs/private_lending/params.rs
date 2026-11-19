@@ -5,13 +5,14 @@ use crate::{
     artifacts::private_lending::derived_private_lending::PrivateLendingArguments,
     programs::{
         asset_auth::{AssetAuth, AssetAuthParameters},
+        private_lending::witness::commitment_witness,
         program::SimplexProgram,
     },
 };
 
 /// The parameters of a private offer: its NFTs, its expiration and the pinned outputs that carry
-/// its terms. The program sees only the commitments of the pinned outputs, and the expiration only
-/// as its salted hash.
+/// its terms. The program sees only the commitments of the pinned outputs, the repayment's asset
+/// commitment `A`, under which every installment pays, and the expiration only as its salted hash.
 ///
 /// Build them with [`PrivateLendingParameters::from_terms`], so the NFTs and the expiration are
 /// those of the signed terms and the salt is the offer's.
@@ -68,6 +69,17 @@ impl PrivateLendingParameters {
         })
     }
 
+    /// An installment, unlocked by the lender NFT (kept), so that the lender can claim each
+    /// installment and keep the NFT for the next.
+    pub fn get_installment_output_asset_auth(&self) -> AssetAuth {
+        AssetAuth::new(AssetAuthParameters {
+            asset_id: self.lender_nft_asset_id,
+            asset_amount: 1,
+            with_asset_burn: false,
+            network: self.network,
+        })
+    }
+
     pub fn build_arguments(&self) -> PrivateLendingArguments {
         PrivateLendingArguments {
             borrower_nft_asset_id: self.borrower_nft_asset_id.into_inner().0,
@@ -77,8 +89,12 @@ impl PrivateLendingParameters {
             principal_commitment: self.pinned.principal.commitment_hash(),
             repayment_commitment: self.pinned.repayment.commitment_hash(),
             expiry_hash: expiry_hash(&self.expiry_salt, self.loan_expiration_time),
+            repayment_asset: commitment_witness(&self.pinned.repayment.asset_commitment()),
             principal_output_script_hash: self.get_principal_output_asset_auth().get_script_hash(),
             repayment_output_script_hash: self.get_repayment_output_asset_auth().get_script_hash(),
+            installment_output_script_hash: self
+                .get_installment_output_asset_auth()
+                .get_script_hash(),
         }
     }
 }

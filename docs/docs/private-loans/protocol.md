@@ -7,8 +7,9 @@ description: Private lending state transitions, local verification, role-token a
 
 Private lending uses `crates/contracts/simf/private_lending.simf`, with the helper programs
 [asset auth](../contracts/asset-auth.md) and [script auth](../contracts/script-auth.md). The
-current version supports full repayment only and charges no protocol fee. The UI uses the
-network's configured collateral/principal asset pair and displays explicit principal and
+contract takes installments of any amount, the full repayment of what is left, and a close for a
+loan that owes nothing; it charges no protocol fee. The app repays loans in full only. The UI uses
+the network's configured collateral/principal asset pair and displays explicit principal and
 repayment amounts.
 
 For the browser workflow, see the [user guide](./guide.md).
@@ -24,7 +25,8 @@ public candidates and transaction data, rather than plaintext loan terms.
 | Collateral, principal, repayment assets and amounts | Confidential on-chain; available to parties with the required offer-opening secrets. |
 | Creation transaction and private-offer marker | Publicly observable. |
 | State transitions, spends, and role-token movements | Publicly observable. |
-| Expiry height | Revealed with the program at its first spend. |
+| Expiry height | Hidden until a liquidation: the contract holds only its salted hash, and the liquidation reveals the height in its witness and lock time. |
+| Installment amounts and the debt left | Confidential on-chain; the borrower and the lender open them. Each installment is a public transaction of the loan. |
 | Directory lending key and display name | Public when registered. |
 | Directory terms (minimum APR, maximum principal per collateral unit, term and principal ranges) and their publication time | Public when published. |
 
@@ -46,9 +48,12 @@ tokens authorize later spends through the associated contracts.
 | Pending → active | Acceptance supplies the pinned principal to a borrower-token-controlled output, preserves the pinned collateral, and releases the lender token. |
 | Pending → cancelled | Cancellation burns both tokens and releases collateral. It conflicts with acceptance. |
 | Claim principal | AssetAuth releases principal using the borrower token, which is returned for later repayment. The loan remains active, or remains liquidated if liquidation already occurred. |
-| Active → repaid | Full repayment pays the pinned repayment output, burns the borrower token, and releases collateral. |
+| Active → active | An installment pays part of the debt to an output that the lender token unlocks without burning it. The loan moves to an output whose storage holds the debt left, with the collateral re-blinded. The borrower token stays with the borrower, and no collateral is released. |
+| Active → repaid | Full repayment pays an output equal to the debt left, burns the borrower token, and releases collateral. The installments and the full repayment add up to the repayment of the terms. |
+| Active → closed | A loan that owes nothing, after an installment of the exact amount left under another blinder, closes by burning the borrower token and revealing the debt's blinder in an `OP_RETURN`. It releases collateral. |
+| Claim installment | The lender claims an installment through AssetAuth with its token, which returns to it. |
 | Repaid → claimed | The lender claims the repayment through AssetAuth and burns its token. “Claimed” is derived by the UI from spent repayment outputs. |
-| Active → liquidated | After the lock-height condition, liquidation burns the lender token and releases collateral. It does not consume a separate unclaimed principal output. |
+| Active → liquidated | After the lock-height condition, liquidation burns the lender token and releases collateral. It reads neither the debt nor the collateral, so no installment can block it, and installments paid before it are not refunded. It does not consume a separate unclaimed principal output. |
 
 The tokens are bearer rights, not decorative collectibles. Transferring or losing one can change
 who can exercise a loan's rights. The current app assumes its prescribed token locations and does

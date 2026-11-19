@@ -1,6 +1,6 @@
 use super::setup::{
     accept_private_offer, assert_confidential, claim_asset_auth_output, default_offer_parameters,
-    find_pinned_utxo, setup_pending_private_offer, unblind_with,
+    find_pinned_utxo, setup_pending_private_offer, simplicity_spend, unblind_with,
 };
 
 #[simplex::test]
@@ -17,6 +17,7 @@ fn private_offer_acceptance_pins_collateral_and_principal(
     assert_confidential(&setup.creation_tx, &pending_offer_utxo);
 
     let acceptance_tx = accept_private_offer(&context, &mut setup, &lender)?;
+    simplicity_spend("OfferAcceptance", &acceptance_tx, 0)?;
 
     let active_offer_utxo = find_pinned_utxo(&acceptance_tx, &pinned.active_collateral);
     let principal_utxo = find_pinned_utxo(&acceptance_tx, &pinned.principal);

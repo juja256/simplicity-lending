@@ -9,20 +9,32 @@
  * output the covenant pins and the lender can check the terms before funding. Each pinned output's
  * range proof is also rewindable with its recipient's blinding key.
  *
- * Pinning compares the consensus encoding of the commitments byte for byte, so it needs no
- * decoding, and the negated commitment (another prefix byte) does not pass.
+ * The storage has the two slots of lending.simf: whether the offer is active, and the debt. The
+ * debt is a curve point D = d·A + r·G, with A the asset commitment of the pinned repayment, d the
+ * amount still owed and r its blinder, and the slot holds h(A, D), the SHA-256 of the consensus
+ * encodings of A and D. It is REPAYMENT_COMMITMENT from creation until the first installment.
  *
  * Differences from lending.simf:
  * - Terms are pinned commitments, not explicit assets, amounts and an interest rate.
  * - No protocol fee. The interest is folded into the repayment commitment; the lender checks its
  *   opening once, off chain, before accepting the offer.
- * - Full repayment only: partial repayments of a free amount would release collateral in
- *   proportion to a hidden amount, which needs a zero-knowledge proof. The witness keeps the
- *   shape of lending.simf, with the partial repayment branch reserved: it always fails. There is
- *   no vault: the repayment goes to an asset_auth output of the lender NFT.
- * - The storage has the two slots of lending.simf, the offer's status and its outstanding debt,
- *   here the debt's commitment hash. As there is no partial repayment, the debt is
- *   REPAYMENT_COMMITMENT from creation until the full repayment.
+ * - An installment pays any amount, hidden in a value commitment V under A, and releases no
+ *   collateral: the program computes the debt left, D' = D − V, and moves the loan to the storage
+ *   of h(A, D'). The full repayment pays an output equal to the debt, so the installments and the
+ *   full repayment add up to the repayment of the terms. A debt of no amount, which no output can
+ *   carry, closes by revealing its blinder k, with k·G = ±D. There is no vault: the repayment and
+ *   the installments go to asset_auth outputs of the lender NFT.
+ * - Each installment re-blinds the collateral by a public step: its asset commitment moves by G
+ *   and its value commitment stays, which proves the same asset and amount without opening it.
+ *   An unchanged asset commitment would need a surjection proof with a zero blinding difference.
+ * - The expiry is not in the program: it holds EXPIRY_HASH, the SHA-256 of a salt and the expiry,
+ *   and the liquidation's witness reveals both.
+ *
+ * Pinning compares the consensus encoding of the commitments byte for byte, so it needs no
+ * decoding, and the negated commitment (another prefix byte) does not pass. The installment does
+ * decode points. Elements sets a commitment's prefix bit exactly when y is not a square, while
+ * jet::decompress reads that bit as the parity of y, so the program converts by testing whether
+ * y is a square.
  */
 
 // Helper getters
@@ -47,6 +59,19 @@ fn get_explicit_asset_and_amount(index: u32, is_input_index: bool) -> (u256, u64
     (asset_bits, amount)
 }
 
+// The asset and value commitments of a confidential input or output, each in Elements' encoding:
+// the low bit of the prefix, and x
+fn get_confidential_asset_and_amount(index: u32, is_input_index: bool) -> ((u1, u256), (u1, u256)) {
+    let pair: (Asset1, Amount1) = match is_input_index {
+        true => unwrap(jet::input_amount(index)),
+        false => unwrap(jet::output_amount(index)),
+    };
+    let (asset, amount): (Asset1, Amount1) = pair;
+    let asset_commitment: (u1, u256) = unwrap_left::<u256>(asset);
+    let value_commitment: (u1, u256) = unwrap_left::<u64>(amount);
+    (asset_commitment, value_commitment)
+}
+
 // SHA-256 of the consensus encoding of the asset and the amount (explicit or confidential)
 fn get_asset_and_amount_hash(index: u32, is_input_index: bool) -> u256 {
     let pair: (Asset1, Amount1) = match is_input_index {
@@ -54,6 +79,32 @@ fn get_asset_and_amount_hash(index: u32, is_input_index: bool) -> u256 {
         false => unwrap(jet::output_amount(index)),
     };
     let (asset, amount): (Asset1, Amount1) = pair;
+
+    let hash_ctx1: Ctx8 = jet::sha_256_ctx_8_init();
+    let hash_ctx2: Ctx8 = jet::asset_amount_hash(hash_ctx1, asset, amount);
+
+    jet::sha_256_ctx_8_finalize(hash_ctx2)
+}
+
+// A commitment in Elements' encoding, the low bit of its prefix and x, from the form the witness
+// and the parameters carry it in: whether that bit is set, and x. (Simplex cannot pass a u1 of 0
+// from Rust, so they carry a bool, the same one bit.)
+fn get_commitment(prefix_bit_and_x: (bool, u256)) -> (u1, u256) {
+    let (prefix_bit, x): (bool, u256) = prefix_bit_and_x;
+
+    (<bool>::into(prefix_bit), x)
+}
+
+// A, the asset commitment of the pinned repayment, which every installment and repayment carries
+fn get_repayment_asset() -> (u1, u256) {
+    get_commitment(param::REPAYMENT_ASSET)
+}
+
+// h(A, D): SHA-256 of the consensus encodings of the repayment asset A and the debt D, the hash a
+// repayment output that carries D has
+fn get_debt_hash(debt: (u1, u256)) -> u256 {
+    let asset: Asset1 = Left(get_repayment_asset());
+    let amount: Amount1 = Left(debt);
 
     let hash_ctx1: Ctx8 = jet::sha_256_ctx_8_init();
     let hash_ctx2: Ctx8 = jet::asset_amount_hash(hash_ctx1, asset, amount);
@@ -86,6 +137,15 @@ fn check_commitments_eq(commitment_hash_1: u256, commitment_hash_2: u256) {
     assert!(jet::eq_256(commitment_hash_1, commitment_hash_2));
 }
 
+// Byte for byte: the same prefix and the same x
+fn check_commitment_encodings_eq(commitment_1: (u1, u256), commitment_2: (u1, u256)) {
+    let (prefix_bit_1, x_1): (u1, u256) = commitment_1;
+    let (prefix_bit_2, x_2): (u1, u256) = commitment_2;
+
+    assert!(jet::eq_1(prefix_bit_1, prefix_bit_2));
+    assert!(jet::eq_256(x_1, x_2));
+}
+
 fn check_flags_eq(flag_1: bool, flag_2: bool) {
     assert!(jet::eq_1(<bool>::into(flag_1), <bool>::into(flag_2)));
 }
@@ -98,6 +158,67 @@ fn safe_add_32(first: u32, second: u32) -> u32 {
     check_flags_eq(carry, false);
 
     result
+}
+
+// Elliptic curve helpers
+
+// The generator G of secp256k1
+fn get_generator() -> Ge {
+    (
+        0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,
+        0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8
+    )
+}
+
+// Whether `y` is a square modulo the field's prime
+fn is_square(y: Fe) -> bool {
+    match jet::fe_square_root(y) {
+        Some(root: Fe) => true,
+        None => false,
+    }
+}
+
+// The curve point of a commitment in Elements' encoding. The prefix bit is set exactly when y is
+// not a square, and jet::decompress reads it as the parity of y, so this decompresses the point
+// with even y and negates it when the square-ness of its y disagrees with the bit: exactly one of
+// y and −y is a square, as the field's prime is 3 modulo 4. Fails if x is not on the curve.
+fn get_commitment_point(commitment: (u1, u256)) -> Ge {
+    let (prefix_bit, x): (u1, u256) = commitment;
+    let even_point: Ge = unwrap(jet::decompress((0, x)));
+    let (even_x, even_y): (Fe, Fe) = even_point;
+
+    // a square y has the bit 0: a bit equal to the square-ness of y is the other point's
+    match jet::eq_1(<bool>::into(is_square(even_y)), prefix_bit) {
+        true => jet::ge_negate(even_point),
+        false => even_point,
+    }
+}
+
+// The commitment in Elements' encoding of a curve point: the bit is set exactly when y is not a
+// square
+fn get_point_commitment(point: Ge) -> (u1, u256) {
+    let (x, y): (Fe, Fe) = point;
+
+    (jet::complement_1(<bool>::into(is_square(y))), x)
+}
+
+// The debt an installment leaves, D − V, as an affine point. Fails at the point at infinity, which
+// no commitment encodes: the installment would pay the debt itself, which the full repayment pays.
+fn get_debt_left(debt: (u1, u256), installment_value: (u1, u256)) -> Ge {
+    let debt_point: Gej = (get_commitment_point(debt), 1);
+    let installment_point: Ge = get_commitment_point(installment_value);
+    let debt_left: Gej = jet::gej_ge_add(debt_point, jet::ge_negate(installment_point));
+
+    check_flags_eq(jet::gej_is_infinity(debt_left), false);
+
+    unwrap(jet::gej_normalize(debt_left))
+}
+
+// The point plus G, as an affine point
+fn get_point_plus_generator(point: Ge) -> Ge {
+    let point: Gej = (point, 1);
+
+    unwrap(jet::gej_normalize(jet::gej_ge_add(point, get_generator())))
 }
 
 // Ensure functions
@@ -205,27 +326,91 @@ fn get_script_hash_for_storage(is_active: bool, debt: u256) -> u256 {
     jet::sha_256_ctx_8_finalize(hash_ctx3)
 }
 
-// Full repayment flow
+// The flows of the borrower NFT's holder: the installment, the full repayment and the zero-debt
+// close. Each spends the borrower NFT at input 0 and the loan at input 1.
 
-fn get_full_repayment_offer_input_index(start_input_index: u32) -> u32 {
+fn get_repayment_offer_input_index(start_input_index: u32) -> u32 {
     safe_add_32(start_input_index, 1)
 }
 
-fn get_full_repayment_lender_output_index(start_output_index: u32) -> u32 {
+fn get_repayment_lender_output_index(start_output_index: u32) -> u32 {
     safe_add_32(start_output_index, 1)
 }
 
-fn full_repay_offer() {
+// Installment flow
+
+fn get_installment_successor_output_index(start_output_index: u32) -> u32 {
+    safe_add_32(start_output_index, 1)
+}
+
+fn get_installment_output_index(start_output_index: u32) -> u32 {
+    safe_add_32(start_output_index, 2)
+}
+
+// The witness's debt is the loan's debt in Elements' encoding: the storage authenticates it.
+fn pay_installment(debt: (u1, u256)) {
     let (borrower_nft_input_index, borrower_nft_output_index): (u32, u32) = (0, 0);
-    let offer_input_index: u32 = get_full_repayment_offer_input_index(borrower_nft_input_index);
+    let offer_input_index: u32 = get_repayment_offer_input_index(borrower_nft_input_index);
+    let successor_output_index: u32 = get_installment_successor_output_index(borrower_nft_output_index);
+    let installment_output_index: u32 = get_installment_output_index(borrower_nft_output_index);
 
     assert!(jet::eq_32(jet::current_index(), offer_input_index));
 
     ensure_input_script_hash(
         offer_input_index,
-        get_script_hash_for_storage(true, param::REPAYMENT_COMMITMENT)
+        get_script_hash_for_storage(true, get_debt_hash(debt))
     );
-    ensure_input_commitment(offer_input_index, param::ACTIVE_COLLATERAL_COMMITMENT);
+
+    ensure_io_asset_and_amount_eq(
+        borrower_nft_input_index,
+        borrower_nft_output_index,
+        param::BORROWER_NFT_ASSET_ID,
+        1
+    );
+
+    // The installment V, to the lender NFT's lock, under the repayment asset
+    ensure_output_script_hash(installment_output_index, param::INSTALLMENT_OUTPUT_SCRIPT_HASH);
+    let (
+        installment_asset,
+        installment_value
+    ): ((u1, u256), (u1, u256)) = get_confidential_asset_and_amount(installment_output_index, false);
+    check_commitment_encodings_eq(installment_asset, get_repayment_asset());
+
+    let debt_left: Ge = get_debt_left(debt, installment_value);
+
+    ensure_output_script_hash(
+        successor_output_index,
+        get_script_hash_for_storage(true, get_debt_hash(get_point_commitment(debt_left)))
+    );
+
+    // The successor carries the collateral: its asset commitment is the loan's plus G and its value
+    // commitment the loan's, so the asset and the amount are the loan's.
+    let (
+        collateral_asset,
+        collateral_value
+    ): ((u1, u256), (u1, u256)) = get_confidential_asset_and_amount(offer_input_index, true);
+    let (
+        successor_asset,
+        successor_value
+    ): ((u1, u256), (u1, u256)) = get_confidential_asset_and_amount(successor_output_index, false);
+    check_commitment_encodings_eq(
+        successor_asset,
+        get_point_commitment(get_point_plus_generator(get_commitment_point(collateral_asset)))
+    );
+    check_commitment_encodings_eq(successor_value, collateral_value);
+}
+
+// Full repayment flow
+
+// The witness's debt hash is the loan's: the storage authenticates it. The repayment carries the
+// debt itself, so it pays what the installments left.
+fn full_repay_offer(debt_hash: u256) {
+    let (borrower_nft_input_index, borrower_nft_output_index): (u32, u32) = (0, 0);
+    let offer_input_index: u32 = get_repayment_offer_input_index(borrower_nft_input_index);
+
+    assert!(jet::eq_32(jet::current_index(), offer_input_index));
+
+    ensure_input_script_hash(offer_input_index, get_script_hash_for_storage(true, debt_hash));
 
     ensure_input_asset_and_amount_burn(
         borrower_nft_input_index,
@@ -235,10 +420,56 @@ fn full_repay_offer() {
     );
 
     ensure_pinned_output(
-        get_full_repayment_lender_output_index(borrower_nft_output_index),
-        param::REPAYMENT_COMMITMENT,
+        get_repayment_lender_output_index(borrower_nft_output_index),
+        debt_hash,
         param::REPAYMENT_OUTPUT_SCRIPT_HASH
     );
+}
+
+// Zero-debt close flow
+
+// SHA-256 of the script of an OP_RETURN with one 32-byte push of the key
+fn get_key_reveal_script_hash(key: u256) -> u256 {
+    let hash_ctx1: Ctx8 = jet::sha_256_ctx_8_init();
+    let hash_ctx2: Ctx8 = jet::sha_256_ctx_8_add_2(hash_ctx1, 0x6a20); // OP_RETURN, push 32 bytes
+    let hash_ctx3: Ctx8 = jet::sha_256_ctx_8_add_32(hash_ctx2, key);
+
+    jet::sha_256_ctx_8_finalize(hash_ctx3)
+}
+
+// The witness's debt is the loan's debt in Elements' encoding, and the key its blinder k or −k.
+// A key with k·G = ±D exists only when no amount is owed: otherwise it would give the discrete
+// logarithm of A to base G. Output 1 reveals the key, from which the lender can sweep the
+// installments. Simplicity reads an OP_RETURN's data only as hashes, so the key comes from the
+// witness and output 1's script must be its OP_RETURN.
+fn close_zero_debt(debt: (u1, u256), key: u256) {
+    let (borrower_nft_input_index, borrower_nft_output_index): (u32, u32) = (0, 0);
+    let offer_input_index: u32 = get_repayment_offer_input_index(borrower_nft_input_index);
+    let key_output_index: u32 = get_repayment_lender_output_index(borrower_nft_output_index);
+
+    assert!(jet::eq_32(jet::current_index(), offer_input_index));
+
+    ensure_input_script_hash(
+        offer_input_index,
+        get_script_hash_for_storage(true, get_debt_hash(debt))
+    );
+
+    ensure_input_asset_and_amount_burn(
+        borrower_nft_input_index,
+        borrower_nft_output_index,
+        param::BORROWER_NFT_ASSET_ID,
+        1
+    );
+
+    // The key is a nonzero scalar below the group's order, not reduced modulo it: k + n would
+    // pass as k, and the lender could not use it.
+    ensure_output_script_hash(key_output_index, get_key_reveal_script_hash(key));
+    assert!(jet::eq_256(jet::scalar_normalize(key), key));
+    check_flags_eq(jet::eq_256(key, 0), false);
+
+    // k·G has the x-coordinate of D, which Elements' encoding carries as it is
+    let (debt_prefix_bit, debt_x): (u1, u256) = debt;
+    assert!(jet::gej_x_equiv(debt_x, jet::generate(key)));
 }
 
 // Liquidation flow
@@ -257,8 +488,10 @@ fn get_expiry_hash(salt: u256, expiry: u32) -> u256 {
 }
 
 // The program carries only the expiry's salted hash: a spend through another branch reveals a CMR
-// that commits to EXPIRY_HASH, from which nobody without the salt can find the expiry.
-fn liquidate_offer(salt: u256, expiry: u32) {
+// that commits to EXPIRY_HASH, from which nobody without the salt can find the expiry. The
+// witness's debt hash shows only that the loan is active: the liquidation reads neither the debt
+// nor the collateral, which the installments move.
+fn liquidate_offer(debt_hash: u256, salt: u256, expiry: u32) {
     let (lending_input_index, lending_output_index): (u32, u32) = (jet::current_index(), 0);
     let (
         lender_nft_input_index,
@@ -267,15 +500,10 @@ fn liquidate_offer(salt: u256, expiry: u32) {
 
     assert!(jet::eq_32(lending_input_index, 0));
 
-    ensure_input_script_hash(
-        lending_input_index,
-        get_script_hash_for_storage(true, param::REPAYMENT_COMMITMENT)
-    );
+    ensure_input_script_hash(lending_input_index, get_script_hash_for_storage(true, debt_hash));
 
     assert!(jet::eq_256(get_expiry_hash(salt, expiry), param::EXPIRY_HASH));
     jet::check_lock_height(expiry);
-
-    ensure_input_commitment(lending_input_index, param::ACTIVE_COLLATERAL_COMMITMENT);
 
     ensure_input_asset_and_amount_burn(lender_nft_input_index, lender_nft_output_index, param::LENDER_NFT_ASSET_ID, 1);
 }
@@ -361,6 +589,13 @@ fn cancel_offer() {
     );
 }
 
+// The witness path. A debt is a value commitment in Elements' encoding, whether the low bit of its
+// prefix is set and x; a debt hash is h(A, D).
+// - Left(Left(())): acceptance; Left(Right(())): cancellation.
+// - Right(Left(Left(debt))): an installment.
+// - Right(Left(Right(Left(debt_hash)))): the full repayment.
+// - Right(Left(Right(Right((debt, key))))): the zero-debt close.
+// - Right(Right((debt_hash, salt, expiry))): the liquidation.
 fn main() {
     match witness::PATH {
         Left(pending_offer_params: Either<(), ()>) => {
@@ -373,23 +608,31 @@ fn main() {
                 },
             }
         },
-        Right(active_offer_params: Either<Either<(), ()>, (u256, u32)>) => {
+        Right(active_offer_params: Either<Either<(bool, u256), Either<u256, ((bool, u256), u256)>>, (u256, u256, u32)>) => {
             match active_offer_params {
-                Left(repayment_params: Either<(), ()>) => {
+                Left(repayment_params: Either<(bool, u256), Either<u256, ((bool, u256), u256)>>) => {
                     match repayment_params {
-                        Left(partial_repayment_params: ()) => {
-                            // Reserved for partial repayment, which a later contract version adds
-                            panic!();
+                        Left(installment_debt: (bool, u256)) => {
+                            pay_installment(get_commitment(installment_debt));
                         },
-                        Right(full_repayment_params: ()) => {
-                            full_repay_offer();
+                        Right(closing_params: Either<u256, ((bool, u256), u256)>) => {
+                            match closing_params {
+                                Left(debt_hash: u256) => {
+                                    full_repay_offer(debt_hash);
+                                },
+                                Right(zero_debt_params: ((bool, u256), u256)) => {
+                                    let (debt, key): ((bool, u256), u256) = zero_debt_params;
+
+                                    close_zero_debt(get_commitment(debt), key);
+                                },
+                            }
                         },
                     }
                 },
-                Right(liquidation_params: (u256, u32)) => {
-                    let (salt, expiry): (u256, u32) = liquidation_params;
+                Right(liquidation_params: (u256, u256, u32)) => {
+                    let (debt_hash, salt, expiry): (u256, u256, u32) = liquidation_params;
 
-                    liquidate_offer(salt, expiry);
+                    liquidate_offer(debt_hash, salt, expiry);
                 }
             }
         },

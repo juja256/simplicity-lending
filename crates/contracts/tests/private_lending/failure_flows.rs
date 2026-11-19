@@ -1,6 +1,5 @@
 use simplex::signer::Signer;
-use simplex::simplicityhl::elements::{Script, Transaction};
-use simplex::transaction::{PartialInput, PartialOutput, RequiredSignature};
+use simplex::transaction::PartialOutput;
 
 use lending_contracts::programs::private_lending::{
     PrivateLendingOffer, PrivateLendingWitnessBranch,
@@ -10,11 +9,12 @@ use lending_contracts::programs::script_auth::{ScriptAuth, ScriptAuthWitnessPara
 use lending_contracts::utils::confidential::{
     ConfidentialTransaction, PinnedOutput, PinnedOutputExt,
 };
+use private_lending_core::DebtOpening;
 
 use super::setup::{
-    PrivateOfferSetup, accept_private_offer, add_lender_principal, assert_program_rejects,
-    broadcast, build_full_repayment, default_offer_parameters, find_explicit_utxo,
-    find_pinned_utxo, fund_lender, get_active_offer, setup_pending_private_offer,
+    Loan, PrivateOfferSetup, accept_private_offer, add_lender_principal, assert_program_rejects,
+    broadcast, build_full_repayment_with, default_offer_parameters, find_explicit_utxo,
+    find_pinned_utxo, fund_lender, setup_pending_private_offer,
 };
 
 /// An acceptance in which the lender pays the principal as `principal` instead of the pinned
@@ -65,72 +65,6 @@ fn build_acceptance_with_principal(
     ));
 
     add_lender_principal(&mut ctx, lender, parameters)?;
-
-    Ok(ctx)
-}
-
-/// A full repayment of the active offer accepted in `acceptance_tx`, built by hand: the offer input
-/// takes the witness of `branch` and the lender is paid `repayment`, where `attach_full_repayment`
-/// uses `FullRepayment` and the pinned repayment.
-fn build_repayment_with(
-    context: &simplex::TestContext,
-    setup: &PrivateOfferSetup,
-    acceptance_tx: &Transaction,
-    lender: &Signer,
-    branch: PrivateLendingWitnessBranch,
-    repayment: PinnedOutput,
-) -> anyhow::Result<ConfidentialTransaction> {
-    let borrower = context.get_default_signer();
-    let parameters = setup.parameters;
-    let active_offer = get_active_offer(setup);
-
-    let active_offer_utxo = find_pinned_utxo(acceptance_tx, &parameters.pinned.active_collateral);
-    let borrower_nft_utxo = borrower.get_utxos_asset(parameters.borrower_nft_asset_id)?[0].clone();
-    let borrower_principal_utxo = borrower.get_utxos_filter(
-        &|utxo| {
-            utxo.explicit_asset() == repayment.asset_id && utxo.explicit_amount() > repayment.amount
-        },
-        &|_| true,
-    )?[0]
-        .clone();
-    let principal_utxo_amount = borrower_principal_utxo.explicit_amount();
-
-    let mut ctx = ConfidentialTransaction::new();
-
-    ctx.add_input(
-        PartialInput::new(borrower_nft_utxo),
-        RequiredSignature::NativeEcdsa,
-    );
-    ctx.add_output(PartialOutput::new(
-        Script::new_op_return(b"burn"),
-        1,
-        parameters.borrower_nft_asset_id,
-    ));
-    active_offer.add_program_input(&mut ctx, active_offer_utxo, branch.build_witness());
-    ctx.add_pinned_output(
-        parameters
-            .get_repayment_output_asset_auth()
-            .get_script_pubkey(),
-        repayment,
-        lender.get_blinding_public_key(),
-    );
-    ctx.add_input(
-        PartialInput::new(borrower_principal_utxo),
-        RequiredSignature::NativeEcdsa,
-    );
-    ctx.add_output(
-        PartialOutput::new(
-            borrower.get_confidential_address().script_pubkey(),
-            parameters.pinned.active_collateral.amount,
-            parameters.pinned.active_collateral.asset_id,
-        )
-        .with_blinding_key(borrower.get_blinding_public_key()),
-    );
-    ctx.add_output(PartialOutput::new(
-        borrower.get_address().script_pubkey(),
-        principal_utxo_amount - repayment.amount,
-        repayment.asset_id,
-    ));
 
     Ok(ctx)
 }
@@ -196,9 +130,9 @@ fn private_offer_acceptance_fails_with_unpinned_principal_blinders(
     Ok(())
 }
 
-/// The honest control of the repayment failures: with the pinned repayment and the full repayment
-/// branch, the transaction that [`build_repayment_with`] builds goes through, so they fail for
-/// their repayment or their branch only.
+/// The honest control of the repayment failures: with the starting debt's hash and the pinned
+/// repayment, the transaction that `build_full_repayment_with` builds goes through, so they fail
+/// for their repayment or their debt hash only.
 #[simplex::test]
 fn private_offer_repayment_succeeds_with_the_pinned_repayment(
     context: simplex::TestContext,
@@ -210,13 +144,13 @@ fn private_offer_repayment_succeeds_with_the_pinned_repayment(
     let repayment = setup.parameters.pinned.repayment;
 
     let acceptance_tx = accept_private_offer(&context, &mut setup, &lender)?;
+    let loan = Loan::accepted(setup.parameters, &acceptance_tx);
 
-    let ctx = build_repayment_with(
-        &context,
-        &setup,
-        &acceptance_tx,
-        &lender,
-        PrivateLendingWitnessBranch::FullRepayment,
+    let ctx = build_full_repayment_with(
+        &loan,
+        borrower,
+        lender.get_blinding_public_key(),
+        repayment.commitment_hash(),
         repayment,
     )?;
     let repayment_tx = broadcast(&ctx, borrower)?;
@@ -237,15 +171,15 @@ fn private_offer_repayment_fails_with_unpinned_repayment_blinders(
     let repayment = setup.parameters.pinned.repayment;
 
     let acceptance_tx = accept_private_offer(&context, &mut setup, &lender)?;
+    let loan = Loan::accepted(setup.parameters, &acceptance_tx);
 
     // the borrower pays the right amount, but under blinding factors the lender cannot know
     let reblinded_repayment = PinnedOutput::new_random(repayment.asset_id, repayment.amount);
-    let ctx = build_repayment_with(
-        &context,
-        &setup,
-        &acceptance_tx,
-        &lender,
-        PrivateLendingWitnessBranch::FullRepayment,
+    let ctx = build_full_repayment_with(
+        &loan,
+        borrower,
+        lender.get_blinding_public_key(),
+        repayment.commitment_hash(),
         reblinded_repayment,
     )?;
 
@@ -254,33 +188,8 @@ fn private_offer_repayment_fails_with_unpinned_repayment_blinders(
     Ok(())
 }
 
-#[simplex::test]
-fn private_offer_partial_repayment_branch_fails(
-    context: simplex::TestContext,
-) -> anyhow::Result<()> {
-    let borrower = context.get_default_signer();
-    let lender = context.random_signer();
-
-    let mut setup = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
-    let repayment = setup.parameters.pinned.repayment;
-
-    let acceptance_tx = accept_private_offer(&context, &mut setup, &lender)?;
-
-    // a valid full repayment, spent through the reserved partial repayment branch
-    let ctx = build_repayment_with(
-        &context,
-        &setup,
-        &acceptance_tx,
-        &lender,
-        PrivateLendingWitnessBranch::PartialRepayment,
-        repayment,
-    )?;
-
-    assert_program_rejects(ctx.finalize(borrower));
-
-    Ok(())
-}
-
+/// The witness's debt hash must be the one the loan's storage holds: a loan whose storage holds
+/// another debt than the starting one does not repay with the starting debt's hash and output.
 #[simplex::test]
 fn private_offer_repayment_fails_with_wrong_debt_slot(
     context: simplex::TestContext,
@@ -290,12 +199,13 @@ fn private_offer_repayment_fails_with_wrong_debt_slot(
 
     let setup = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
     let parameters = setup.parameters;
+    let repayment = parameters.pinned.repayment;
 
-    // an active offer whose debt slot holds another commitment hash than the repayment's
-    let wrong_debt_offer = PrivateLendingOffer::new_with_storage(
+    // an active offer whose debt is another commitment than the repayment's
+    let wrong_debt_offer = PrivateLendingOffer::new_active_at(
         parameters,
-        true,
-        parameters.pinned.principal.commitment_hash(),
+        parameters.pinned.principal.value_commitment(),
+        0,
     );
 
     let mut funding_ctx = ConfidentialTransaction::new();
@@ -306,8 +216,18 @@ fn private_offer_repayment_fails_with_wrong_debt_slot(
     );
     let funding_tx = broadcast(&funding_ctx, borrower)?;
 
-    let wrong_debt_offer_utxo = find_pinned_utxo(&funding_tx, &parameters.pinned.active_collateral);
-    let ctx = build_full_repayment(&wrong_debt_offer, wrong_debt_offer_utxo, borrower, &lender)?;
+    let loan = Loan {
+        utxo: find_pinned_utxo(&funding_tx, &wrong_debt_offer.get_collateral()),
+        offer: wrong_debt_offer,
+        opening: DebtOpening::of(&repayment),
+    };
+    let ctx = build_full_repayment_with(
+        &loan,
+        borrower,
+        lender.get_blinding_public_key(),
+        repayment.commitment_hash(),
+        repayment,
+    )?;
 
     assert_program_rejects(ctx.finalize(borrower));
 

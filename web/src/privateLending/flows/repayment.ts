@@ -6,12 +6,13 @@
 //            NFT, 1, burn), pinned and blinded to the lender's key; 2 the collateral back to the
 //            borrower, blinded to its wallet; 3 the principal change to the wallet, if any; then
 //            the policy-asset change and the fee.
-// The covenant checks the borrower NFT burn (input 0 to output 0), the active collateral at input
-// 1 and the pinned repayment at output 1; it leaves the collateral to the spender. The borrower NFT
-// is an explicit output at a wallet address, which LWK does not list among the wallet's coins, so
-// it is spent as a plain input, not a wallet coin; the wallet still recognizes its script, and
-// signs it. `buildPset` adds only the policy-asset change, after the given outputs, so the builder
-// pays the principal change itself, at output 3.
+// The covenant checks that the witness's debt hash is the one the loan's storage holds, the
+// borrower NFT burn (input 0 to output 0) and that the repayment at output 1 has that debt hash; it
+// leaves the collateral to the spender. This builder repays a loan without installments, whose
+// debt is the pinned repayment. The borrower NFT is an explicit output at a wallet address, which
+// LWK does not list among the wallet's coins, so it is spent as a plain input, not a wallet coin;
+// the wallet still recognizes its script, and signs it. `buildPset` adds only the policy-asset
+// change, after the given outputs, so the builder pays the principal change itself, at output 3.
 // The covenant does not check that the principal was claimed, and the borrower NFT is the only key
 // to an unclaimed principal (asset_auth(borrower NFT, 1, no burn)): burning it first would strand
 // the principal forever. So the builder spends the NFT only from the principal claim's output 0,
@@ -367,7 +368,9 @@ export async function buildPrivateRepayment(
         true,
         prevouts(),
         REPAYMENT_INPUT.offer,
-        { branch: 'FullRepayment' },
+        // the loan's storage still holds the starting debt, the pinned repayment: the flows of
+        // loans with installments come with their state
+        { branch: 'FullRepayment', debtHash: opened.contractArguments().repaymentCommitment },
       )
       const txid = finalizedTx.txid().toString()
       if (txid !== builtTxid) throw new Error('Finalizing changed the repayment')
