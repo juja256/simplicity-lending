@@ -1,8 +1,10 @@
 use simplex::signer::Signer;
 use simplex::simplicityhl::elements::{LockTime, Transaction};
-use simplex::transaction::{PartialInput, PartialOutput, RequiredSignature};
+use simplex::transaction::{PartialInput, PartialOutput, RequiredSignature, UTXO};
 
-use lending_contracts::programs::private_lending::PrivateLendingWitnessBranch;
+use lending_contracts::programs::private_lending::{
+    PrivateLendingOffer, PrivateLendingWitnessBranch,
+};
 use lending_contracts::utils::confidential::ConfidentialTransaction;
 
 use super::setup::{
@@ -13,17 +15,27 @@ use super::setup::{
 /// The input of a liquidation that spends the loan.
 const LIQUIDATION_LOAN_INPUT: usize = 0;
 
-/// The liquidation of `loan`, before finalization, built with `attach_liquidation`: the lender
-/// NFT (input 1) is burned and the collateral goes to the lender.
+/// The liquidation of `loan`, before finalization: [`build_liquidation_of`] its offer and output.
 pub(super) fn build_liquidation_at(
     loan: &Loan,
     lender: &Signer,
 ) -> anyhow::Result<ConfidentialTransaction> {
-    let parameters = loan.parameters();
+    build_liquidation_of(&loan.offer, loan.utxo.clone(), lender)
+}
+
+/// The liquidation of the loan `offer` held at `loan_utxo`, before finalization, built with
+/// `attach_liquidation`: the lender NFT (input 1) is burned and the collateral goes to the lender
+/// (output 1). The lender can build it from what it computes alone, with no opening of the debt.
+pub(super) fn build_liquidation_of(
+    offer: &PrivateLendingOffer,
+    loan_utxo: UTXO,
+    lender: &Signer,
+) -> anyhow::Result<ConfidentialTransaction> {
+    let parameters = *offer.get_parameters();
 
     let mut ctx = ConfidentialTransaction::new();
 
-    loan.offer.attach_liquidation(&mut ctx, loan.utxo.clone());
+    offer.attach_liquidation(&mut ctx, loan_utxo);
 
     let lender_nft_utxo = lender.get_utxos_asset(parameters.lender_nft_asset_id)?[0].clone();
     ctx.add_input(

@@ -1,6 +1,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod claim_flows;
 mod failure_flows;
 mod hidden_expiry;
 mod liveness;

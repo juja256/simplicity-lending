@@ -102,7 +102,7 @@ fn zero_debt_loan(
 
 /// The zero-debt close of `loan`, before finalization, built with `attach_zero_debt_close`: the
 /// collateral returns to the borrower at output 2.
-fn build_zero_debt_close(
+pub(super) fn build_zero_debt_close(
     loan: &Loan,
     borrower: &Signer,
 ) -> anyhow::Result<ConfidentialTransaction> {

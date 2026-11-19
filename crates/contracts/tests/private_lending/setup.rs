@@ -13,7 +13,9 @@ use simplex::transaction::{
     FinalTransaction, PartialInput, PartialOutput, RequiredSignature, UTXO,
 };
 
-use lending_contracts::programs::asset_auth::{AssetAuth, AssetAuthWitnessParams};
+use lending_contracts::programs::asset_auth::{
+    AssetAuth, AssetAuthParameters, AssetAuthWitnessParams,
+};
 use lending_contracts::programs::private_lending::{
     PrivateLendingOffer, PrivateLendingParameters, PrivateLendingWitnessBranch, add_nft_issuances,
     verify_offer_as_borrower,
@@ -483,6 +485,26 @@ impl Loan {
     pub(super) fn parameters(&self) -> PrivateLendingParameters {
         *self.offer.get_parameters()
     }
+
+    /// The loan that the installment `tx` of `payment` leaves, whose offer is `successor`.
+    pub(super) fn after_installment(
+        &self,
+        tx: &Transaction,
+        successor: PrivateLendingOffer,
+        payment: DebtOpening,
+    ) -> Loan {
+        let utxo = find_pinned_utxo(tx, &successor.get_collateral());
+        let opening = self
+            .opening
+            .after(payment)
+            .expect("an installment leaves part of the debt");
+
+        Loan {
+            offer: successor,
+            utxo,
+            opening,
+        }
+    }
 }
 
 /// A fresh offer accepted by a fresh lender: the offer's setup, the lender and the loan.
@@ -621,21 +643,9 @@ pub(super) fn pay_installment(
 ) -> anyhow::Result<(Transaction, Loan)> {
     let (ctx, successor) = build_installment(setup, loan, borrower, payment)?;
     let tx = broadcast(&ctx, borrower)?;
+    let next = loan.after_installment(&tx, successor, payment);
 
-    let utxo = find_pinned_utxo(&tx, &successor.get_collateral());
-    let opening = loan
-        .opening
-        .after(payment)
-        .expect("an installment leaves part of the debt");
-
-    Ok((
-        tx,
-        Loan {
-            offer: successor,
-            utxo,
-            opening,
-        },
-    ))
+    Ok((tx, next))
 }
 
 /// The witness, the first input and the outputs of an installment, which its failure tests
@@ -859,48 +869,120 @@ pub(super) fn simplicity_spend(
     Ok(spend)
 }
 
-/// Spends the asset_auth output `locked_utxo` with `keeper`'s auth asset (input 1, output 0) and
-/// sends the unlocked amount to `keeper`. Returns the claim transaction.
+/// Claims `locked_utxo`, an output of `asset_auth` that carries its secrets, with
+/// [`claim_locked_outputs`]: `keeper`'s auth asset returns to it or is burned, as `asset_auth`
+/// says.
 pub(super) fn claim_asset_auth_output(
     keeper: &Signer,
     asset_auth: &AssetAuth,
     locked_utxo: UTXO,
 ) -> anyhow::Result<Transaction> {
-    let auth_parameters = *asset_auth.get_parameters();
-    let secrets = locked_utxo.secrets.expect("a pinned output");
+    let secrets = locked_utxo
+        .secrets
+        .ok_or_else(|| anyhow::anyhow!("the locked output is not opened"))?;
+    let burn = asset_auth.get_parameters().with_asset_burn;
 
-    let auth_asset_utxo = keeper.get_utxos_asset(auth_parameters.asset_id)?[0].clone();
+    claim_locked_outputs(keeper, asset_auth, &[(locked_utxo, secrets)], burn)
+}
 
-    let mut ctx = ConfidentialTransaction::new();
-
-    asset_auth.attach_unlocking(&mut ctx, locked_utxo, AssetAuthWitnessParams::new(1, 0));
-
-    ctx.add_input(
-        PartialInput::new(auth_asset_utxo),
-        RequiredSignature::NativeEcdsa,
-    );
-
-    let auth_asset_destination = if auth_parameters.with_asset_burn {
-        simplex::simplicityhl::elements::Script::new_op_return(b"burn")
+/// Claims the outputs `locked` with the NFT that `nft` names: the NFT (input 0) unlocks them
+/// (inputs 1…) and returns to `keeper` (output 0), or is burned with `burn`, and their total goes
+/// to `keeper` (output 1). Each output takes the input secrets it is paired with, which need not
+/// open it (see [`add_locked_outputs`]). Returns the claim, confirmed.
+pub(super) fn claim_locked_outputs(
+    keeper: &Signer,
+    nft: &AssetAuth,
+    locked: &[(UTXO, TxOutSecrets)],
+    burn: bool,
+) -> anyhow::Result<Transaction> {
+    let auth = *nft.get_parameters();
+    let nft_utxo = keeper
+        .get_utxos_asset(auth.asset_id)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("the keeper does not hold the NFT"))?;
+    let nft_receiver = if burn {
+        Script::new_op_return(b"burn")
     } else {
         keeper.get_address().script_pubkey()
     };
+
+    let mut ctx = ConfidentialTransaction::new();
+
+    ctx.add_input(PartialInput::new(nft_utxo), RequiredSignature::NativeEcdsa);
     ctx.add_output(PartialOutput::new(
-        auth_asset_destination,
-        auth_parameters.asset_amount,
-        auth_parameters.asset_id,
+        nft_receiver,
+        auth.asset_amount,
+        auth.asset_id,
     ));
+    add_locked_outputs(
+        &mut ctx,
+        keeper,
+        nft,
+        locked,
+        AssetAuthWitnessParams::new(0, 0),
+    )?;
+
+    broadcast(&ctx, keeper)
+}
+
+/// Spends the outputs `locked`, each held by the lock of the NFT that `nft` names, with burn or
+/// without (an installment or a repayment), whichever its script is. `witness` names where the
+/// transaction carries the NFT. Their total, of the one asset they all hold, goes to `keeper` as
+/// the next output.
+///
+/// Each output takes the input secrets it is paired with. Blinding balances with the sum of the
+/// secrets, so their amounts and value blinders need not open each output, only add up to the sum
+/// of the outputs' openings: the final claim gives one swept output the combined opening and the
+/// others zero (see `sweep_opening`). The asset ids and asset blinders must be the outputs' own,
+/// because the surjection proofs are built from them.
+pub(super) fn add_locked_outputs(
+    ctx: &mut ConfidentialTransaction,
+    keeper: &Signer,
+    nft: &AssetAuth,
+    locked: &[(UTXO, TxOutSecrets)],
+    witness: AssetAuthWitnessParams,
+) -> anyhow::Result<()> {
+    let auth = *nft.get_parameters();
+    let locks = [false, true].map(|with_asset_burn| {
+        AssetAuth::new(AssetAuthParameters {
+            with_asset_burn,
+            ..auth
+        })
+    });
+    let [(_, first), ..] = locked else {
+        anyhow::bail!("there is nothing to claim");
+    };
+
+    let mut total = 0;
+    for (utxo, secrets) in locked {
+        anyhow::ensure!(
+            secrets.asset == first.asset,
+            "the locked outputs hold several assets"
+        );
+        let lock = locks
+            .iter()
+            .find(|lock| lock.get_script_pubkey() == utxo.txout.script_pubkey)
+            .ok_or_else(|| anyhow::anyhow!("{} is not locked to the NFT", utxo.outpoint))?;
+        let utxo = UTXO {
+            secrets: Some(*secrets),
+            ..utxo.clone()
+        };
+
+        lock.attach_unlocking(ctx, utxo, witness);
+        total += secrets.value;
+    }
 
     ctx.add_output(
         PartialOutput::new(
             keeper.get_confidential_address().script_pubkey(),
-            secrets.value,
-            secrets.asset,
+            total,
+            first.asset,
         )
         .with_blinding_key(keeper.get_blinding_public_key()),
     );
 
-    broadcast(&ctx, keeper)
+    Ok(())
 }
 
 /// Asserts that the program of one of the transaction's inputs rejects it: running the program
