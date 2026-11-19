@@ -14,6 +14,7 @@ mod error;
 mod inspect;
 mod keys;
 mod lender_terms;
+mod loan;
 mod open;
 mod scan;
 
@@ -26,6 +27,7 @@ pub use lender_terms::{
     apr_bps, check_proposal, decode_lender_terms, encode_lender_terms, min_collateral,
     min_repayment, principal_per_collateral,
 };
+pub use loan::{InstallmentInfo, InstallmentPlan, LoanState, Sweep};
 pub use open::{
     ContractArguments, OpenedOffer, PinnedOutputInfo, PinnedRole, open_creation_as_borrower_hex,
     open_creation_as_lender_hex,

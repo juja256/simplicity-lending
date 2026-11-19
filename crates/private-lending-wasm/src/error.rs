@@ -17,6 +17,12 @@ pub(crate) fn bad_input(message: impl Display) -> String {
     err("bad-input", message)
 }
 
+/// A `loan-mismatch` error: a transaction given as the loan's acceptance or one of its
+/// installments, or as its close, is not the loan's.
+pub(crate) fn loan_mismatch(message: impl Display) -> String {
+    err("loan-mismatch", message)
+}
+
 /// The code of an open error. `view-tag-mismatch`, `not-mine` and `rewind-failed` mean the offer
 /// is not addressed to this key; `terms-invalid` and `collateral-mismatch` mean it is, but invalid.
 pub(crate) fn open_error_code(error: &OpenError) -> &'static str {
