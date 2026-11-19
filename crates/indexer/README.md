@@ -39,17 +39,20 @@ The indexer reads only this public data and never verifies or opens the offer, s
 
 #### Private Offer States
 
-An offer starts `pending`. Each spend of a tracked UTXO moves it on, and the spending transaction's output 0 decides which way:
+An offer starts `pending`. Each spend of a tracked UTXO moves it on, and the spending transaction's layout decides which way: the input that spends the UTXO and the transaction's outputs 0 and 1.
 
-| Spent UTXO | Output 0 of the spending transaction | New status | New UTXOs |
-|---|---|---|---|
-| `pending_offer` | `OP_RETURN` burning the lender NFT (explicit asset) | `cancelled` | none |
-| `pending_offer` | anything else | `active` | `active_offer` at output 0, `principal` at output 1 |
-| `active_offer` | `OP_RETURN` burning the borrower NFT (explicit asset) | `repaid` | `repayment` at output 1 |
-| `active_offer` | anything else | `liquidated` | none |
-| `principal`, `repayment` | any | unchanged | none (the UTXO is marked spent) |
+| Spent UTXO | Spent at input | Spending transaction | New status | New UTXOs |
+|---|---|---|---|---|
+| `pending_offer` | any | output 0 an `OP_RETURN` burning the lender NFT (explicit asset) | `cancelled` | none |
+| `pending_offer` | any | anything else | `active` | `active_offer` at output 0, `principal` at output 1 |
+| `active_offer` | 1 | output 0 the borrower NFT (explicit asset), not an `OP_RETURN`, and at least 3 outputs: an installment | unchanged | `active_offer` at output 1, `installment` at output 2 |
+| `active_offer` | 1 | output 0 an `OP_RETURN` burning the borrower NFT, output 1 not an `OP_RETURN`: the full repayment | `repaid` | `repayment` at output 1 |
+| `active_offer` | 1 | output 0 an `OP_RETURN` burning the borrower NFT, output 1 an `OP_RETURN`: the zero-debt close | `repaid` | none |
+| `active_offer` | 0 | output 0 an `OP_RETURN` burning the lender NFT: the liquidation | `liquidated` | none |
+| `active_offer` | any | anything else | unchanged | none (logged and skipped) |
+| `principal`, `repayment`, `installment` | any | any | unchanged | none |
 
-`active` means the debt is outstanding. Repayments are a list of `repayment` UTXOs: one in this contract version, possibly more in a later one. A status change sets `updated_at_height`. These statuses mean something only for offers that verify: the indexer never checks the contract, so for a fake candidate they are meaningless. No SSE event is emitted for private offers, and clients refetch on `block_indexed`.
+The spent UTXO is marked spent in every case. `active` means the debt is outstanding, and the loan is the one unspent `active_offer`: each installment spends it and leaves its successor. Repayments are a list of UTXOs: the `installment` ones and, after the full repayment, its `repayment`; a zero-debt close adds none. A status change sets `updated_at_height`, and an installment, which changes no status, does not. A spend of `active_offer` that matches no layout of the contract cannot come from a real loan, so the indexer leaves the status alone instead of guessing. These statuses mean something only for offers that verify: the indexer never checks the contract, so for a fake candidate they are meaningless. No SSE event is emitted for private offers, and clients refetch on `block_indexed`.
 
 ### API Service
 
@@ -251,7 +254,7 @@ Candidate fields:
 - `status`: `pending`, `active`, `cancelled`, `repaid` or `liquidated`. For a fake candidate the status is meaningless.
 - `created_at_height`, `updated_at_height`: numbers.
 
-Details add `utxos`: `{ utxo_type, txid, vout, created_at_height, spent_txid, spent_at_height }`. `utxo_type` is `pending_offer`, `active_offer`, `principal` or `repayment`. `spent_txid` and `spent_at_height` are `null` while the UTXO is unspent. All txids are in display order.
+Details add `utxos`: `{ utxo_type, txid, vout, created_at_height, spent_txid, spent_at_height }`. `utxo_type` is `pending_offer`, `active_offer`, `principal`, `repayment` or `installment`. `spent_txid` and `spent_at_height` are `null` while the UTXO is unspent. All txids are in display order.
 
 The list response carries `items`, `total` (candidates in the height range, ignoring paging), `limit`, `offset` and `last_indexed_height`. The indexer reads `last_indexed_height` first and returns only candidates up to it, so the height never runs ahead of the items. Before any block is indexed, `items` is empty and `last_indexed_height` is `null`.
 
