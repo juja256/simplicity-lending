@@ -224,10 +224,13 @@ pub struct ContractArguments {
     repayment_commitment: String,
     loan_expiration_time: u32,
     expiry_hash: String,
+    repayment_asset_prefix_bit: u8,
+    repayment_asset_x: String,
 }
 
 impl ContractArguments {
     pub(crate) fn new(terms: &OfferTerms, pinned: &OfferPinned, secrets: &OfferSecrets) -> Self {
+        let repayment_asset = elements::encode::serialize(&pinned.repayment.asset_commitment());
         Self {
             borrower_nft_asset_id: encode_hex(&terms.borrower_nft.into_inner().0),
             lender_nft_asset_id: encode_hex(&terms.lender_nft.into_inner().0),
@@ -240,6 +243,8 @@ impl ContractArguments {
                 &secrets.expiry_salt(),
                 terms.loan_expiration_time,
             )),
+            repayment_asset_prefix_bit: repayment_asset[0] & 1,
+            repayment_asset_x: encode_hex(&repayment_asset[1..]),
         }
     }
 }
@@ -288,6 +293,20 @@ impl ContractArguments {
     #[wasm_bindgen(getter, js_name = expiryHash)]
     pub fn expiry_hash(&self) -> String {
         self.expiry_hash.clone()
+    }
+
+    /// The low bit of the prefix of `A`, the pinned repayment's asset commitment, 0 or 1: 1
+    /// exactly when its `y` is not a square. With [`Self::repayment_asset_x`] it is the
+    /// program's `REPAYMENT_ASSET`, which takes the bit as a bool.
+    #[wasm_bindgen(getter, js_name = repaymentAssetPrefixBit)]
+    pub fn repayment_asset_prefix_bit(&self) -> u8 {
+        self.repayment_asset_prefix_bit
+    }
+
+    /// The x-coordinate of `A`, the 32 bytes after the prefix of its consensus encoding, hex.
+    #[wasm_bindgen(getter, js_name = repaymentAssetX)]
+    pub fn repayment_asset_x(&self) -> String {
+        self.repayment_asset_x.clone()
     }
 }
 
@@ -389,6 +408,8 @@ pub(crate) mod tests {
             a.repayment_commitment(),
             a.loan_expiration_time().to_string(),
             a.expiry_hash(),
+            a.repayment_asset_prefix_bit().to_string(),
+            a.repayment_asset_x(),
         ]
     }
 
@@ -412,7 +433,7 @@ pub(crate) mod tests {
         // input 0 of the fixture's creation transaction, as "<txid>:<vout>"
         assert_eq!(
             as_lender.first_input(),
-            "9af01d6eb39322db2b839e0474d9ef06cd362ff6e0bc8a6e93a3c45196ef3cc2:0"
+            "1cd807dc4e8d3e6e854778fb34c99eb061ba4b99d22113e7a35fb8076651ab9f:0"
         );
     }
 
@@ -458,6 +479,9 @@ pub(crate) mod tests {
         );
         assert_eq!(got.loan_expiration_time(), parameters.loan_expiration_time);
         assert_eq!(got.expiry_hash(), encode_hex(&expected.expiry_hash));
+        let (prefix_bit, x) = expected.repayment_asset;
+        assert_eq!(got.repayment_asset_prefix_bit(), u8::from(prefix_bit));
+        assert_eq!(got.repayment_asset_x(), encode_hex(&x));
         assert_eq!(offer.expiry_salt(), encode_hex(&parameters.expiry_salt));
     }
 

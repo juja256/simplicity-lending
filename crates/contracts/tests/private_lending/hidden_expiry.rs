@@ -21,9 +21,8 @@ use private_lending_core::{OfferSecrets, expiry_hash};
 
 use super::offer_liquidation_success_flows::{build_liquidation, build_liquidation_with};
 use super::setup::{
-    PrivateOfferSetup, accept_private_offer, assert_program_rejects, broadcast,
-    build_full_repayment, default_offer_parameters, find_pinned_utxo, get_active_offer,
-    setup_pending_private_offer,
+    Loan, PrivateOfferSetup, accept_private_offer, assert_program_rejects, broadcast,
+    build_full_repayment, default_offer_parameters, get_active_offer, setup_pending_private_offer,
 };
 
 /// The input of an acceptance that spends the offer.
@@ -135,13 +134,11 @@ fn salt_changes_the_revealed_cmr(context: simplex::TestContext) -> anyhow::Resul
     };
 
     let acceptance_tx = accept_private_offer(&context, &mut setup, &lender)?;
-    let active_offer = get_active_offer(&setup);
     let repayment_tx = broadcast(
         &build_full_repayment(
-            &active_offer,
-            find_pinned_utxo(&acceptance_tx, &parameters.pinned.active_collateral),
+            &Loan::accepted(parameters, &acceptance_tx),
             borrower,
-            &lender,
+            lender.get_blinding_public_key(),
         )?,
         borrower,
     )?;

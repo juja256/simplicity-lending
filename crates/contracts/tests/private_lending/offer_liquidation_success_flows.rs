@@ -1,84 +1,31 @@
 use simplex::signer::Signer;
-use simplex::simplicityhl::elements::{LockTime, Script, Sequence, Transaction};
+use simplex::simplicityhl::elements::{LockTime, Transaction};
 use simplex::transaction::{PartialInput, PartialOutput, RequiredSignature};
 
 use lending_contracts::programs::private_lending::PrivateLendingWitnessBranch;
-use lending_contracts::programs::program::SimplexProgram;
 use lending_contracts::utils::confidential::ConfidentialTransaction;
 
 use super::setup::{
-    PrivateOfferSetup, accept_private_offer, broadcast, default_offer_parameters, find_pinned_utxo,
-    get_active_offer, setup_pending_private_offer,
+    Loan, PrivateOfferSetup, accept_private_offer, broadcast, default_offer_parameters,
+    get_active_offer, mine_until, setup_pending_private_offer, simplicity_spend,
 };
 
-/// The liquidation transaction, before finalization.
-pub(super) fn build_liquidation(
-    setup: &PrivateOfferSetup,
-    acceptance_tx: &Transaction,
+/// The input of a liquidation that spends the loan.
+const LIQUIDATION_LOAN_INPUT: usize = 0;
+
+/// The liquidation of `loan`, before finalization, built with `attach_liquidation`: the lender
+/// NFT (input 1) is burned and the collateral goes to the lender.
+pub(super) fn build_liquidation_at(
+    loan: &Loan,
     lender: &Signer,
 ) -> anyhow::Result<ConfidentialTransaction> {
-    let parameters = setup.parameters;
-
-    let active_offer_utxo = find_pinned_utxo(acceptance_tx, &parameters.pinned.active_collateral);
+    let parameters = loan.parameters();
 
     let mut ctx = ConfidentialTransaction::new();
 
-    setup.offer.attach_liquidation(&mut ctx, active_offer_utxo);
-
-    add_lender_nft_and_collateral(&mut ctx, setup, lender)?;
-
-    Ok(ctx)
-}
-
-/// A liquidation built by hand, before finalization: the offer input takes the liquidation
-/// witness of `salt` and `expiry` and the transaction is locked to `lock_time`, where
-/// `attach_liquidation` uses the offer's salt and expiry for all three.
-pub(super) fn build_liquidation_with(
-    setup: &PrivateOfferSetup,
-    acceptance_tx: &Transaction,
-    lender: &Signer,
-    salt: [u8; 32],
-    expiry: u32,
-    lock_time: u32,
-) -> anyhow::Result<ConfidentialTransaction> {
-    let parameters = setup.parameters;
-
-    let active_offer_input = PartialInput::new(find_pinned_utxo(
-        acceptance_tx,
-        &parameters.pinned.active_collateral,
-    ))
-    .with_sequence(Sequence::ENABLE_LOCKTIME_NO_RBF)
-    .with_locktime(LockTime::from_height(lock_time)?);
-
-    let mut ctx = ConfidentialTransaction::new();
-
-    setup.offer.add_program_input_from_partial_input(
-        &mut ctx,
-        active_offer_input,
-        PrivateLendingWitnessBranch::Liquidation { salt, expiry }.build_witness(),
-    );
-    ctx.add_output(PartialOutput::new(
-        Script::new_op_return(b"burn"),
-        1,
-        parameters.lender_nft_asset_id,
-    ));
-
-    add_lender_nft_and_collateral(&mut ctx, setup, lender)?;
-
-    Ok(ctx)
-}
-
-/// The rest of a liquidation after the offer input and the lender NFT burn: the lender NFT
-/// (input 1) and the collateral to the lender.
-fn add_lender_nft_and_collateral(
-    ctx: &mut ConfidentialTransaction,
-    setup: &PrivateOfferSetup,
-    lender: &Signer,
-) -> anyhow::Result<()> {
-    let parameters = setup.parameters;
+    loan.offer.attach_liquidation(&mut ctx, loan.utxo.clone());
 
     let lender_nft_utxo = lender.get_utxos_asset(parameters.lender_nft_asset_id)?[0].clone();
-
     ctx.add_input(
         PartialInput::new(lender_nft_utxo),
         RequiredSignature::NativeEcdsa,
@@ -92,7 +39,45 @@ fn add_lender_nft_and_collateral(
         .with_blinding_key(lender.get_blinding_public_key()),
     );
 
-    Ok(())
+    Ok(ctx)
+}
+
+/// The liquidation of the loan that `acceptance_tx` starts, before finalization.
+pub(super) fn build_liquidation(
+    setup: &PrivateOfferSetup,
+    acceptance_tx: &Transaction,
+    lender: &Signer,
+) -> anyhow::Result<ConfidentialTransaction> {
+    build_liquidation_at(&Loan::accepted(setup.parameters, acceptance_tx), lender)
+}
+
+/// [`build_liquidation`] with the liquidation witness of `salt` and `expiry`, locked to
+/// `lock_time`, where `attach_liquidation` uses the offer's salt and expiry for all three.
+pub(super) fn build_liquidation_with(
+    setup: &PrivateOfferSetup,
+    acceptance_tx: &Transaction,
+    lender: &Signer,
+    salt: [u8; 32],
+    expiry: u32,
+    lock_time: u32,
+) -> anyhow::Result<ConfidentialTransaction> {
+    let loan = Loan::accepted(setup.parameters, acceptance_tx);
+    let mut ctx = build_liquidation_at(&loan, lender)?;
+
+    let loan_input = &mut ctx.inputs_mut()[LIQUIDATION_LOAN_INPUT];
+    loan_input.partial_input.locktime = LockTime::from_height(lock_time)?;
+    loan_input
+        .program_input
+        .as_mut()
+        .expect("the loan input runs the program")
+        .witness = PrivateLendingWitnessBranch::Liquidation {
+        debt_hash: loan.offer.get_debt_hash(),
+        salt,
+        expiry,
+    }
+    .build_witness();
+
+    Ok(ctx)
 }
 
 #[simplex::test]
@@ -109,15 +94,13 @@ fn private_offer_liquidation_succeeds_after_expiration_time(
 
     setup.offer = get_active_offer(&setup);
 
-    let expiration_height = u64::from(parameters.loan_expiration_time) + 1;
-    context
-        .get_network_utils()
-        .mine_until_height(expiration_height)?;
+    mine_until(&context, parameters.loan_expiration_time + 1)?;
 
-    broadcast(
+    let liquidation_tx = broadcast(
         &build_liquidation(&setup, &acceptance_tx, &lender)?,
         &lender,
     )?;
+    simplicity_spend("Liquidation", &liquidation_tx, LIQUIDATION_LOAN_INPUT)?;
 
     assert!(
         lender

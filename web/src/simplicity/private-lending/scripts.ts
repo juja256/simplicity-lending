@@ -36,6 +36,13 @@ export interface PrivateOfferArguments {
   repaymentCommitment: string
   /** The SHA-256 of the expiry salt and the expiry: the program never takes the expiry itself. */
   expiryHash: string
+  /**
+   * `A`, the pinned repayment's asset commitment, which every installment and repayment carries:
+   * the low bit of its prefix (0 or 1, 1 exactly when its `y` is not a square) and its x-coordinate
+   * (32 bytes, hex).
+   */
+  repaymentAssetPrefixBit: number
+  repaymentAssetX: string
 }
 
 export interface PrivateOfferScripts {
@@ -44,6 +51,7 @@ export interface PrivateOfferScripts {
   lenderNftLock: Script
   principalOutputScriptHash: string
   repaymentOutputScriptHash: string
+  installmentOutputScriptHash: string
   pendingSpendInfo: StateTaprootSpendInfo
   activeSpendInfo: StateTaprootSpendInfo
   program: SimplicityProgram
@@ -58,6 +66,8 @@ export function toPrivateOfferArguments(args: ContractArguments): PrivateOfferAr
     principalCommitment: args.principalCommitment,
     repaymentCommitment: args.repaymentCommitment,
     expiryHash: args.expiryHash,
+    repaymentAssetPrefixBit: args.repaymentAssetPrefixBit,
+    repaymentAssetX: args.repaymentAssetX,
   }
 }
 
@@ -74,6 +84,18 @@ function scriptHash(program: SimplicityProgram): string {
 
 function u256(hex: string): SimplicityTypedValue {
   return SimplicityTypedValue.fromU256Hex(hex)
+}
+
+/**
+ * A commitment as the program takes it, `(bool, u256)`: whether the low bit of its prefix is set,
+ * and x. The program converts the bool to the `u1` of Elements' encoding.
+ */
+function commitment(prefixBit: number, x: string): SimplicityTypedValue {
+  if (prefixBit !== 0 && prefixBit !== 1) throw new Error('A prefix bit is 0 or 1')
+  return SimplicityTypedValue.fromElements([
+    SimplicityTypedValue.fromBoolean(prefixBit === 1),
+    u256(x),
+  ])
 }
 
 function storageSpendInfo(
@@ -93,8 +115,8 @@ function storageSpendInfo(
 
 /**
  * The asset_auth program that locks a pinned output to one unit of an NFT: the principal
- * (borrower NFT, no burn) or the repayment (lender NFT, burned). `nftAssetId` is in the internal
- * byte order of `ContractArguments`.
+ * (borrower NFT, no burn), the repayment (lender NFT, burned) or an installment (lender NFT, no
+ * burn). `nftAssetId` is in the internal byte order of `ContractArguments`.
  */
 export function privateAssetAuthProgram(
   sources: PrivateLendingSources,
@@ -135,6 +157,9 @@ export function privateOfferScripts(
   const repaymentOutputScriptHash = scriptHash(
     privateAssetAuthProgram(sources, args.lenderNftAssetId, true),
   )
+  const installmentOutputScriptHash = scriptHash(
+    privateAssetAuthProgram(sources, args.lenderNftAssetId, false),
+  )
 
   const program = loadProgram(
     sources.privateLending,
@@ -146,8 +171,10 @@ export function privateOfferScripts(
       .addValue('PRINCIPAL_COMMITMENT', u256(args.principalCommitment))
       .addValue('REPAYMENT_COMMITMENT', u256(args.repaymentCommitment))
       .addValue('EXPIRY_HASH', u256(args.expiryHash))
+      .addValue('REPAYMENT_ASSET', commitment(args.repaymentAssetPrefixBit, args.repaymentAssetX))
       .addValue('PRINCIPAL_OUTPUT_SCRIPT_HASH', u256(principalOutputScriptHash))
-      .addValue('REPAYMENT_OUTPUT_SCRIPT_HASH', u256(repaymentOutputScriptHash)),
+      .addValue('REPAYMENT_OUTPUT_SCRIPT_HASH', u256(repaymentOutputScriptHash))
+      .addValue('INSTALLMENT_OUTPUT_SCRIPT_HASH', u256(installmentOutputScriptHash)),
   )
 
   const pendingSpendInfo = storageSpendInfo(program, false, args.repaymentCommitment)
@@ -164,6 +191,7 @@ export function privateOfferScripts(
     lenderNftLock,
     principalOutputScriptHash,
     repaymentOutputScriptHash,
+    installmentOutputScriptHash,
     pendingSpendInfo,
     activeSpendInfo,
     program,

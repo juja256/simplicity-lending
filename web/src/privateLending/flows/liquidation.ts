@@ -4,13 +4,15 @@
 //            fee coins;
 //   outputs  0 burns the lender NFT (OP_RETURN, explicit); 1 the collateral to the lender, blinded
 //            to its wallet; then the policy-asset change and the fee.
-// The covenant checks the active collateral at input 0, the lender NFT burn (input 1 to output 0),
-// that the witness's expiry salt and expiry hash to its `EXPIRY_HASH`, and `check_lock_height` of
-// that expiry: the transaction's nLockTime must be a height at least the expiry, and some input
-// must not be final, or Simplicity reads the lock time as 0. As the contracts' core does, the
-// witness carries the offer's salt and expiry, the lock time is the expiry and the offer input's
+// The covenant checks that the witness's debt hash is the one the loan's storage holds (which shows
+// only that the loan is active), the lender NFT burn (input 1 to output 0), that the witness's
+// expiry salt and expiry hash to its `EXPIRY_HASH`, and `check_lock_height` of that expiry: the
+// transaction's nLockTime must be a height at least the expiry, and some input must not be final,
+// or Simplicity reads the lock time as 0. As the contracts' core does, the witness carries the
+// debt hash, the offer's salt and expiry, the lock time is the expiry and the offer input's
 // sequence is ENABLE_LOCKTIME_NO_RBF; `buildPset`'s defaults (lock time 0, every sequence final)
-// would fail.
+// would fail. This builder liquidates a loan without installments, whose debt is the pinned
+// repayment.
 // Consensus then admits the transaction from the block after the expiry, so the builder refuses,
 // before building anything, while the tip is below the expiry.
 // The lender NFT is an explicit output at a wallet address (the acceptance's output 2), which LWK
@@ -296,7 +298,14 @@ export async function buildPrivateLiquidation(
         true,
         prevouts(),
         LIQUIDATION_INPUT.offer,
-        { branch: 'Liquidation', salt: opened.expirySalt(), expiry: expiration },
+        // the loan's storage still holds the starting debt, the pinned repayment: the flows of
+        // loans with installments come with their state
+        {
+          branch: 'Liquidation',
+          debtHash: opened.contractArguments().repaymentCommitment,
+          salt: opened.expirySalt(),
+          expiry: expiration,
+        },
       )
       const txid = finalizedTx.txid().toString()
       if (txid !== builtTxid) throw new Error('Finalizing changed the liquidation')

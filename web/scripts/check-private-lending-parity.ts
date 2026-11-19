@@ -39,6 +39,7 @@ import * as wasm from '@/wasm/private-lending/private_lending_wasm'
 import {
   type PrivateLendingSources,
   type PrivateOfferArguments,
+  type PrivateOfferScripts,
   privateOfferScripts,
   toPrivateOfferArguments,
   verifyOfferAddresses,
@@ -65,12 +66,29 @@ interface Fixture {
     principal_commitment: string
     repayment_commitment: string
     expiry_hash: string
+    repayment_asset_prefix_bit: number
+    repayment_asset_x: string
   }
   principal_output_script_hash: string
   repayment_output_script_hash: string
+  installment_output_script_hash: string
   pending_offer_script_pubkey: string
   active_offer_script_pubkey: string
   lender_nft_script_pubkey: string
+  witness_vectors: {
+    full_repayment: WitnessVector & { debt_hash: string }
+    liquidation: WitnessVector & { debt_hash: string; salt: string; expiry: number }
+  }
+}
+
+// A synthetic spend of the fixture's active offer by one branch, and the witness the contracts'
+// Rust serializes for it: the transaction, the transaction whose outputs are its prevouts, the
+// offer's input and the witness bytes, all hex.
+interface WitnessVector {
+  prevouts_tx: string
+  tx: string
+  input_index: number
+  witness: string
 }
 
 const fixture = JSON.parse(
@@ -155,6 +173,8 @@ function expectedArguments(): PrivateOfferArguments {
     principalCommitment: a.principal_commitment,
     repaymentCommitment: a.repayment_commitment,
     expiryHash: a.expiry_hash,
+    repaymentAssetPrefixBit: a.repayment_asset_prefix_bit,
+    repaymentAssetX: a.repayment_asset_x,
   }
 }
 
@@ -164,6 +184,15 @@ function expiryHashOf(salt: string, expiry: number): string {
   return createHash('sha256')
     .update(Buffer.concat([Buffer.from(salt, 'hex'), height]))
     .digest('hex')
+}
+
+function throws(compute: () => unknown): boolean {
+  try {
+    compute()
+    return false
+  } catch {
+    return true
+  }
 }
 
 function buildsWitness(witness: PrivateLendingWitness): boolean {
@@ -239,16 +268,26 @@ async function main(): Promise<void> {
     expected.expiryHash,
   )
   check(
-    'the liquidation witness takes the salt and the expiry',
+    'the liquidation witness takes the debt hash, the salt and the expiry',
     buildsWitness({
       branch: 'Liquidation',
+      debtHash: expected.repaymentCommitment,
       salt: asLender.expirySalt(),
       expiry: asLender.loanExpirationTime(),
     }),
   )
   check(
     'the liquidation witness refuses a short salt',
-    !buildsWitness({ branch: 'Liquidation', salt: asLender.expirySalt().slice(2), expiry: 1 }),
+    !buildsWitness({
+      branch: 'Liquidation',
+      debtHash: expected.repaymentCommitment,
+      salt: asLender.expirySalt().slice(2),
+      expiry: 1,
+    }),
+  )
+  check(
+    'the full repayment witness refuses a short debt hash',
+    !buildsWitness({ branch: 'FullRepayment', debtHash: expected.repaymentCommitment.slice(2) }),
   )
 
   // The blinder strings of the wasm are in LWK's format: LWK secrets built from them commit to
@@ -287,6 +326,11 @@ async function main(): Promise<void> {
     scripts.repaymentOutputScriptHash,
     fixture.repayment_output_script_hash,
   )
+  equal(
+    'installment output script hash',
+    scripts.installmentOutputScriptHash,
+    fixture.installment_output_script_hash,
+  )
   equal('pending offer script', hex(scripts.pendingOffer), fixture.pending_offer_script_pubkey)
   equal('active offer script', hex(scripts.activeOffer), fixture.active_offer_script_pubkey)
   equal('lender NFT lock script', hex(scripts.lenderNftLock), fixture.lender_nft_script_pubkey)
@@ -302,6 +346,14 @@ async function main(): Promise<void> {
     'tampered repayment commitment is rejected',
     !verifyOfferAddresses(tamperedScripts, creationTx),
   )
+  // The fixture's offer has one prefix bit of `A`; the other gives another program.
+  const otherBit = { ...expected, repaymentAssetPrefixBit: 1 - expected.repaymentAssetPrefixBit }
+  check(
+    'the prefix bit of the repayment asset enters the program',
+    !verifyOfferAddresses(privateOfferScripts(sources, otherBit, network), creationTx),
+  )
+
+  checkWitnessVectors(scripts, network)
 
   checkLenderTerms()
   checkTermsConversion()
@@ -312,6 +364,57 @@ async function main(): Promise<void> {
   checkPsetBuilderNoneBlinding()
 
   report('private lending parity: ok')
+}
+
+/**
+ * The web's witnesses of the branches it builds, run by LWK on the fixture's synthetic spends of the
+ * active offer: each must give the bytes the contracts' Rust serializes for the same values, so a
+ * wrong byte order of a 32-byte value cannot pass. A reversed debt hash or salt must fail to run.
+ */
+function checkWitnessVectors(scripts: PrivateOfferScripts, network: lwk.Network): void {
+  const { full_repayment: repayment, liquidation } = fixture.witness_vectors
+  const reversed = (value: string) => Buffer.from(value, 'hex').reverse().toString('hex')
+  const cases: [string, WitnessVector, (reverse: boolean) => PrivateLendingWitness][] = [
+    [
+      'full repayment',
+      repayment,
+      reverse => ({
+        branch: 'FullRepayment',
+        debtHash: reverse ? reversed(repayment.debt_hash) : repayment.debt_hash,
+      }),
+    ],
+    [
+      'liquidation',
+      liquidation,
+      reverse => ({
+        branch: 'Liquidation',
+        debtHash: liquidation.debt_hash,
+        salt: reverse ? reversed(liquidation.salt) : liquidation.salt,
+        expiry: liquidation.expiry,
+      }),
+    ],
+  ]
+  for (const [name, vector, witness] of cases) {
+    const run = (reverse: boolean) =>
+      scripts.program.run(
+        lwk.Transaction.fromString(vector.tx),
+        scripts.activeSpendInfo.controlBlock(scripts.program.cmr),
+        lwk.Transaction.fromString(vector.prevouts_tx).outputs,
+        vector.input_index,
+        buildPrivateLendingWitness(witness(reverse)),
+        network,
+        lwk.SimplicityLogLevel.None,
+      )
+    equal(
+      `${name} witness bytes are the Rust ones`,
+      Buffer.from(run(false).witnessBytes).toString('hex'),
+      vector.witness,
+    )
+    check(
+      `${name} with a reversed 32-byte value fails`,
+      throws(() => run(true)),
+    )
+  }
 }
 
 /**

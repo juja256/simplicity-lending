@@ -201,6 +201,7 @@ fn expired_pending_offer_can_be_accepted_then_liquidated_without_borrower_signat
         later_height,
     );
     let liquidation_witness = PrivateLendingWitnessBranch::Liquidation {
+        debt_hash: params.pinned.repayment.commitment_hash(),
         salt: params.expiry_salt,
         expiry: params.loan_expiration_time,
     }

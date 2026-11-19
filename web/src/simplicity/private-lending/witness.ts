@@ -9,16 +9,30 @@ import { toUint32 } from '@/utils/uint'
 export type PrivateLendingWitness =
   | { branch: 'OfferAcceptance' }
   | { branch: 'OfferCancellation' }
-  | { branch: 'FullRepayment' }
   /**
-   * The expiry salt (32 bytes, hex, `OpenedOffer.expirySalt()`) and the loan expiration: the
-   * covenant checks that their SHA-256 is its `EXPIRY_HASH`.
+   * The debt hash (32 bytes, hex) the loan's storage holds, `h(A, D)`: the covenant checks that
+   * the repayment at output 1 has it. Until the first installment it is the repayment commitment.
    */
-  | { branch: 'Liquidation'; salt: string; expiry: number }
+  | { branch: 'FullRepayment'; debtHash: string }
+  /**
+   * The debt hash the loan's storage holds, then the expiry salt (32 bytes, hex,
+   * `OpenedOffer.expirySalt()`) and the loan expiration: the covenant checks that their SHA-256 is
+   * its `EXPIRY_HASH`.
+   */
+  | { branch: 'Liquidation'; debtHash: string; salt: string; expiry: number }
 
 export type PrivateLendingBranch = PrivateLendingWitness['branch']
 
-const PATH_TYPE = 'Either<Either<(), ()>, Either<Either<(), ()>, (u256, u32)>>'
+// The installment's and the zero-debt close's debts are `(bool, u256)`: whether the low bit of the
+// commitment's prefix is set, and x.
+const PATH_TYPE =
+  'Either<Either<(), ()>, Either<Either<(bool, u256), Either<u256, ((bool, u256), u256)>>, ' +
+  '(u256, u256, u32)>>'
+
+function u256Literal(hex: string, what: string): string {
+  if (!isHexStringOfByteLength(hex, 32)) throw new Error(`The ${what} must be 32 bytes of hex`)
+  return `0x${normalizeHex(hex)}`
+}
 
 function pathExpression(witness: PrivateLendingWitness): string {
   switch (witness.branch) {
@@ -27,13 +41,12 @@ function pathExpression(witness: PrivateLendingWitness): string {
     case 'OfferCancellation':
       return 'Left(Right(()))'
     case 'FullRepayment':
-      return 'Right(Left(Right(())))'
+      return `Right(Left(Right(Left(${u256Literal(witness.debtHash, 'debt hash')}))))`
     case 'Liquidation': {
-      if (!isHexStringOfByteLength(witness.salt, 32)) {
-        throw new Error('The expiry salt must be 32 bytes of hex')
-      }
+      const debtHash = u256Literal(witness.debtHash, 'debt hash')
+      const salt = u256Literal(witness.salt, 'expiry salt')
       const expiry = toUint32(witness.expiry, 'expiry')
-      return `Right(Right((0x${normalizeHex(witness.salt)}, ${expiry})))`
+      return `Right(Right((${debtHash}, ${salt}, ${expiry})))`
     }
   }
 }
@@ -47,18 +60,18 @@ export const PRIVATE_LENDING_BRANCH_SPENDS_ACTIVE: Record<PrivateLendingBranch, 
 }
 
 // `PsetInputSpec.maxWeightToSatisfy` for the private lending covenant input, per branch: the
-// serialized script witness (witness data + program + CMR + control block) of a real broadcast
-// transaction, plus 10 %, rounded up.
+// serialized script witness (witness data + program + CMR + control block, with length prefixes)
+// plus 10 %, rounded up. These are regtest measurements, from the contract tests' transactions of
+// this program (`simplicity_spend` prints them); phase 5's task 11 replaces them with testnet ones.
 export const PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY: Record<PrivateLendingBranch, number> = {
-  // testnet acceptance baf52dd7…b55b2: 2 998 (1 + 2 861 + 32 + 97 bytes, with length prefixes)
+  // 2 998 (1 + 2 861 + 32 + 97 bytes)
   OfferAcceptance: 3298,
-  // testnet cancellation da907491…1d79: 2 881 (1 + 2 744 + 32 + 97 bytes, with length prefixes)
+  // 2 881 (1 + 2 744 + 32 + 97 bytes)
   OfferCancellation: 3170,
-  // testnet repayment 1d30ea1c…11aa: 3 028 (1 + 2 891 + 32 + 97 bytes, with length prefixes)
-  FullRepayment: 3331,
-  // a liquidation of the parity fixture's offer, with the expiry salt and the expiry in its
-  // witness, finalized offline: 3 213 (37 + 3 040 + 32 + 97 bytes, with length prefixes)
-  Liquidation: 3535,
+  // 2 971 (33 + 2 802 + 32 + 97 bytes)
+  FullRepayment: 3269,
+  // 2 816 (69 + 2 611 + 32 + 97 bytes)
+  Liquidation: 3098,
 }
 
 export function buildPrivateLendingWitness(

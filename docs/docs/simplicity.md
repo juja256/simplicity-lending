@@ -36,16 +36,22 @@ terms cannot change after it is published.
 
 **Parameters**, written `param::`, are fixed when the contract is created and become part of the
 resulting address. For a private lending offer they include the commitments of the collateral, the
-principal and the repayment, the expiry as a block height, the asset IDs of the two role tokens, and
-the scripts the principal and the repayment must be paid to. Changing any of them produces a
-different address, so creating an offer with different terms means creating a different contract.
-The commitments pin the confidential outputs without revealing their assets and amounts. [Protocol
-and privacy](./private-loans/protocol.md) describes them.
+principal and the repayment, the repayment's asset commitment, the salted hash of the expiry, the
+asset IDs of the two role tokens, and the scripts the principal, the repayment and the installments
+must be paid to. Changing any of them produces a different address, so creating an offer with
+different terms means creating a different contract. The commitments pin the confidential outputs
+without revealing their assets and amounts. [Protocol and privacy](./private-loans/protocol.md)
+describes them.
 
 **Witness data**, written `witness::`, is provided at the moment the output is spent. In the private
 lending contract it chooses which action the transaction is attempting: accepting the offer,
-cancelling it, repaying it in full, or liquidating it. A branch for partial repayment is reserved
-for a later version and always fails.
+cancelling it, paying an installment, repaying the rest in full, closing a loan that owes nothing,
+or liquidating it. It also carries what the action needs and the contract checks: the debt the
+loan's storage holds, the key that closes a debt of zero, and for a liquidation the expiry and its
+salt.
+
+An active loan's output also holds the debt in its storage, which is part of its address too. An
+installment moves the loan to the address of the debt it leaves.
 
 ## What a contract can see
 
@@ -55,8 +61,11 @@ confidential, the script guarding an output, and the block height the transactio
 Everything this documentation describes a contract as "checking" is one of those inspections.
 Requiring the borrower NFT on a given input means comparing that input's asset and amount with the
 values stored in the contract. Pinning a confidential output means comparing the hash of its asset
-and amount commitments with the hash stored as a parameter. An expiry means comparing the
-transaction's block height with the height stored as a parameter.
+and amount commitments with the hash stored as a parameter. An expiry means checking the height in
+the witness against the salted hash stored as a parameter, then comparing the transaction's block
+height with it. An installment computes with the commitments as curve points: it subtracts the
+installment's commitment from the debt, and adds the generator to the collateral's asset
+commitment, which re-blinds the collateral without changing its asset or amount.
 
 ## Several contracts in one transaction
 
