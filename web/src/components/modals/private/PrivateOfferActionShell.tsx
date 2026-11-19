@@ -56,14 +56,27 @@ export interface FreshOffer {
   offer: VerifiedOffer
   /** The indexer's candidate, read again (untrusted: the builder checks every outpoint). */
   candidate: PrivateCandidateDetails
-  /** The candidate's unspent UTXO of the type the action `requires`. */
+  /** The candidate's UTXO the action `requires`: its first unspent one of the type named. */
   utxo: PrivateUtxo
+}
+
+/**
+ * A UTXO an action needs that is not the first unspent one of a type, such as the loan output a
+ * close spent: `find` picks it from the candidate, and `missing` says why nothing is built without
+ * it.
+ */
+export interface RequiredUtxo {
+  find: (candidate: PrivateCandidateDetails) => PrivateUtxo | undefined
+  missing: string
 }
 
 interface PrivateOfferActionShellProps<TSummary> extends PrivateOfferActionModalProps {
   kind: Exclude<PrivateTxKind, 'private_create_offer'>
-  /** The UTXO the action spends: nothing is built unless the indexer lists it unspent now. */
-  requires: PrivateUtxoType
+  /**
+   * The UTXO the action spends: nothing is built unless the indexer lists it unspent now. Or the
+   * one a `RequiredUtxo` finds, which must be listed now.
+   */
+  requires: PrivateUtxoType | RequiredUtxo
   title: string
   chip: ReactNode
   label: string
@@ -170,11 +183,16 @@ export default function PrivateOfferActionShell<TSummary>({
         async () => {
           await syncInSession(getLendingKey, syncWallet)
           const candidate = await fetchPrivateCandidate(item.txid, PRIVATE_API_BASE_URL)
-          const utxo = unspentUtxo(candidate, requires)
+          const utxo =
+            typeof requires === 'string'
+              ? unspentUtxo(candidate, requires)
+              : requires.find(candidate)
           if (!utxo) {
             throw new Error(
-              `The indexer no longer lists this ${PRIVATE_UTXO_LABEL[requires]} as open: it ` +
-                'may have changed since the page loaded.',
+              typeof requires === 'string'
+                ? `The indexer no longer lists this ${PRIVATE_UTXO_LABEL[requires]} as open: it ` +
+                    'may have changed since the page loaded.'
+                : requires.missing,
             )
           }
           const deps = await getDeps()

@@ -3,7 +3,11 @@
 // and which outpoints to hand a builder, and the builder checks each one on chain. Free of the
 // app's config, so the Node e2e script derives its inputs with the same rules.
 import type { PrivateCandidateDetails, PrivateUtxo, PrivateUtxoType } from '@/api/indexer/private'
-import { CREATION_OUTPUT, PRINCIPAL_CLAIM_OUTPUT } from '@/simplicity/private-lending/layout'
+import {
+  CREATION_OUTPUT,
+  INSTALLMENT_OUTPUT,
+  PRINCIPAL_CLAIM_OUTPUT,
+} from '@/simplicity/private-lending/layout'
 
 /** The first UTXO of a type the indexer tracks for the offer that is still unspent. */
 export function unspentUtxo(
@@ -20,6 +24,29 @@ export function acceptanceTxid(candidate: PrivateCandidateDetails): string | und
 
 export function utxoOutpoint(utxo: PrivateUtxo): string {
   return `${utxo.txid}:${utxo.vout}`
+}
+
+/**
+ * The loan's output as the indexer saw it: the one unspent now, or the last one, which the close or
+ * the liquidation spent. An installment spends a loan output and creates the next, so the last is
+ * the `active_offer` that no transaction creating another one spent. Undefined unless exactly one
+ * is.
+ */
+export function latestLoanUtxo(candidate: PrivateCandidateDetails): PrivateUtxo | undefined {
+  const loans = candidate.utxos.filter(utxo => utxo.utxo_type === 'active_offer')
+  const successors = new Set(loans.map(utxo => utxo.txid))
+  const last = loans.filter(utxo => utxo.spent_txid === null || !successors.has(utxo.spent_txid))
+  return last.length === 1 ? last[0] : undefined
+}
+
+/**
+ * The last loan output of a repaid offer, spent by its close (the full repayment or the zero-debt
+ * close), as the indexer saw it: its `spent_txid` is the close. Undefined for an offer not repaid.
+ */
+export function closedLoanUtxo(candidate: PrivateCandidateDetails): PrivateUtxo | undefined {
+  if (candidate.status !== 'repaid') return undefined
+  const loan = latestLoanUtxo(candidate)
+  return loan?.spent_txid === null ? undefined : loan
 }
 
 /**
@@ -68,4 +95,20 @@ export function repaymentBorrowerNftOutpoint(
 ): string | undefined {
   const claim = principalClaimTxid(creationTxid, candidate)
   return claim === undefined ? undefined : `${claim}:${PRINCIPAL_CLAIM_OUTPUT.borrowerNft}`
+}
+
+/**
+ * The borrower NFT that the next installment, the full repayment or the zero-debt close of a loan
+ * spends: output 0 of its last installment (`installmentTxids`, read on chain), or before any,
+ * `repaymentBorrowerNftOutpoint`. The builders walk it back on chain to the principal claim.
+ */
+export function loanBorrowerNftOutpoint(
+  installmentTxids: readonly string[],
+  creationTxid: string,
+  candidate: PrivateCandidateDetails,
+): string | undefined {
+  const last = installmentTxids.at(-1)
+  return last === undefined
+    ? repaymentBorrowerNftOutpoint(creationTxid, candidate)
+    : `${last}:${INSTALLMENT_OUTPUT.borrowerNft}`
 }
