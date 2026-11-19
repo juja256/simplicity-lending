@@ -8,10 +8,14 @@ import { wasm } from '@/test/wasm'
 import type { LoanState } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from './deps'
+import { pinnedAuthCovenant } from './finalize'
+import { buildInstallmentClaim } from './flows/claimInstallments'
+import { buildFinalClaim, NothingToClaimError } from './flows/claimRepayment'
 import { buildPrivateInstallment } from './flows/installment'
+import { buildPrivateLiquidation, ExpiryNotReachedError } from './flows/liquidation'
 import { buildPrivateRepayment } from './flows/repayment'
 import { buildZeroDebtClose } from './flows/zeroDebtClose'
-import { loadLoan, principalClaimedBefore, PrincipalNotClaimedError } from './loan'
+import { loadLoan, type Loan, principalClaimedBefore, PrincipalNotClaimedError } from './loan'
 import { openAndVerifyOffer, type VerifiedOffer } from './verify'
 
 // The parity fixture's offer and its loan on regtest: the acceptance, then one installment, which
@@ -399,5 +403,254 @@ describe("the borrower's flows", () => {
     expect(refusal).toBeInstanceOf(PrincipalNotClaimedError)
     expect((refusal as PrincipalNotClaimedError).borrowerNftOutpoint).toBe(nft)
     expect(fetched).toEqual([installmentTxid])
+  })
+})
+
+describe("the lender's flows", () => {
+  const coin = (outpoint: string, asset: string, value: bigint) =>
+    ({
+      outpoint: () => new lwk.OutPoint(outpoint),
+      unblinded: () => lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(asset), value),
+    }) as unknown as WalletTxOut
+  const installment = `${installmentTxid}:2`
+  const lenderNftAtAcceptance = `${acceptanceTxid}:2`
+  // the lender's fee coin, in a transaction of its own, so that the builders find its prevout
+  const feeTx = standIn([`${'f0'.repeat(32)}:0`], [{ script: WALLET_SCRIPT, value: 2_000n }])
+  const feeCoins = [coin(`${txidOf(feeTx)}:0`, OTHER_ASSET, 2_000n)]
+
+  /** The fake chain's deps, with a wallet that hands out confidential regtest addresses. */
+  function lenderChain(offer: VerifiedOffer, ...extra: string[]) {
+    const chain = fakeChain(feeTx, ...extra)
+    const address = () =>
+      lwk.Address.parse(
+        wasm.confidentialAddress(WALLET_SCRIPT, offer.opened.lenderBlindingKey(), 'regtest'),
+        lwk.Network.regtestDefault(),
+      )
+    Object.assign(chain.deps, {
+      wollet: { maxWeightToSatisfy: () => 150 },
+      addresses: {
+        nextReceive: address,
+        nextChange: (_wollet: unknown, count: number) => Array.from({ length: count }, address),
+      },
+    })
+    return chain
+  }
+
+  async function lenderLoan() {
+    const offer = await openOffer('lender')
+    const loan = await loadLoan(fakeChain().deps, offer, keys.lender, fixture.loan.loan_outpoint)
+    return { offer, loan }
+  }
+
+  /** `state` with `sweep` replaced. */
+  function withSweep(state: LoanState, sweep: () => unknown): LoanState {
+    return new Proxy(state, {
+      get(target, property) {
+        if (property === 'sweep') return sweep
+        const value: unknown = Reflect.get(target, property)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+  }
+  const emptySweep = () => ({ outpoints: () => [], amount: 0n, free: () => {} })
+
+  /** A claim of the fixture's installment that returns the lender NFT at its output 0. */
+  async function installmentClaimTx(offer: VerifiedOffer): Promise<string> {
+    return standIn(
+      [lenderNftAtAcceptance, installment, `${'f1'.repeat(32)}:0`],
+      [
+        { script: WALLET_SCRIPT, asset: offer.opened.lenderNft(), value: 1n },
+        { script: WALLET_SCRIPT },
+      ],
+    )
+  }
+
+  /**
+   * A stand-in full repayment of the fixture's loan: it spends the loan output at input 1, and
+   * its output 1 carries `A` and exactly the debt at the repayment lock, which is all the sweep
+   * reads of it.
+   */
+  function fullRepaymentTx(offer: VerifiedOffer, deps: PrivateFlowDeps, loan: Loan): string {
+    const lock = pinnedAuthCovenant(deps, offer, 'repayment').script.toString()
+    const repayment =
+      offer.opened.pinned(wasm.PinnedRole.Repayment).assetCommitment +
+      loan.state.debtCommitment +
+      '00' +
+      pushLength(lock) +
+      lock
+    const tx = standIn(
+      [`${'f2'.repeat(32)}:0`, fixture.loan.loan_outpoint],
+      [{ script: BURN_SCRIPT, asset: offer.opened.borrowerNft(), value: 1n }, { script: lock }],
+    )
+    // output 1, explicit in the stand-in, becomes the confidential repayment
+    const explicit =
+      '01' + reversed(OTHER_ASSET) + '01' + u64be(1_000n) + '00' + pushLength(lock) + lock
+    return replaceOnce(tx, explicit, repayment)
+  }
+
+  it('claim an installment that opens, up to the build', async () => {
+    const { offer, loan } = await lenderLoan()
+    const { deps } = lenderChain(offer)
+    await expect(
+      buildInstallmentClaim(deps, offer, loan, {
+        installments: [installment],
+        lenderNftOutpoint: lenderNftAtAcceptance,
+        feeCoins,
+      }),
+    ).rejects.toThrow('the PSET build was reached')
+  })
+
+  it('refuse to claim what is not an unclaimed installment that opens', async () => {
+    const { offer, loan } = await lenderLoan()
+    const claim = await installmentClaimTx(offer)
+    const { deps } = lenderChain(offer, claim)
+    const claimWith = (installments: string[], lenderNftOutpoint = lenderNftAtAcceptance) =>
+      buildInstallmentClaim(deps, offer, loan, { installments, lenderNftOutpoint, feeCoins })
+    await expect(claimWith([])).rejects.toThrow('needs an installment')
+    await expect(claimWith([`${acceptanceTxid}:1`])).rejects.toThrow(
+      'is not an installment of this loan',
+    )
+    // claimed already, by the claim that holds the lender NFT now
+    await expect(claimWith([installment], `${txidOf(claim)}:0`)).rejects.toThrow(
+      `${installment} was claimed already, by ${txidOf(claim)}`,
+    )
+    // an installment whose range proof the lender cannot rewind
+    const unopened = { ...loan, state: withSweep(loan.state, emptySweep) }
+    await expect(
+      buildInstallmentClaim(deps, offer, unopened, {
+        installments: [installment],
+        lenderNftOutpoint: lenderNftAtAcceptance,
+        feeCoins,
+      }),
+    ).rejects.toThrow("does not open with this wallet's key")
+    // the borrower
+    const borrower = await openOffer('borrower')
+    await expect(
+      buildInstallmentClaim(deps, borrower, loan, {
+        installments: [installment],
+        lenderNftOutpoint: lenderNftAtAcceptance,
+        feeCoins,
+      }),
+    ).rejects.toThrow('Only the lender claims installments')
+  })
+
+  it('sweep an unclaimed installment with the repayment, up to the build', async () => {
+    const { offer, loan } = await lenderLoan()
+    const close = fullRepaymentTx(offer, fakeChain().deps, loan)
+    const claim = await installmentClaimTx(offer)
+    const { deps } = lenderChain(offer, close, claim)
+    const finalClaim = (unspentInstallments: string[], lenderNftOutpoint: string) =>
+      buildFinalClaim(deps, offer, loan, {
+        closeTxid: txidOf(close),
+        unspentInstallments,
+        lenderNftOutpoint,
+        feeCoins,
+      })
+    // the installment unclaimed, and so swept with the repayment
+    await expect(finalClaim([installment], lenderNftAtAcceptance)).rejects.toThrow(
+      'the PSET build was reached',
+    )
+    // the installment claimed: the repayment alone
+    await expect(finalClaim([], `${txidOf(claim)}:0`)).rejects.toThrow('the PSET build was reached')
+  })
+
+  // An indexer that omits an unspent installment would have it counted as claimed: the claim would
+  // balance without it, burn the lender NFT and strand it. The lender NFT's claims show which
+  // installments the lender took.
+  it('refuse a final claim whose unspent installments disagree with the claims', async () => {
+    const { offer, loan } = await lenderLoan()
+    const close = fullRepaymentTx(offer, fakeChain().deps, loan)
+    const claim = await installmentClaimTx(offer)
+    const { deps, fetched } = lenderChain(offer, close, claim)
+    const finalClaim = (unspentInstallments: string[], lenderNftOutpoint: string) =>
+      buildFinalClaim(deps, offer, loan, {
+        closeTxid: txidOf(close),
+        unspentInstallments,
+        lenderNftOutpoint,
+        feeCoins,
+      })
+    await expect(finalClaim([], lenderNftAtAcceptance)).rejects.toThrow(
+      `Installment ${installment} is neither listed as unspent nor claimed`,
+    )
+    await expect(finalClaim([installment], `${txidOf(claim)}:0`)).rejects.toThrow(
+      `${installment} is listed as unspent, but the lender's claim ${txidOf(claim)} spent it`,
+    )
+    // a lender NFT outpoint that is not on the NFT's way from the acceptance
+    await expect(finalClaim([installment], `${txidOf(close)}:0`)).rejects.toThrow(
+      `${txidOf(close)}:0 does not hold the lender NFT`,
+    )
+    expect(fetched).not.toContain(txidOf(feeTx))
+  })
+
+  it('refuse a final claim of a close that does not spend the loan', async () => {
+    const { offer, loan } = await lenderLoan()
+    const other = standIn(
+      [`${'f3'.repeat(32)}:0`, `${acceptanceTxid}:0`],
+      [{ script: BURN_SCRIPT }],
+    )
+    const { deps } = lenderChain(offer, other)
+    await expect(
+      buildFinalClaim(deps, offer, loan, {
+        closeTxid: txidOf(other),
+        unspentInstallments: [installment],
+        lenderNftOutpoint: lenderNftAtAcceptance,
+        feeCoins,
+      }),
+    ).rejects.toThrow('loan-mismatch')
+  })
+
+  // Decision 1: after a zero-debt close whose installments were all claimed, the sweep is empty.
+  it('refuse a final claim with nothing left to sweep, before building', async () => {
+    const { offer, loan } = await lenderLoan()
+    const close = standIn(
+      [`${'f4'.repeat(32)}:0`, fixture.loan.loan_outpoint],
+      [{ script: BURN_SCRIPT }],
+    )
+    const claim = await installmentClaimTx(offer)
+    const { deps, fetched } = lenderChain(offer, close, claim)
+    const refusal = await buildFinalClaim(
+      deps,
+      offer,
+      { ...loan, state: withSweep(loan.state, emptySweep) },
+      {
+        closeTxid: txidOf(close),
+        unspentInstallments: [],
+        lenderNftOutpoint: `${txidOf(claim)}:0`,
+        feeCoins,
+      },
+    ).catch((error: unknown) => error)
+    expect(refusal).toBeInstanceOf(NothingToClaimError)
+    expect((refusal as NothingToClaimError).code).toBe('nothing-to-claim')
+    // the close and the lender NFT's claim, but no output to spend
+    expect(fetched).toEqual([txidOf(close), txidOf(claim)])
+  })
+
+  it('liquidate with the debt the loan holds after its installment, up to the build', async () => {
+    const { offer, loan } = await lenderLoan()
+    const expiry = offer.opened.loanExpirationTime()
+    const liquidate = (deps: PrivateFlowDeps, unspentInstallments: string[], tipHeight: number) =>
+      buildPrivateLiquidation(deps, offer, loan, {
+        lenderNftOutpoint: lenderNftAtAcceptance,
+        unspentInstallments,
+        feeCoins,
+        collateralReceiver: lenderChain(offer).deps.addresses.nextReceive(
+          lenderChain(offer).deps.wollet,
+        ),
+        tipHeight,
+      })
+    // below the expiry: refused before anything is fetched
+    const early = lenderChain(offer)
+    await expect(liquidate(early.deps, [installment], expiry - 1)).rejects.toBeInstanceOf(
+      ExpiryNotReachedError,
+    )
+    expect(early.fetched).toEqual([])
+    // the unclaimed installment, which opens, is swept
+    await expect(liquidate(lenderChain(offer).deps, [installment], expiry)).rejects.toThrow(
+      'the PSET build was reached',
+    )
+    // an unspent installment left out would be stranded once the lender NFT burns
+    await expect(liquidate(lenderChain(offer).deps, [], expiry)).rejects.toThrow(
+      `Installment ${installment} is neither listed as unspent nor claimed`,
+    )
   })
 })

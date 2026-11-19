@@ -117,7 +117,8 @@ export interface Need {
 /**
  * The state records of the transactions that spend from the wallets, one per transaction. Most
  * stages broadcast one; `repay-partial` broadcasts two installments (`repay-partial-1`,
- * `repay-partial-2`), `cancel` its own creation (`cancel-create`), then the cancellation, and
+ * `repay-partial-2`) and, between them, the lender's claim of the first (`claim-installment-1`),
+ * `cancel` its own creation (`cancel-create`), then the cancellation, and
  * `liquidate` its creation (`liquidate-create`), the lender's acceptance (`liquidate-accept`), then
  * the liquidation. `scan` and `directory` broadcast nothing (they read
  * the indexer and write the directory, off-chain), so they never have a record.
@@ -127,6 +128,7 @@ export type Stage =
   | 'accept'
   | 'claim-principal'
   | 'repay-partial-1'
+  | 'claim-installment-1'
   | 'repay-partial-2'
   | 'repay'
   | 'claim-repayment'
@@ -164,6 +166,10 @@ export const STAGE_NEEDS: Record<Stage, Record<Wallet, Need>> = {
   'repay-partial-1': {
     borrower: { lbtc: FEE_BUDGET, test: 0n },
     lender: NONE,
+  },
+  'claim-installment-1': {
+    borrower: NONE,
+    lender: { lbtc: FEE_BUDGET, test: 0n },
   },
   'repay-partial-2': {
     borrower: { lbtc: FEE_BUDGET, test: 0n },
