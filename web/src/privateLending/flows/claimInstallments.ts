@@ -162,6 +162,46 @@ export async function lenderNftClaims(
   return claimed
 }
 
+/** The transaction that spends an output, as esplora reports it, or null while it is unspent. */
+export type SpentBy = (outpoint: string) => Promise<{ txid: string; confirmed: boolean } | null>
+
+/**
+ * Where the lender NFT of `loan` is now, `"<txid>:<vout>"`: walked forward from the acceptance's
+ * output 2 through the lender's claims of its installments, each of which spends it at input 0 and
+ * returns it at output 0. `spentBy` (esplora's outspends, untrusted) says which transaction spends
+ * each step; each spender is fetched and checked to return the NFT. Throws if one does not (the
+ * final claim and the liquidation burn it), or is not confirmed yet. The builders then walk the
+ * result back on chain to the acceptance (`lenderNftClaims`).
+ */
+export async function findLenderNft(
+  deps: Pick<PrivateFlowDeps, 'fetchTx'>,
+  offer: VerifiedOffer,
+  loan: Loan,
+  spentBy: SpentBy,
+): Promise<string> {
+  let at = `${loan.acceptanceTxid}:${ACCEPTANCE_OUTPUT.lenderNft}`
+  for (let step = 0; step <= MAX_INSTALLMENTS; step += 1) {
+    const spender = await spentBy(at)
+    if (spender === null) return at
+    const { txid } = parseOutpoint(`${spender.txid}:0`)
+    if (!spender.confirmed) {
+      throw new Error(
+        `The lender NFT at ${at} is spent by ${txid}, which waits for its confirmation`,
+      )
+    }
+    const tx = await deps.fetchTx(txid)
+    if (tx.txid().toString() !== txid) throw new Error(`Fetched another transaction than ${txid}`)
+    if (
+      spentAt(tx, CLAIM_INPUT.lenderNft) !== at ||
+      !holdsLenderNft(offer, tx.outputs[CLAIM_OUTPUT.lenderNft])
+    ) {
+      throw new Error(`${txid} spends the lender NFT at ${at} and does not return it`)
+    }
+    at = `${txid}:${CLAIM_OUTPUT.lenderNft}`
+  }
+  throw new Error(`The lender NFT went through more than ${MAX_INSTALLMENTS} claims`)
+}
+
 /**
  * Checks `unspent`, the installments the caller (from the indexer) lists as unspent, against the
  * lender NFT's claims: every installment of `loan` that no claim took must be listed, or the

@@ -11,9 +11,11 @@ import type {
   PrivateUtxoType,
 } from '@/api/indexer/private'
 import { NETWORK_CONFIG } from '@/constants/network-config'
-import { repaymentBorrowerNftOutpoint, unspentUtxo } from '@/privateLending/candidate'
+import { repaymentBorrowerNftOutpoint, unspentUtxo, utxoOutpoint } from '@/privateLending/candidate'
+import type { LoanFigures } from '@/privateLending/hooks/useLoan'
 import type { PrivateOfferItem, PrivateOfferTerms } from '@/privateLending/hooks/usePrivateOffers'
 import { proposalExpiryIsStale } from '@/privateLending/lenderTerms'
+import { installmentTermOpen } from '@/privateLending/repayPlan'
 import type {
   CreationTerm,
   PrivateTxKind,
@@ -100,19 +102,40 @@ export const PRIVATE_UTXO_LABEL: Record<PrivateUtxoType, string> = {
   installment: 'installment',
 }
 
-/** The status an offer shows: the indexer's status, or `claimed` for a claimed repayment. */
+/** The status an offer shows: the indexer's status, or `claimed` once the final claim ran. */
 export type OfferStatus = PrivateOfferStatus | 'claimed'
 
 /**
- * The status to show for a candidate. A repaid offer whose every repayment UTXO is spent shows
- * as claimed.
+ * The status to show for a candidate. A repaid offer shows as claimed once nothing of it is left
+ * for the lender: no repayment and no installment unspent. The full repayment leaves a repayment
+ * UTXO, and the zero-debt close none, so after the close only the installments count.
  */
 export function displayStatus(candidate: PrivateCandidateDetails): OfferStatus {
   if (candidate.status !== 'repaid') return candidate.status
-  const repayments = candidate.utxos.filter(utxo => utxo.utxo_type === 'repayment')
-  return repayments.length > 0 && repayments.every(utxo => utxo.spent_txid !== null)
-    ? 'claimed'
-    : 'repaid'
+  const unclaimed = candidate.utxos.some(
+    utxo =>
+      (utxo.utxo_type === 'repayment' || utxo.utxo_type === 'installment') &&
+      utxo.spent_txid === null,
+  )
+  return unclaimed ? 'repaid' : 'claimed'
+}
+
+/**
+ * The installments the lender can claim now, from the indexer's view (untrusted: the claim's
+ * builder checks each one): those listed unspent whose amount `loan` opened, with that amount.
+ */
+export function claimableInstallments(
+  candidate: PrivateCandidateDetails,
+  loan: LoanFigures | undefined,
+): { outpoint: string; amount: bigint }[] {
+  if (loan === undefined) return []
+  const amounts = new Map(loan.installments.map(({ outpoint, amount }) => [outpoint, amount]))
+  return candidate.utxos
+    .filter(utxo => utxo.utxo_type === 'installment' && utxo.spent_txid === null)
+    .flatMap(utxo => {
+      const amount = amounts.get(utxoOutpoint(utxo))
+      return amount === undefined ? [] : [{ outpoint: utxoOutpoint(utxo), amount }]
+    })
 }
 
 /** Whether the tip is known and past the loan expiry. */
@@ -178,7 +201,9 @@ export function offerTxState<K extends PrivateTxKind>(
   const records = privateTxs
     .filter(
       (record): record is PrivateTxRecord & { kind: K } =>
-        record.offerTxid === offerTxid && (kinds as readonly PrivateTxKind[]).includes(record.kind),
+        record.offerTxid === offerTxid &&
+        record.discardedAt === undefined &&
+        (kinds as readonly PrivateTxKind[]).includes(record.kind),
     )
     .sort((a, b) => b.createdAt - a.createdAt)
   const unsent = records.find(record => record.broadcastStatus === 'built')
@@ -308,25 +333,35 @@ export function offerActionState<A extends string, K extends PrivateTxKind>(
   }
 }
 
-export type LenderAction = 'accept' | 'claim' | 'liquidate'
+export type LenderAction = 'accept' | 'claimInstallments' | 'claimRepayment' | 'liquidate'
 
 /**
- * The names of the lender's actions in the console, where "Review" opens the acceptance. Each page
- * tracks only the transactions of the actions it shows (`OfferActions.actionOfKind`).
+ * The names of the lender's actions in the console, where "Review" opens the acceptance, "Claim"
+ * claims installments and "Claim repayment" is the final claim. Each page tracks only the
+ * transactions of the actions it shows (`OfferActions.actionOfKind`).
  */
 export const LENDER_ACTION_LABELS: Record<LenderAction, string> = {
   accept: 'Review',
-  claim: 'Claim',
+  claimInstallments: 'Claim',
+  claimRepayment: 'Claim repayment',
   liquidate: 'Liquidate',
 }
 
 /**
- * What the lender can do with an offer, from the indexer's view of it (untrusted: the action's
- * builder checks every outpoint): accept a pending offer while `canStillAccept` (nothing while the
- * tip is unknown), claim an unspent repayment, liquidate an active loan once the tip is past its
- * expiry.
+ * What the lender can do with an offer, from the indexer's view of it and `loan`, its figures once
+ * read (untrusted: the action's builder checks every outpoint). One action at a time:
+ * - accept a pending offer while `canStillAccept` (nothing while the tip is unknown);
+ * - liquidate an active loan once the tip is past its expiry, which also sweeps the installments
+ *   that open;
+ * - before that, claim the installments listed unspent that open (`claimableInstallments`);
+ * - once the loan closed, by the full repayment or the zero-debt close, claim the repayment: the
+ *   final claim, which sweeps every unclaimed installment, until nothing is left (`claimed`).
  */
-export function lenderView(item: OpenedOfferItem, tipHeight: number): OfferView<LenderAction> {
+export function lenderView(
+  item: OpenedOfferItem,
+  tipHeight: number,
+  loan?: LoanFigures,
+): OfferView<LenderAction> {
   const { candidate, terms } = item
   const expired = isPastExpiry(terms, tipHeight)
   switch (candidate.status) {
@@ -335,12 +370,14 @@ export function lenderView(item: OpenedOfferItem, tipHeight: number): OfferView<
       return canStillAccept(terms, tipHeight) ? { action: 'accept' } : { note: TERM_PASSED_NOTE }
     case 'active':
       if (unspentUtxo(candidate, 'active_offer') === undefined) return {}
-      return expired
-        ? { action: 'liquidate', note: 'The loan has expired unpaid.' }
-        : { note: `Liquidation opens after block #${terms.loanExpirationTime}.` }
+      if (expired) return { action: 'liquidate', note: 'The loan has expired unpaid.' }
+      if (claimableInstallments(candidate, loan).length > 0) {
+        return { action: 'claimInstallments', note: 'The borrower paid an installment.' }
+      }
+      return { note: `Liquidation opens after block #${terms.loanExpirationTime}.` }
     case 'repaid':
-      return unspentUtxo(candidate, 'repayment') !== undefined
-        ? { action: 'claim', note: 'The borrower repaid the loan.' }
+      return displayStatus(candidate) === 'repaid'
+        ? { action: 'claimRepayment', note: 'The borrower repaid the loan.' }
         : {}
     default:
       return {}
@@ -403,14 +440,20 @@ export function checkCreationSendable(term: CreationTerm | undefined, tipHeight:
   }
 }
 
-export type BorrowerAction = 'cancel' | 'claimPrincipal' | 'repay'
+export type BorrowerAction = 'cancel' | 'claimPrincipal' | 'repay' | 'closeZeroDebt'
 
-type BorrowerTxKind = 'private_cancel_offer' | 'private_claim_principal' | 'private_repay_offer'
+type BorrowerTxKind =
+  | 'private_cancel_offer'
+  | 'private_claim_principal'
+  | 'private_installment'
+  | 'private_repay_offer'
+  | 'private_zero_debt_close'
 
 /**
  * The borrower's actions on one loan, each named with what it moves: "Cancel", "Receive 20,000
- * TEST", "Repay 3,021.40 TEST". `amounts` are the loan's principal and repayment as the page writes
- * them, or null when its terms are not open (it then gets no action anyway).
+ * TEST", "Repay 3,021.40 TEST", "Close the loan". `amounts` are the loan's principal and what it
+ * still owes as the page writes them, or null when its terms are not open (it then gets no action
+ * anyway). An installment and the full repayment share the repay form, and so its action.
  */
 export function borrowerActions(
   amounts: { receive: string; repay: string } | null,
@@ -420,25 +463,48 @@ export function borrowerActions(
       cancel: 'Cancel',
       claimPrincipal: amounts ? `Receive ${amounts.receive}` : 'Receive',
       repay: amounts ? `Repay ${amounts.repay}` : 'Repay',
+      closeZeroDebt: 'Close the loan',
     },
     danger: 'cancel',
     actionOfKind: {
       private_cancel_offer: 'cancel',
       private_claim_principal: 'claimPrincipal',
+      private_installment: 'repay',
       private_repay_offer: 'repay',
+      private_zero_debt_close: 'closeZeroDebt',
     },
   }
 }
 
 /**
- * What the borrower can do with its loan, from the indexer's view of it (untrusted: the action's
- * builder checks every outpoint): cancel a pending proposal, receive the principal while it is
- * unspent, then repay an active loan. Repaying burns the borrower NFT, the only key to an
- * unclaimed principal, so it is offered only on positive evidence that the principal was claimed
- * (`repaymentBorrowerNftOutpoint`): a candidate that omits the principal gets no Repay. The notes
- * are in the borrower's words: no "offer", "NFT" or "lending key".
+ * Whether the borrower's saved transaction may still be broadcast at `tipHeight`: an installment
+ * only while `installmentTermOpen`, as the repay form pays one (`unknown` while the tip is not
+ * known); the other kinds always, the full repayment past the term too.
  */
-export function borrowerView(item: OpenedOfferItem, tipHeight: number): OfferView<BorrowerAction> {
+export function borrowerSendable(
+  tipHeight: number,
+): (record: PrivateTxRecord, item: OpenedOfferItem) => Sendable {
+  return (record, item) => {
+    if (record.kind !== 'private_installment') return 'yes'
+    if (tipHeight === 0) return 'unknown'
+    return installmentTermOpen(tipHeight, item.terms.loanExpirationTime) ? 'yes' : 'expired'
+  }
+}
+
+/**
+ * What the borrower can do with its loan, from the indexer's view of it and `loan`, its figures
+ * once read (untrusted: the action's builder checks every outpoint): cancel a pending proposal,
+ * receive the principal while it is unspent, then repay an active loan, in installments or in
+ * full, or close it once its installments paid the whole debt. Repaying burns the borrower NFT,
+ * the only key to an unclaimed principal, so it is offered only on positive evidence that the
+ * principal was claimed (`repaymentBorrowerNftOutpoint`): a candidate that omits the principal gets
+ * no Repay. The notes are in the borrower's words: no "offer", "NFT" or "lending key".
+ */
+export function borrowerView(
+  item: OpenedOfferItem,
+  tipHeight: number,
+  loan?: LoanFigures,
+): OfferView<BorrowerAction> {
   const { candidate, terms } = item
   const principalUnclaimed = unspentUtxo(candidate, 'principal') !== undefined
   switch (candidate.status) {
@@ -457,6 +523,19 @@ export function borrowerView(item: OpenedOfferItem, tipHeight: number): OfferVie
       if (repaymentBorrowerNftOutpoint(item.txid, candidate) === undefined) {
         return {
           note: 'The indexer lists no receipt of your principal, so the loan cannot be repaid yet.',
+        }
+      }
+      if (loan !== undefined && loan.remaining === undefined) {
+        return {
+          note:
+            'A payment on this loan does not open with your key, so what it still owes is ' +
+            'unknown and the app cannot repay it.',
+        }
+      }
+      if (loan?.remaining === 0n) {
+        return {
+          action: 'closeZeroDebt',
+          note: 'Your installments paid the debt: close the loan to get your collateral back.',
         }
       }
       return isPastExpiry(terms, tipHeight)
@@ -483,20 +562,28 @@ export function borrowerView(item: OpenedOfferItem, tipHeight: number): OfferVie
  * - `waiting` for the lender, while the proposal can still be accepted (or the tip is unknown);
  * - `notAccepted` once its term passed unaccepted;
  * - `accepted`, the principal waiting to be received;
- * - `active`, with the blocks left to its expiry (negative past it, null while the tip is unknown);
+ * - `active`, with the blocks left to its expiry (negative past it, null while the tip is unknown),
+ *   and what its installments repaid once the loan is read;
  * - `repaid`, `cancelled`, `collateralTaken`: how it ended.
  */
 export type BorrowerStatus =
   | { kind: 'waiting' }
   | { kind: 'notAccepted' }
   | { kind: 'accepted' }
-  | { kind: 'active'; blocksLeft: number | null }
+  | { kind: 'active'; blocksLeft: number | null; paid?: bigint }
   | { kind: 'repaid' }
   | { kind: 'cancelled' }
   | { kind: 'collateralTaken' }
 
-/** The status of an opened loan, from the indexer's view of it (untrusted, for display). */
-export function borrowerStatus(item: OpenedOfferItem, tipHeight: number): BorrowerStatus {
+/**
+ * The status of an opened loan, from the indexer's view of it and `loan`, its figures once read
+ * (untrusted, for display).
+ */
+export function borrowerStatus(
+  item: OpenedOfferItem,
+  tipHeight: number,
+  loan?: LoanFigures,
+): BorrowerStatus {
   const { candidate, terms } = item
   switch (displayStatus(candidate)) {
     case 'pending':
@@ -508,6 +595,7 @@ export function borrowerStatus(item: OpenedOfferItem, tipHeight: number): Borrow
       return {
         kind: 'active',
         blocksLeft: tipHeight === 0 ? null : terms.loanExpirationTime - tipHeight,
+        ...(loan === undefined ? {} : { paid: loan.paid }),
       }
     case 'repaid':
     case 'claimed':

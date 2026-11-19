@@ -11,6 +11,7 @@ import {
 } from '@/privateLending/hooks/usePrivateTransaction'
 import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
 import { usePendingTransactions } from '@/providers/pendingTransactions/usePendingTransactions'
+import { ErrorHandler } from '@/utils/errorHandler'
 
 export interface PrivateTxShellProps {
   isOpen: boolean
@@ -78,7 +79,8 @@ export default function PrivateTxShell({
   children,
 }: PrivateTxShellProps) {
   const { retryBroadcast } = usePrivateTransaction()
-  const { removePrivateTx } = usePendingTransactions()
+  const { discardPrivateTx } = usePendingTransactions()
+  const [discardError, setDiscardError] = useState<string | null>(null)
 
   const [unsent, setUnsent] = useState<Unsent | null>(() =>
     unsentTx ? { txid: unsentTx.txid, message: unsentTx.errorMessage ?? null } : null,
@@ -159,12 +161,15 @@ export default function PrivateTxShell({
               variant='ghost'
               size='sm'
               onPress={() => {
-                void removePrivateTx(unsent.txid)
-                close()
+                setDiscardError(null)
+                discardPrivateTx(unsent.txid).then(close, (error: unknown) =>
+                  setDiscardError(`It was not discarded: ${ErrorHandler.describe(error)}`),
+                )
               }}
             >
               Discard
             </UiButton>
+            {discardError && <p>{discardError}</p>}
           </Notice>
         ) : (
           notice

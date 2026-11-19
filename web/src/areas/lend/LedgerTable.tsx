@@ -55,7 +55,7 @@ interface ActionCellProps<A extends string> {
  */
 export function ActionCell<A extends string>({ state, isDisabled, onOpen }: ActionCellProps<A>) {
   const { note, button } = state
-  const { removePrivateTx } = usePendingTransactions()
+  const { discardPrivateTx } = usePendingTransactions()
   return (
     <td className='px-3 py-2.5 text-right align-middle'>
       <div className='flex flex-col items-end gap-1'>
@@ -68,7 +68,9 @@ export function ActionCell<A extends string>({ state, isDisabled, onOpen }: Acti
             onPress={() =>
               button.kind === 'open'
                 ? onOpen(button.action, button.item, button.unsentTx)
-                : void removePrivateTx(button.record.txid)
+                : discardPrivateTx(button.record.txid).catch((error: unknown) =>
+                    console.warn('[LedgerTable] Could not discard the transaction', error),
+                  )
             }
           >
             {button.label}

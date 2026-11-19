@@ -9,7 +9,7 @@ import type { LoanState } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from './deps'
 import { pinnedAuthCovenant } from './finalize'
-import { buildInstallmentClaim } from './flows/claimInstallments'
+import { buildInstallmentClaim, findLenderNft } from './flows/claimInstallments'
 import { buildFinalClaim, NothingToClaimError } from './flows/claimRepayment'
 import { buildPrivateInstallment } from './flows/installment'
 import { buildPrivateLiquidation, ExpiryNotReachedError } from './flows/liquidation'
@@ -487,6 +487,49 @@ describe("the lender's flows", () => {
       '01' + reversed(OTHER_ASSET) + '01' + u64be(1_000n) + '00' + pushLength(lock) + lock
     return replaceOnce(tx, explicit, repayment)
   }
+
+  // Decision 1 of task 10: after a claim, the lender NFT is at the claim's output 0, not where the
+  // acceptance put it.
+  it('find the lender NFT at the acceptance, then at the claim that took it', async () => {
+    const { offer, loan } = await lenderLoan()
+    const claim = await installmentClaimTx(offer)
+    const { deps } = lenderChain(offer, claim)
+    const spends = (entries: [string, { txid: string; confirmed: boolean }][]) => {
+      const spent = new Map(entries)
+      return async (outpoint: string) => spent.get(outpoint) ?? null
+    }
+    await expect(findLenderNft(deps, offer, loan, spends([]))).resolves.toBe(lenderNftAtAcceptance)
+    const claimed = spends([[lenderNftAtAcceptance, { txid: txidOf(claim), confirmed: true }]])
+    await expect(findLenderNft(deps, offer, loan, claimed)).resolves.toBe(`${txidOf(claim)}:0`)
+    // the builders take it from there: the claim that holds it now took the installment
+    await expect(
+      buildInstallmentClaim(deps, offer, loan, {
+        installments: [installment],
+        lenderNftOutpoint: await findLenderNft(deps, offer, loan, claimed),
+        feeCoins,
+      }),
+    ).rejects.toThrow(`${installment} was claimed already, by ${txidOf(claim)}`)
+  })
+
+  it('refuse a lender NFT that a transaction burned, or a claim not confirmed yet', async () => {
+    const { offer, loan } = await lenderLoan()
+    const claim = await installmentClaimTx(offer)
+    const burn = standIn(
+      [lenderNftAtAcceptance, installment],
+      [{ script: BURN_SCRIPT, asset: offer.opened.lenderNft(), value: 1n }],
+    )
+    const { deps } = lenderChain(offer, claim, burn)
+    const spentBy =
+      (txid: string, confirmed = true) =>
+      async (outpoint: string) =>
+        outpoint === lenderNftAtAcceptance ? { txid, confirmed } : null
+    await expect(findLenderNft(deps, offer, loan, spentBy(txidOf(burn)))).rejects.toThrow(
+      `${txidOf(burn)} spends the lender NFT at ${lenderNftAtAcceptance} and does not return it`,
+    )
+    await expect(findLenderNft(deps, offer, loan, spentBy(txidOf(claim), false))).rejects.toThrow(
+      'waits for its confirmation',
+    )
+  })
 
   it('claim an installment that opens, up to the build', async () => {
     const { offer, loan } = await lenderLoan()

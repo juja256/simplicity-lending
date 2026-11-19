@@ -5,7 +5,10 @@ export type PrivateTxKind =
   | 'private_accept_offer'
   | 'private_cancel_offer'
   | 'private_claim_principal'
+  | 'private_installment'
   | 'private_repay_offer'
+  | 'private_zero_debt_close'
+  | 'private_claim_installments'
   | 'private_claim_repayment'
   | 'private_liquidate_offer'
 
@@ -39,6 +42,12 @@ export interface PrivateTxRecord {
   errorMessage?: string
   /** A creation's term; absent for other kinds, and for a creation saved before it was kept. */
   creationTerm?: CreationTerm
+  /**
+   * When the borrower discarded this installment. The record stays, out of `privateTxs`, as the
+   * discard's trace: the next installment of its loan must not start from its first wallet input
+   * (`discardedInstallmentInputs`).
+   */
+  discardedAt?: number
 }
 
 export interface SavePrivateTxInput {
@@ -52,6 +61,8 @@ export interface SavePrivateTxInput {
 export interface PendingTransactionsContextValue {
   /** Private lending transactions of the connected wallet, saved before their broadcast. */
   privateTxs: PrivateTxRecord[]
+  /** The installments the wallet discarded, kept as their discard's trace (`discardedAt`). */
+  discardedTxs: PrivateTxRecord[]
   /**
    * Stores a finalized private transaction (status `built`) for the connected wallet. Rejects if
    * it could not be persisted, so the caller must not broadcast it.
@@ -59,6 +70,12 @@ export interface PendingTransactionsContextValue {
   savePrivateTx: (input: SavePrivateTxInput) => Promise<void>
   /** Updates a private transaction; a failure to persist the update is only logged. */
   updatePrivateTx: (txid: string, patch: Partial<PrivateTxRecord>) => Promise<void>
-  /** Forgets a private transaction, for example one the user gave up on. */
+  /** Forgets a private transaction, for example a finalized one. */
   removePrivateTx: (txid: string) => Promise<void>
+  /**
+   * Drops a saved transaction the user gave up on. An installment is kept as the discard's trace
+   * (`keepsDiscardTrace`), and the call rejects if that trace could not be persisted: the record
+   * then stays as it was.
+   */
+  discardPrivateTx: (txid: string) => Promise<void>
 }

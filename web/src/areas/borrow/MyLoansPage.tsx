@@ -9,6 +9,7 @@ import ArrowSquareOutIcon from '@/components/icons/ArrowSquareOutIcon'
 import KeyFingerprint from '@/components/KeyFingerprint'
 import CancelPrivateOfferModal from '@/components/modals/private/CancelPrivateOfferModal'
 import ClaimPrincipalModal from '@/components/modals/private/ClaimPrincipalModal'
+import CloseZeroDebtModal from '@/components/modals/private/CloseZeroDebtModal'
 import CreatePrivateOfferModal from '@/components/modals/private/CreatePrivateOfferModal'
 import RepayPrivateOfferModal from '@/components/modals/private/RepayPrivateOfferModal'
 import Notice from '@/components/Notice'
@@ -18,10 +19,12 @@ import { UiButton } from '@/components/ui/UiButton'
 import { RoutePath } from '@/constants/routes'
 import { useKeyedModal } from '@/hooks/useKeyedModal'
 import { useDirectory } from '@/privateLending/hooks/useDirectory'
+import { type LoanFigures, useLoans } from '@/privateLending/hooks/useLoan'
 import { type PrivateOfferItem, usePrivateOffers } from '@/privateLending/hooks/usePrivateOffers'
 import {
   type BorrowerAction,
   borrowerActions,
+  borrowerSendable,
   type BorrowerStatus,
   borrowerStatus,
   borrowerView,
@@ -80,8 +83,15 @@ function toneOf(status: BorrowerStatus): Tone {
   }
 }
 
-/** A status in the borrower's words: "Waiting for Acme", "Active, due in 12 days". */
-function statusWords(status: BorrowerStatus, lenderName: string | undefined): ReactNode {
+/**
+ * A status in the borrower's words: "Waiting for Acme", "Active, due in 12 days", "Active, 300 of
+ * 1,100 TEST repaid, due in 12 days" once the loan is read. `repayment` is the loan's repayment.
+ */
+function statusWords(
+  status: BorrowerStatus,
+  lenderName: string | undefined,
+  repayment: bigint | undefined,
+): ReactNode {
   switch (status.kind) {
     case 'waiting':
       return lenderName ? (
@@ -95,8 +105,15 @@ function statusWords(status: BorrowerStatus, lenderName: string | undefined): Re
       return 'Not accepted in time'
     case 'accepted':
       return 'Accepted'
-    case 'active':
-      return status.blocksLeft === null ? 'Active' : `Active, ${dueText(status.blocksLeft)}`
+    case 'active': {
+      const parts = ['Active']
+      if (status.paid !== undefined && repayment !== undefined) {
+        const paid = amountText(status.paid, PRINCIPAL.decimals)
+        parts.push(`${paid} of ${coins(repayment, PRINCIPAL)} repaid`)
+      }
+      if (status.blocksLeft !== null) parts.push(dueText(status.blocksLeft))
+      return parts.join(', ')
+    }
     case 'repaid':
       return 'Repaid'
     case 'cancelled':
@@ -165,6 +182,8 @@ interface LoanRowProps {
   item: PrivateOfferItem
   lenderName: string | undefined
   tipHeight: number
+  /** The loan's figures once read on chain (`useLoan`). */
+  loan: LoanFigures | undefined
   state: OfferActionState<BorrowerAction>
   onOpen: (action: BorrowerAction, item: OpenedOfferItem, unsentTx?: PrivateTxRecord) => void
 }
@@ -173,11 +192,11 @@ interface LoanRowProps {
  * One loan: its lender by name and key, what it lends against what, its status, and the one
  * action that applies now (`offerActionState`) with the note why or what it waits for.
  */
-function LoanRow({ item, lenderName, tipHeight, state, onOpen }: LoanRowProps) {
-  const { removePrivateTx } = usePendingTransactions()
+function LoanRow({ item, lenderName, tipHeight, loan, state, onOpen }: LoanRowProps) {
+  const { discardPrivateTx } = usePendingTransactions()
   const lender = counterpartyOf(item)
   const terms = item.terms !== null && usesConfiguredAssets(item.terms) ? item.terms : null
-  const status = isOpenedOffer(item) ? borrowerStatus(item, tipHeight) : null
+  const status = isOpenedOffer(item) ? borrowerStatus(item, tipHeight, loan) : null
   const { button, note, isProcessing } = state
 
   return (
@@ -196,7 +215,7 @@ function LoanRow({ item, lenderName, tipHeight, state, onOpen }: LoanRowProps) {
         </div>
         {status !== null && (
           <StatusLine tone={toneOf(status)} isProcessing={isProcessing}>
-            {statusWords(status, lenderName)}
+            {statusWords(status, lenderName, terms?.repaymentAmount)}
           </StatusLine>
         )}
       </div>
@@ -217,7 +236,9 @@ function LoanRow({ item, lenderName, tipHeight, state, onOpen }: LoanRowProps) {
               onPress={() =>
                 button.kind === 'open'
                   ? onOpen(button.action, button.item, button.unsentTx)
-                  : void removePrivateTx(button.record.txid)
+                  : discardPrivateTx(button.record.txid).catch((error: unknown) =>
+                      console.warn('[MyLoans] Could not discard the transaction', error),
+                    )
               }
             >
               <span className='min-w-0 truncate'>{button.label}</span>
@@ -256,7 +277,7 @@ function NewProposalRow({
   tipHeight: number
   onBroadcastAgain: () => void
 }) {
-  const { removePrivateTx } = usePendingTransactions()
+  const { discardPrivateTx } = usePendingTransactions()
   const { record } = txState
   const isUnsent = txState.state === 'unsent'
   const isConfirmed = record.confirmationStatus !== 'processing'
@@ -277,7 +298,14 @@ function NewProposalRow({
           </UiButton>
         )}
         {isUnsent && sendable === 'expired' && (
-          <UiButton variant='secondary' onPress={() => void removePrivateTx(record.txid)}>
+          <UiButton
+            variant='secondary'
+            onPress={() =>
+              discardPrivateTx(record.txid).catch((error: unknown) =>
+                console.warn('[MyLoans] Could not discard the proposal', error),
+              )
+            }
+          >
             Discard
           </UiButton>
         )}
@@ -308,8 +336,9 @@ type ModalRequest =
 
 /**
  * The borrower's loans: one row per proposal it made, found by scanning, with its lender, its
- * figures, its status and the one action that applies now (cancel, receive the principal, repay),
- * or "Broadcast again" for a transaction this browser signed but did not send.
+ * figures, its status and the one action that applies now (cancel, receive the principal, repay in
+ * installments or in full, close a loan its installments paid), or "Broadcast again" for a
+ * transaction this browser signed but did not send.
  */
 export default function MyLoansPage() {
   const offers = usePrivateOffers()
@@ -324,6 +353,7 @@ export default function MyLoansPage() {
   )
   const lenderName = (item: PrivateOfferItem) =>
     item.terms ? lookup(item.terms.lenderPublicKey)?.display_name : undefined
+  const loans = useLoans(useMemo(() => items.filter(isOpenedOffer), [items]))
 
   // Creations from this browser until the scan lists them (their own txid is the offer's), shown
   // whatever state the scan is in: an unsent one must stay reachable.
@@ -364,6 +394,8 @@ export default function MyLoansPage() {
         return <ClaimPrincipalModal key={key} {...props} />
       case 'repay':
         return <RepayPrivateOfferModal key={key} {...props} />
+      case 'closeZeroDebt':
+        return <CloseZeroDebtModal key={key} {...props} />
     }
   }
 
@@ -402,8 +434,13 @@ export default function MyLoansPage() {
       <ul className='flex flex-col'>
         {items.map(item => {
           const terms = item.terms
+          const loan = loans.get(item.txid)?.figures
+          // Repay names what the loan still owes, the repayment until the loan is read.
+          const owed = loan?.remaining ?? terms?.repaymentAmount
           const actions = borrowerActions(
-            terms && loanAmounts(terms.principalAmount, terms.repaymentAmount, PRINCIPAL),
+            terms && owed !== undefined
+              ? loanAmounts(terms.principalAmount, owed, PRINCIPAL)
+              : null,
           )
           return (
             <LoanRow
@@ -411,8 +448,13 @@ export default function MyLoansPage() {
               item={item}
               lenderName={lenderName(item)}
               tipHeight={tipHeight}
-              state={offerActionState(privateTxs, item, actions, opened =>
-                borrowerView(opened, tipHeight),
+              loan={loan}
+              state={offerActionState(
+                privateTxs,
+                item,
+                actions,
+                opened => borrowerView(opened, tipHeight, loan),
+                borrowerSendable(tipHeight),
               )}
               onOpen={(action, opened, unsentTx) =>
                 open({ kind: 'action', action, item: opened, unsentTx })
