@@ -1,5 +1,7 @@
 use simplex::signer::Signer;
-use simplex::transaction::PartialOutput;
+use simplex::simplicityhl::elements::confidential::ValueBlindingFactor;
+use simplex::simplicityhl::elements::{LockTime, Script, Sequence};
+use simplex::transaction::{PartialInput, PartialOutput};
 
 use lending_contracts::programs::private_lending::{
     PrivateLendingOffer, PrivateLendingWitnessBranch,
@@ -9,12 +11,14 @@ use lending_contracts::programs::script_auth::{ScriptAuth, ScriptAuthWitnessPara
 use lending_contracts::utils::confidential::{
     ConfidentialTransaction, PinnedOutput, PinnedOutputExt,
 };
-use private_lending_core::DebtOpening;
+use private_lending_core::{DebtOpening, debt_hash};
 
+use super::offer_liquidation_success_flows::{build_liquidation_at, set_liquidation_witness};
 use super::setup::{
-    Loan, PrivateOfferSetup, accept_private_offer, add_lender_principal, assert_program_rejects,
-    broadcast, build_full_repayment_with, default_offer_parameters, find_explicit_utxo,
-    find_pinned_utxo, fund_lender, setup_pending_private_offer,
+    Loan, PrivateOfferSetup, accept_private_offer, accepted_loan, add_lender_principal,
+    assert_program_rejects, broadcast, build_full_repayment_with, default_offer_parameters,
+    find_explicit_utxo, find_pinned_utxo, fund_lender, pay_installment,
+    setup_pending_private_offer,
 };
 
 /// An acceptance in which the lender pays the principal as `principal` instead of the pinned
@@ -230,6 +234,110 @@ fn private_offer_repayment_fails_with_wrong_debt_slot(
     )?;
 
     assert_program_rejects(ctx.finalize(borrower));
+
+    Ok(())
+}
+
+/// The liquidation's storage check is its only proof that the loan is active. A pending offer's
+/// lender NFT unlocks for any transaction that spends the offer, so without the check anyone could
+/// take an expired pending offer's collateral.
+#[simplex::test]
+fn liquidation_fails_on_a_pending_offer(context: simplex::TestContext) -> anyhow::Result<()> {
+    let anyone = context.get_default_signer();
+
+    let setup = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
+    let parameters = setup.parameters;
+    let pending_offer = PrivateLendingOffer::new_pending(parameters);
+    let expiry = parameters.loan_expiration_time;
+
+    let pending_offer_utxo =
+        find_pinned_utxo(&setup.creation_tx, &parameters.pinned.pending_collateral);
+    let lender_nft_utxo = find_explicit_utxo(&setup.creation_tx, parameters.lender_nft_asset_id);
+
+    let mut ctx = ConfidentialTransaction::new();
+
+    // the liquidation witness of the pending offer's debt, the true salt and expiry, locked to it
+    pending_offer.add_program_input_from_partial_input(
+        &mut ctx,
+        PartialInput::new(pending_offer_utxo)
+            .with_sequence(Sequence::ENABLE_LOCKTIME_NO_RBF)
+            .with_locktime(LockTime::from_height(expiry)?),
+        PrivateLendingWitnessBranch::Liquidation {
+            debt_hash: pending_offer.get_debt_hash(),
+            salt: parameters.expiry_salt,
+            expiry,
+        }
+        .build_witness(),
+    );
+    // the lender NFT's lock opens with the pending offer at input 0, and the NFT is burned
+    ScriptAuth::from_simplex_program(&pending_offer).attach_unlocking(
+        &mut ctx,
+        lender_nft_utxo,
+        ScriptAuthWitnessParams::new(0),
+    );
+    ctx.add_output(PartialOutput::new(
+        Script::new_op_return(b"burn"),
+        1,
+        parameters.lender_nft_asset_id,
+    ));
+    ctx.add_output(
+        PartialOutput::new(
+            anyone.get_confidential_address().script_pubkey(),
+            parameters.pinned.pending_collateral.amount,
+            parameters.pinned.pending_collateral.asset_id,
+        )
+        .with_blinding_key(anyone.get_blinding_public_key()),
+    );
+
+    assert_program_rejects(ctx.finalize(anyone));
+
+    Ok(())
+}
+
+/// The witness's debt hash must be the one the loan's storage holds: after an installment, a
+/// liquidation with the starting debt's hash, or another debt's, is refused.
+#[simplex::test]
+fn liquidation_fails_with_another_debt_hash(context: simplex::TestContext) -> anyhow::Result<()> {
+    let borrower = context.get_default_signer();
+    let (setup, lender, loan) = accepted_loan(&context)?;
+    let parameters = setup.parameters;
+    let (_, loan) = pay_installment(
+        &setup,
+        &loan,
+        borrower,
+        DebtOpening {
+            amount: 1_000,
+            blinder: ValueBlindingFactor::new(&mut rand::thread_rng()),
+        },
+    )?;
+    let expiry = parameters.loan_expiration_time;
+
+    // the control: the debt hash of the loan's storage goes through the program
+    build_liquidation_at(&loan, &lender)?.finalize(&lender)?;
+
+    for other_debt_hash in [
+        // the starting debt, before the installment
+        parameters.pinned.repayment.commitment_hash(),
+        // another debt
+        debt_hash(
+            &parameters.pinned.repayment.asset_commitment(),
+            &parameters.pinned.principal.value_commitment(),
+        ),
+    ] {
+        assert_ne!(other_debt_hash, loan.offer.get_debt_hash());
+        let mut ctx = build_liquidation_at(&loan, &lender)?;
+        set_liquidation_witness(
+            &mut ctx,
+            PrivateLendingWitnessBranch::Liquidation {
+                debt_hash: other_debt_hash,
+                salt: parameters.expiry_salt,
+                expiry,
+            },
+            expiry,
+        )?;
+
+        assert_program_rejects(ctx.finalize(&lender));
+    }
 
     Ok(())
 }
