@@ -12,49 +12,63 @@ and so on.
 the proofs, and every claim in the task's brief, is proved below under the assumptions of
 section 2. The findings, most important first:
 
-1. **The proofs need weaker assumptions than the note states.** The note asks that the discrete
-   logarithms of `A`, `A_c`, `A_w1`, `A_w2` and `J` to base `G` be unknown "and mutually". Every
-   step below compares two openings of one point in a single pair of bases `(H, G)`. So it is
-   enough that nobody can compute `log_G H` for each `H` on its own (A1). The borrower may even
-   choose a carry asset related to `A` or `A_c`, for instance the collateral asset itself, without
-   breaking anything. Elements' own asset conservation needs distinct assets to be independent, and
-   that is part of the consensus assumption A3, not of these proofs.
-2. **The lender's bounds are not needed for soundness.** The integer argument (Theorem 2) holds
-   for any `C, R < 2^64`: the coefficient of `A` in E7 is then below `2^139 < n`. The caps
-   `C ≤ 2^44` and `R ≤ 2^50 − 2` keep the lender's search fast and fit the carry supply `S`, and
-   nothing more. With the caps the coefficient is below `2^119`, and `|d'| < 2^74`; the note's
-   `2^121` and `2^75` are correct but loose.
+1. **The proofs need weaker assumptions than the brief states.** The task's brief asks for the
+   discrete logarithms of `A`, `A_c`, `A_w1`, `A_w2` and `J` to base `G` to be unknown "and
+   mutually"; the note asks only that they be unknown. Every step below compares two openings of
+   one point in a single pair of bases `(H, G)`. So it is enough that nobody can compute
+   `log_G H` for each `H` on its own (A1). The borrower may even choose a carry asset related to
+   `A` or `A_c`, for instance the collateral asset itself, without breaking anything. Elements' own
+   asset conservation needs distinct assets to be independent, and that is part of the consensus
+   assumption A3, not of these proofs.
+2. **The caps' tightness is not soundness-critical, but the lender's check of `R` is.**
+   - The integer argument (Theorem 2) holds for any `C, R < 2^64`: the coefficient of `A` in E7
+     is then below `2^139 < n`. The tight caps `C ≤ 2^44` and `R ≤ 2^50 − 2` serve the lender's
+     search and the carry supply `S_w`.
+   - But `R` lives only inside the parameters `D₀` and `REPAYMENT_COMMITMENT`, which no consensus
+     range proof bounds. So `R < 2^64` holds only because the lender checks its cap at acceptance,
+     and Theorem 2's (g1) depends on that check (O9).
+   - With the caps the coefficient is below `2^119`, and `|d'| < 2^74`; the note's `2^121` and
+     `2^75` are correct but loose.
 3. **What is load-bearing is the minimum of 1 on three outputs.** The successor's minimum forbids
    the overpayment and the payment of the exact debt. The two carries' minimums keep `e` in
    `[0, R − 1]`. With a carry of 0 allowed, `e = −1` would let the successor hold one unit too
    little, or `e = R` one unit too much (Theorem 2, remarks). All three minimums come from the
    outputs' scripts being spendable (checks 5 and 9).
-4. **`FS_IV` is defence in depth.** A prover cannot choose the loan's constants after seeing a
-   challenge, so soundness does not depend on `FS_IV` being right (section 6.1). `FS_IV` keeps the
-   challenges of different loans apart. Every point the prover chooses or influences is absorbed,
-   including the bases `A_w1` and `A_w2` that it picks from the transaction. Leaving one out would
-   be the classic weak Fiat–Shamir break.
+4. **The challenge absorbs everything the statement depends on** (section 6.1).
+   - Every point the prover chooses or influences is absorbed, including the bases `A_w1` and
+     `A_w2` that it picks from the transaction. Leaving one out would be the classic weak
+     Fiat–Shamir break.
+   - `FS_IV` fixes the loan's constants, and the extraction needs it. The adversary may query the
+     challenge before it creates the offer, so only `FS_IV` in the forked query guarantees that
+     both forked transcripts are under one map `φ_S` (Theorem 3). `FS_IV` must therefore hash all
+     of `A`, `A_c`, `V_c0`, `D₀` and `J`, with a known-answer test (O6, O9).
 5. **A precision to the note's reasoning about nonces, not a change.** "The statement fixes every
    secret" is true only computationally. `φ_S` maps `Z_n^11` into `𝔾^7`, so every statement
    has at least `n^4` witnesses. But every nonzero element of the kernel gives away a discrete
    logarithm (Theorem 1(e)), so nobody can compute two. The nonce derivation also needs `h₇` not to
-   collide between two of the borrower's statements. Such a collision would reveal `C`, `ρ`, `R`,
-   `r₀` (Theorem 6(b)), and it happens only with probability about `2^−256` per pair.
+   collide between two of the borrower's statements. Such a collision would reveal `C`, `ρ`, `R`
+   and `r₀`, or the differences of the two witnesses (Theorem 6(b)). It happens only with
+   probability about `2^−256` per pair.
 6. **Leaks beyond the one the note states** (section 13):
    - **L2:** the lender learns `c_k` at every step, by design. For an installment it cannot read,
      that gives it the debt to within `⌈R/C⌉` units, and exactly when `C ≥ R`.
    - **L3, new:** the note emits the release output only when the release is positive. The
      output count can then tell an observer whether an installment released anything.
-7. **Obligations on the implementation** that the proofs assume (section 13, O1–O8). Chiefly:
+7. **Obligations that the proofs assume** (section 13, O1–O10). Chiefly:
    - read `V_s`, `V`, `W1`, `A_w1`, `W2`, `A_w2` as confidential commitments, so that an explicit
      one fails;
    - hash exactly the points that V1–V7 use;
-   - never publish a proof that fails the local verifier.
+   - never publish a proof that fails the local verifier;
+   - at acceptance, the lender checks every point parameter against its encoded twin, recomputes
+     `FS_IV` and `BLINDER_ROOT`, and checks the caps (O9);
+   - the confidential burns hide their amounts (O10).
 8. **Optional hardening.** Bind the witness into the nonce derivation (R1). Mask the release
    output's presence (R2).
 
 The Fiat–Shamir step loses a square root, as Schnorr signatures do under the forking lemma
-(section 6.3).
+(section 6.3). The extraction treats consensus's range and surjection proofs as extractable in a
+straight line, without rewinding (A2). That is a stronger, heuristic form of their knowledge
+soundness, and L7 states it.
 
 ## 1. Setting
 
@@ -79,6 +93,9 @@ The note's notation holds (note: "Notation"). In addition:
   `d_k = R − Σ_(j≤k) p_j` is the debt at step `k`.
 - `x_j`, `y_j`, `Y_j = x_j·G + y_j·J` (`j = 1..1024`) are the note's blinders and blinder
   commitments, and `BLINDER_ROOT` the root of their tree.
+- The note's carry supply `S = 2^50` is written `S_w` here, because `S` is the statement. `J`
+  is always the point, and the forking index is `ι`. The second challenge of a fork is `c*`, so
+  that `c'` is always the successor's amount.
 
 ### 1.2 The relation as one linear map
 
@@ -132,14 +149,22 @@ response is an element of `Z_n` (L9).
 Each theorem names the assumptions it uses. `Adv^x` is the best advantage against assumption `x`
 of an adversary of the stated resources.
 
-- **A1, generators.** Let `𝓗` be `{J}` together with every asset commitment that appears in a
-  valid transaction. No efficient adversary outputs `H ∈ 𝓗` and `(α, β) ≠ (0, 0)` with
+- **A1, generators.** Let `𝓗` be the set of:
+  - the point `J`;
+  - every asset generator `Gen(a)`;
+  - every loan's `A` and `A_c`, which are `Gen(a)` plus a derived blinder times `G`;
+  - every asset commitment that appears in a valid transaction.
+
+  No efficient adversary outputs `H ∈ 𝓗` and `(α, β) ≠ (0, 0)` with
   `α·H + β·G = O`. Its advantage is `Adv^dlg`.
   - `G` has order `n`, so such a pair has `α ≠ 0` and gives `log_G H = −β/α`. A1 therefore says
     that nobody can compute `log_G H`, for each `H` separately.
   - It does **not** say that the elements of `𝓗` are independent of each other (finding 1).
   - Lemma 2.1 derives A1 from the discrete logarithm problem.
-- **A2, consensus bounds in knowledge form.** For every valid transaction, an extractor obtains:
+- **A2, consensus bounds, as straight-line extraction.** An extractor runs alongside the
+  adversary, without rewinding it. It sees the adversary's oracle queries and, in the algebraic
+  group model, the representations of the group elements it outputs. For every valid transaction it
+  obtains:
   - for every confidential output on a spendable script, with asset commitment `H` and value
     commitment `V`, an opening `(v, s)` with `V = v·H + s·G` and `1 ≤ v < 2^64`;
   - for every confidential asset commitment `H`, its asset `a` and offset `t` with
@@ -151,6 +176,12 @@ of an adversary of the stated resources.
     (both cited in the spike note);
   - range proofs and surjection proofs are proofs of knowledge in the random-oracle model
     [MP15, PBF+18].
+
+  Those proofs of knowledge extract by rewinding. The straight-line form is stronger and
+  heuristic: it is plausible in the algebraic group model with random oracles, where an algebraic
+  adversary hands over each commitment's representation and the range proof's soundness puts its
+  amount in range. It is taken as an assumption so that the forking of section 6.3 does not nest
+  the rewinding of SHA-256 inside its own, over up to 1024 installments (L7).
 
   The outputs concerned are 1 (the storage address), 2 (`INSTALLMENT_OUTPUT_SCRIPT_HASH`), and 3
   and 4 (`PRINCIPAL_OUTPUT_SCRIPT_HASH`), all taproot and therefore spendable.
@@ -178,13 +209,18 @@ of an adversary of the stated resources.
   offer's shared secret. It stays one when the adversary also sees the shared secret's other use,
   the rewinding nonce of the collateral output's range proof (`OfferSecrets`). Its advantage is
   `Adv^prf-derive`. The lender knows the key and the observer does not.
+  - **Per-offer freshness.** The shared secret is fresh for every offer:
+    `OfferSecrets::for_borrower` computes it from a per-offer ephemeral key. So the `x_j` and `y_j`
+    of different loans are independent. Theorem 7 and L1 assume this.
 - **A7, the PRF of the nonce derivation.**
   `(h₇, m) ↦ tagged_hash("simplicity-lending/private/v1/release-nonce", borrower_sk ‖ h₇ ‖ m)` is
   a pseudorandom function keyed by `borrower_sk`. It stays one given the key's other uses (its
   public key, ECDH, signatures under other tags). Its advantage is `Adv^prf-nonce`. Neither the
   lender nor the observer knows the key.
 - **A8, idealized hashing.**
-  - The challenge function `H_c` is a random oracle (Lemma 4.1 justifies this from an ideal `f`).
+  - The challenge function `H_c` is a random oracle. Lemma 6.1 derives this from an ideal
+    compression function `f`, a stronger heuristic than the ideal cipher model for SHA-256's
+    Davies–Meyer compression (section 6.2).
   - For `J` (Lemma 2.1), SHA-256 is a random oracle.
   - For A1's derivation, `Gen` is a random oracle into `𝔾`.
 
@@ -192,7 +228,11 @@ of an adversary of the stated resources.
 
 - `1 ≤ C ≤ 2^44` and `1 ≤ R ≤ 2^50 − 2`, checked by the lender at acceptance;
 - the payments, the successor and the carries in `[1, 2^64)`, by A2;
-- at most 1024 installments, by Lemma 3.2.
+- at most 1024 installments, by Lemma 5.2.
+
+Of these, only the minimums of 1 on the successor and the carries, the maximum `2^64`, the count,
+and `R < 2^64` are needed for soundness. Consensus bounds `C` through `L_0`'s range proof, but
+nothing bounds `R` except the lender's check (O9).
 
 **Lemma 2.1 (A1 from discrete logarithms; `J` is nothing-up-my-sleeve).** Assume A2's second item
 and A8. Suppose an adversary breaks A1 with probability `ε`. Then an algorithm `B` solves the
@@ -211,8 +251,13 @@ discrete logarithm problem in `𝔾` with probability at least `ε − Adv^cb`, 
 Now suppose the adversary outputs `α·H + β·G = O` with `α ≠ 0`.
 
 - If `H = J = ±(X + β_J·G)`, then `±α·X + (±α·β_J + β)·G = O`, which gives `log_G X`.
-- If `H` is an asset commitment, A2 gives `a` and `t` with
-  `H = Gen(a) + t·G = X + (β_a + t)·G`. Then `α·X + (α·(β_a + t) + β)·G = O`, so
+- Otherwise `H = Gen(a) + t·G` with a `t` known to `B`:
+  - `t = 0` for a generator `Gen(a)`;
+  - for a loan's `A` or `A_c`, `t` is the derived `repayment-abf` or `a_c`, which `B` knows
+    because it plays the lender;
+  - for an asset commitment in a transaction, A2 gives `a` and `t`.
+
+  Then `H = X + (β_a + t)·G`, so `α·X + (α·(β_a + t) + β)·G = O`, and
   `log_G X = −(α·(β_a + t) + β)/α`. ∎
 
 The reduction is tight. It makes every generator `X` plus a known multiple of `G`, so it could not
@@ -364,22 +409,25 @@ which contradicts (g2). So `d' ≥ 1`. And `v_s = ⌈d'·C/R⌉ ≤ ⌈(R − 1)
 
 - **What is load-bearing.**
   - The minimum of 1 on `v_s`, `v1` and `v2`, and the maximum `2^64` (A2).
-  - `C, R < 2^64`.
+  - `C, R < 2^64`. Consensus bounds `C` through `L_0`'s range proof. Only the lender's check at
+    acceptance bounds `R` (O9), because `R` appears in no output's range proof.
   - At most 1024 installments, which bounds `|d'|`.
 
-  The caps `C ≤ 2^44` and `R ≤ 2^50 − 2` are not: they serve the search's time and the carry
-  supply. A lender that skipped its acceptance checks would still get the exact release rule (but
-  a slow liquidation).
-- **The carries' minimums.** Without the minimum of 1 on `W1`, `e = −1` becomes possible, and then
-  `v_s·R = d'·C − 1`: the successor holds one unit less than the rule. Without it on `W2`, `e = R`
-  lets the successor hold one unit more. The pin of outputs 3 and 4 to a spendable script, with
+  The tightness of the caps `C ≤ 2^44` and `R ≤ 2^50 − 2` is not load-bearing: any caps below
+  `2^64` would give the exact release rule. The caps' values serve the search's time and the carry
+  supply. A lender that skipped the check of `R` would lose the theorem.
+- **The carries' minimums.**
+  - Without the minimum of 1 on `W1`, `e = −1` can occur whenever `R` divides `d'·C − 1`. Then
+    `v_s = (d'·C − 1)/R`, one unit below `⌈d'·C/R⌉`.
+  - Without it on `W2`, `e = R` can occur whenever `R` divides `d'·C`. Then
+    `v_s = d'·C/R + 1`, one unit above. The pin of outputs 3 and 4 to a spendable script, with
   confidential commitments (check 9), is what excludes both.
 - **The carry asset.** The program does not constrain the carry asset, and the theorem does not
   need it to: steps 5 and 6 hold for any `A_w1` and `A_w2` in `𝓗`.
 
 ## 5. Binding of the index and the leaf
 
-**Lemma 3.1 (the real chain).** Under A4, except with probability `Adv^cr-sha`, for every step `k`:
+**Lemma 5.1 (the real chain).** Under A4, except with probability `Adv^cr-sha`, for every step `k`:
 
 - `L_k`'s asset commitment is `enc(A_c + k·G)`;
 - `L_k`'s script hash is the storage address `(active, h(A, D_k))`, with
@@ -388,19 +436,27 @@ which contradicts (g2). So `d' ≥ 1`. And `v_s = ⌈d'·C/R⌉ ≤ ⌈(R − 1)
 
 *Proof.* By induction on `k`.
 
-- **Step 0.** The acceptance requires output 0's commitment hash to be
-  `ACTIVE_COLLATERAL_COMMITMENT` (`ensure_output_commitment` in `accept_offer`). The lender
-  recomputes that parameter as `h(enc(A_c), enc(V_c0))` before accepting. Equal hashes of
-  different encodings would be a SHA-256 collision. The storage of `L_0` is `(active, h(A, D₀))`.
+- **Step 0.**
+  - **The collateral.** The acceptance requires output 0's commitment hash to be
+    `ACTIVE_COLLATERAL_COMMITMENT` (`ensure_output_commitment` in `accept_offer`). By O9 that
+    parameter is `h(enc(A_c), enc(V_c0))` for the point parameters `A_c` and `V_c0`. Equal hashes
+    of different encodings would be a SHA-256 collision.
+  - **The storage.** `accept_offer` moves the offer's storage from
+    `(pending, REPAYMENT_COMMITMENT)` to `(active, REPAYMENT_COMMITMENT)`
+    (`ensure_script_hash_transition`). By O9, `REPAYMENT_COMMITMENT = h(enc(A), enc(D₀))` for the
+    point parameters `A` and `D₀`, so `L_0`'s storage is `(active, h(A, D₀))`.
+  - **Why O9 matters here.** Without it, the `D₀` of E5 and E7 could differ from the debt that
+    the storage starts from, and (g1) and (g4) would describe different debts.
 - **Step `k` to `k + 1`.**
   - Check 1 compares `L_k`'s script hash with the storage address for the witness's `D`. Equal
     addresses with different `h(A, ·)` would be a collision in the taproot commitment or in `h`,
     and so would equal `h` with different `enc(D)`. So `D = D_k`.
-  - Check 3 fixes `V = V_(k+1)`, under the asset commitment `A`.
+  - Check 3 fixes `V = V_(k+1)`, under the asset commitment encoded as `REPAYMENT_ASSET`, which
+    is `enc(A)` by O9.
   - Check 5 sets `L_(k+1)`'s storage to `(active, h(A, D_k − V_(k+1)))`.
   - Check 6 sets `L_(k+1)`'s asset commitment to `enc(A_c + k·G + G)`. ∎
 
-**Lemma 3.2 (binding of the index).** If the installment that spends `L_k` is accepted with witness
+**Lemma 5.2 (binding of the index).** If the installment that spends `L_k` is accepted with witness
 index `i`, then `i = k` and `k ≤ 1023`. So a loan has at most 1024 installments, and `d_k` sums at
 most 1024 payments.
 
@@ -408,12 +464,12 @@ most 1024 payments.
 
 - The program rebuilds an index from the path's 10 bits and requires it to equal `i`, so
   `0 ≤ i ≤ 1023`.
-- Check 7 and Lemma 3.1 give `enc(A_c + i·G) = enc(A_c + k·G)`.
+- Check 7 and Lemma 5.1 give `enc(A_c + i·G) = enc(A_c + k·G)`.
 - `enc` is injective on `𝔾 ∖ {O}`: for a given `x`, exactly one of the two points with that `x` has
   a square `y`, and the bit records which.
 - So `(i − k)·G = O`, hence `i ≡ k (mod n)`, and `i = k` because `0 ≤ i, k < n`. ∎
 
-**Lemma 3.3 (binding of the leaf).** Let `BLINDER_ROOT` be the honest root of
+**Lemma 5.3 (binding of the leaf).** Let `BLINDER_ROOT` be the honest root of
 `Y_1..Y_1024`, which the lender recomputes at acceptance. Suppose the program accepts a witness
 `(Ŷ, path, i)`, where `Ŷ` is the 64 bytes of the witness's `y`. Then `Ŷ = ⟨Y_(i+1)⟩`, or a
 collision under `LEAF_IV` or `NODE_IV` can be read off the path and the honest tree.
@@ -455,14 +511,14 @@ We show downwards that `u_ℓ = N_(ℓ,i_ℓ)` at every level, or a collision is
   string, so it is another leaf and fails.
 - The on-curve check makes the point the program uses the one those bytes denote.
 
-**Corollary 3.4 (binding of the successor's blinder).** For the installment that spends `L_k`:
+**Corollary 5.4 (binding of the successor's blinder).** For the installment that spends `L_k`:
 
 - `Y = Y_(k+1) = x_(k+1)·G + y_(k+1)·J`;
 - every witness accepted for its statement has `x ≡ x_(k+1)`, or step 4 of Theorem 2 gives a
   relation in `(J, G)`.
 
 So the successor is `c'·A_c + x_(k+1)·G`, and the lender's search solves exactly this equation.
-Lemmas 3.1–3.3 cover the note's spike tamper tests "the index, leaf and blinder of `i + 1` at step
+Lemmas 5.1–5.3 cover the note's spike tamper tests "the index, leaf and blinder of `i + 1` at step
 `i`" and "the leaf of `i + 1` with index `i`".
 
 ## 6. The challenge and extraction
@@ -486,9 +542,18 @@ Every point on which `φ_S` or `X_S` depends, and every commitment, is absorbed:
   any of them would let a prover fix `T`, learn `c`, and then choose the statement: the weak
   Fiat–Shamir break [BPW12]. This is especially true of the bases `A_w1` and `A_w2`, which the
   prover picks from its own outputs. `W1 − A_w1` is computed from absorbed points.
-- **The constants are fixed by the program before any proof.** Absorbing them is not needed for
-  soundness, so soundness does not depend on `FS_IV` being right. `FS_IV` keeps the challenges of
-  different loans apart, and the lender recomputes it anyway.
+- **The constants are absorbed through `FS_IV`, and the extraction needs that.**
+  - `φ_S` and `X_S` depend on the constants `K = (A, A_c, V_c0, D₀, J)`, not only on `S`.
+  - In `SOUND` (section 7) the adversary may query `H_c` before it creates the offers. If the
+    forked query fixed only `S` and `T`, run 2 could end with a proof for the same `(S, T)` under
+    a new loan's constants `K₂`. `Ext` would then combine transcripts of two different maps.
+  - The forked query contains `FS_IV`. The lender recomputes
+    `FS_IV = SHA-256(tag ‖ ⟨A⟩ ‖ ⟨A_c⟩ ‖ ⟨V_c0⟩ ‖ ⟨D₀⟩ ‖ ⟨J⟩)` at acceptance (O9). So equal `FS_IV`
+    means equal `K`, except with probability `Adv^cr-sha`, and both transcripts are under one
+    `φ_S` (Theorem 3).
+  - Hence the obligation that `FS_IV` hashes all five constants, fixed by a known-answer test (O6,
+    O9).
+  - `FS_IV` also keeps the challenges of different loans apart.
 - **Not absorbed, and not needed:**
   - `i`, the path and `BLINDER_ROOT` only select and authenticate `Y`, which is absorbed.
   - `D` and `V` enter `φ_S` only through `D'`.
@@ -501,9 +566,21 @@ Every point on which `φ_S` or `X_S` depends, and every commitment, is absorbed:
 
 ### 6.2 The chained compressions as a random oracle
 
-**Lemma 4.1.** Model `f` as an ideal compression function (A8). For each fixed `FS_IV`, the map
-`(S, T) ↦ h₁₄` is indifferentiable from a random oracle, with loss `O(q²/2^256)` for `q` queries
-to `f`. The oracles of different values of `FS_IV` are independent up to the same loss.
+**Lemma 6.1.** Model `f` as an ideal compression function, a random function (A8). For each fixed
+`FS_IV`, the map `(S, T) ↦ h₁₄` is indifferentiable from a random oracle, with loss
+`O(q²/2^256)` for `q` queries to `f`. The oracles of different values of `FS_IV` are independent
+of each other, and of the other uses of `f`, only up to collisions between their chaining values
+and those of the other uses, which costs the same `O(q²/2^256)`.
+
+*On the model.*
+- SHA-256's compression is Davies–Meyer, `f(h, m) = E_m(h) + h`, and its fixed points
+  `h = E_m^(−1)(0)` are easy to compute. An ideal compression function has none. So the
+  ideal-compression-function model for `f` is a stronger heuristic than the ideal cipher model for
+  `E`, and no ideal-cipher proof is claimed here.
+- A fixed point could matter only if one of this chain's chaining values were `E_m^(−1)(0)` for a
+  block `m` that the adversary can feed next. The blocks are coordinates of curve points, and each
+  chaining value is an output of `f`, so this is a preimage-type event of probability about
+  `2^−256` per attempt.
 
 *Proof.*
 
@@ -528,30 +605,49 @@ to `f`. The oracles of different values of `FS_IV` are independent up to the sam
 ### 6.3 Extraction by forking
 
 **Theorem 3 (extraction from the non-interactive proof).** Let `𝒜` be an algorithm with access to
-`H_c` that makes at most `q` queries to it. Suppose that with probability `ε` it outputs
-`(S, π, σ)`, where `π` is accepted for `S` and a predicate `P(S, σ)` holds (`σ` is any side
-output). Then the forking algorithm `F^𝒜` below runs `𝒜` twice and outputs `(S, σ, w)` with
-`φ_S(w) = X_S` and `P(S, σ)`, with probability
+`H_c` that makes at most `q` queries to it. On each run it outputs either `⊥` or
+`(ι, FS_IV, S, π, σ)`, where:
+
+- `π = (T, z)` is accepted for `S` under the loan whose parameter is `FS_IV`;
+- its challenge is the answer to `𝒜`'s `ι`-th query, `(FS_IV, S, T)`;
+- a predicate `P(FS_IV, S, σ)` holds, where `σ` is any side output.
+
+Everything `𝒜` uses to decide this runs inside `𝒜`, without rewinding. That includes the
+experiment's honest parties, the chain, and A2's straight-line extractor. So the same algorithm,
+with the same selection rule, runs in both runs of the fork.
+
+Suppose `FS_IV` determines the loan's constants `K` except with probability `Adv^cr-sha`. Let `ε`
+be the probability that `𝒜` does not output `⊥`. Then the forking algorithm `F^𝒜` below runs `𝒜`
+twice and outputs `(FS_IV, S, σ, w)` with `φ_S(w) = X_S`, under that loan's `K`, and
+`P(FS_IV, S, σ)`, with probability
 
 ```
-frk ≥ ε·(ε/q − 2^−255),    equivalently    ε ≤ √(q·frk) + q·2^−255.
+frk ≥ ε·(ε/q − 2^−255) − Adv^cr-sha,    so    ε ≤ √(q·(frk + Adv^cr-sha)) + q·2^−255.
 ```
 
 *The algorithm `F^𝒜`.*
 
 1. **Wrap `𝒜`.** If the proof `𝒜` outputs uses a challenge it never queried, the wrapper queries
-   it, so `q` grows by one. Let `J` be the index of the query `(FS_IV, S, T)`.
-2. **Run 1.** Run `𝒜` on a random tape `ω` with oracle answers `h_1, …, h_q`, and obtain `J`,
-   `(S, T, z)` and `σ`. Fail if `𝒜` fails.
-3. **Run 2.** Rerun `𝒜` on the same `ω`, with the same answers `h_1..h_(J−1)` and fresh answers
-   from `J` on. Both runs are identical up to query `J`, so its input `(FS_IV, S, T)` is the same.
-4. **Extract.** Suppose run 2 outputs an accepted proof `(T, z')` whose challenge comes from query
-   `J`, and `h'_J ≢ h_J (mod n)`. Apply `Ext` of Theorem 1(b) to `(T, c, z)` and `(T, c', z')`,
-   and return `(S, σ, w)`, with `σ` from run 1.
+   it, so `q` grows by one.
+2. **Run 1.** Run `𝒜` on a random tape `ω` with oracle answers `h_1, …, h_q`, and obtain
+   `(ι, FS_IV, S, (T, z), σ)`. Fail on `⊥`.
+3. **Run 2.** Rerun `𝒜` on the same `ω`, with the same answers `h_1..h_(ι−1)` and fresh answers
+   from `ι` on. Fail unless run 2 outputs some `(ι*, …)` with `ι* = ι` and
+   `h*_ι ≢ h_ι (mod n)`.
+4. **Extract.** Both runs are identical up to query `ι`, so its input `(FS_IV, S, T)` is the same
+   in both. So run 2's proof `(T, z*)` has the same `FS_IV`, `S` and `T`, with challenge
+   `c* ≠ c`. Apply `Ext` of Theorem 1(b) to `(T, c, z)` and `(T, c*, z*)`, and return
+   `(FS_IV, S, σ, w)`, with `σ` from run 1.
 
-*Proof.* The general forking lemma [BN06] gives `frk ≥ ε·(ε/q − 1/h)`, where `1/h` bounds the
-probability that the forked answer repeats. Here it must not repeat modulo `n`, which has
-probability at most `2^−255` (section 6.2).
+*Proof.*
+- **The bound.** The general forking lemma [BN06] applies to the single algorithm `𝒜` with its
+  selection rule `ι`. It gives `Pr[steps 2 and 3 succeed] ≥ ε·(ε/q − 1/h)`, where `1/h` bounds the
+  probability that the forked answer repeats. Here it must not repeat modulo `n`, which has
+  probability at most `2^−255` (section 6.2).
+- **One map.** Run 2's output also passed `𝒜`'s own check, so its proof was accepted under a loan
+  whose parameter is the same `FS_IV`. That loan's constants are run 1's `K`, unless two different
+  `K` hash to one `FS_IV`, which costs `Adv^cr-sha`. So both transcripts are under one `φ_S` and
+  one `X_S`, and Theorem 1(b) applies.
 
 The rewinding must also replay the rest of the experiment: the chain, the honest lender and the
 other oracles. All of them are run by the reduction and are determined by `ω` and the oracle
@@ -570,10 +666,11 @@ the forking lemma [PS00, BN06]. For example, take `q = 2^64` and a discrete-loga
 
 **The experiment `SOUND`.**
 
-- **The honest lender** makes or accepts offers after its checks: the bounds, and every parameter
-  recomputed, including `BLINDER_ROOT` and `FS_IV`.
+- **The honest lender** makes or accepts offers after its checks (O9): the bounds, every point
+  parameter against its encoded twin, and `FS_IV` and `BLINDER_ROOT` recomputed.
 - **The adversary `𝒜`** is the borrower and everyone else. It holds the shared secret and every
-  derived value, and builds any transactions it likes. Consensus validates them.
+  derived value, and builds any transactions it likes. Consensus validates them. It may query
+  `H_c` at any time, including before it creates the offers.
 - **`𝒜` wins** if, for a loan that the lender accepted, the real chain contains an accepted
   installment that spends `L_k` and does **not** satisfy all of the following. Here `p_j` are the
   A2 amounts of the installments' outputs 2, `d' = R − Σ_(j≤k+1) p_j`, and `v_s` is the A2 amount
@@ -586,7 +683,7 @@ the forking lemma [PS00, BN06]. For example, take `q = 2^64` and a discrete-loga
 Then
 
 ```
-Adv^sound(𝒜) ≤ Adv^cr-sha + Adv^cr-f + Adv^cb + q·2^−255 + √(q·Adv^dlg(B)),
+Adv^sound(𝒜) ≤ Adv^cr-sha + Adv^cr-f + Adv^cb + q·2^−255 + √(q·(Adv^dlg(B) + Adv^cr-sha)),
 ```
 
 where `B` runs `𝒜` twice, plus the extractors. By Lemma 2.1, `Adv^dlg` is in turn at most the
@@ -597,32 +694,45 @@ discrete-logarithm advantage plus `Adv^cb`.
 **Game 0** is `SOUND`.
 
 **Game 1** aborts if a SHA-256 collision, or a collision under `LEAF_IV` or `NODE_IV`, appears in
-the run, as Lemmas 3.1–3.3 extract them. The loss is at most `Adv^cr-sha + Adv^cr-f`.
+the run, as Lemmas 5.1–5.3 extract them. The loss is at most `Adv^cr-sha + Adv^cr-f`.
 
-**Game 2** runs A2's extractor on the loan's transactions and aborts if it fails. The loss is at
-most `Adv^cb`.
+**Game 2** runs A2's straight-line extractor alongside `𝒜`, on every transaction as it is made,
+and aborts if it fails. The loss is at most `Adv^cb`.
 
-**The predicate.** In game 2, let the first winning installment spend `L_k`, with statement `S`.
-Let `σ` be `k` together with the openings below, and `P(S, σ)` the statement that the conclusion
-fails. The hypotheses of Theorem 2 hold:
+**The wrapped algorithm.** Let `𝒜'` be one run of game 2, played as a single algorithm: `𝒜`, the
+honest lender, the chain, the collision checks and the extractor. After each accepted
+installment, `𝒜'` checks the conclusion against the openings extracted so far. At the first
+installment that fails it, `𝒜'` outputs `(ι, FS_IV, S, π, σ)`:
+
+- `ι` is the index of that proof's challenge query;
+- `S` is the statement;
+- `σ` is the step `k` and the openings below;
+- `P(FS_IV, S, σ)` says that the conclusion fails.
+
+Otherwise `𝒜'` outputs `⊥`. The selection runs in-line in both runs of the fork, as Theorem 3
+requires, and nothing in it rewinds. In the selected installment the hypotheses of Theorem 2
+hold:
 
 - **(g1)** comes from the parameters: the lender's own `C`, `ρ`, `R` and `r₀`, with
-  `1 ≤ C ≤ 2^44` and `1 ≤ R ≤ 2^50 − 2` checked at acceptance.
-- **(g2)** By Lemma 3.1, output 1's asset commitment is `A_c + (k+1)·G`. A2 gives `V_s =
+  `1 ≤ C ≤ 2^44` and `1 ≤ R ≤ 2^50 − 2` checked at acceptance (O9). No range proof bounds `R`,
+  so this check is what gives `R < 2^64`.
+- **(g2)** By Lemma 5.1, output 1's asset commitment is `A_c + (k+1)·G`. A2 gives `V_s =
   v_s·(A_c + (k+1)·G) + s₀·G`, so `V_s = v_s·A_c + s·G` with `s = v_s·(k+1) + s₀` and
   `1 ≤ v_s < 2^64`.
 - **(g3)** Outputs 3 and 4 are on a spendable script and confidential (check 9), so A2 applies.
-- **(g4)** Lemma 3.1 gives `D' = D₀ − Σ_(j≤k+1) V_j`. Each output 2 is spendable with asset
+- **(g4)** Lemma 5.1 gives `D' = D₀ − Σ_(j≤k+1) V_j`. Each output 2 is spendable with asset
   commitment `A` (check 3), so A2 gives `V_j = p_j·A + q_j·G` with `1 ≤ p_j < 2^64`. So
-  `d' = R − Σ p_j` and `r' = r₀ − Σ q_j`. By Lemma 3.2 there are at most 1024 terms, so
+  `d' = R − Σ p_j` and `r' = r₀ − Σ q_j`. By Lemma 5.2 there are at most 1024 terms, so
   `d' ≤ R − 1` and `d' > R − 2^74`, which gives `|d'| < 2^74`.
-- **(g5)** is Corollary 3.4: `Y = Y_(k+1)`, with the derived `x_(k+1)` and `y_(k+1)`, which the
+- **(g5)** is Corollary 5.4: `Y = Y_(k+1)`, with the derived `x_(k+1)` and `y_(k+1)`, which the
   reduction knows because it plays the lender.
 
-**Forking.** Theorem 3 with `P` yields `w` with `φ_S(w) = X_S` and `P(S, σ)`. Given the ground
-truth, Theorem 2 cannot certify the conclusion, because `P` says it fails. So `Rel` outputs a
-relation for A1, which `B` returns. Therefore `frk ≤ Adv^dlg(B)`, and Theorem 3 gives
-`Pr[𝒜 wins game 2] ≤ √(q·Adv^dlg(B)) + q·2^−255`. ∎
+**Forking.** Theorem 3, applied to `𝒜'`, yields `w` with `φ_S(w) = X_S` under the loan's `K`,
+and `P`. Its condition holds: the lender recomputes `FS_IV` from `K` (O9), so `FS_IV` determines
+`K` except with `Adv^cr-sha`. Given run 1's ground truth, Theorem 2 cannot certify the
+conclusion, because `P` says it fails. So `Rel` outputs a relation for A1, which `B` returns.
+Therefore `frk ≤ Adv^dlg(B)`, and Theorem 3 gives
+`Pr[𝒜 wins game 2] ≤ √(q·(Adv^dlg(B) + Adv^cr-sha)) + q·2^−255`. ∎
 
 **Corollary 4.1 (what the contract enforces).** Except with the probability of Theorem 4, the
 following hold along the real chain.
@@ -709,8 +819,9 @@ fresh.
 - **(a)** Two proofs by the honest borrower with the same `h₇` are identical, except with the
   probability that `h₇` collides between two distinct statements, or that the borrower computes a
   relation for A1.
-- **(b)** A collision of `h₇` between distinct statements would reveal `C`, `ρ`, `R`, `r₀`, and
-  every other secret common to the two witnesses. This is why `S ↦ h₇` must be collision resistant.
+- **(b)** A collision of `h₇` between distinct statements would reveal either `C`, `ρ`, `R`, `r₀`
+  and every other secret common to the two witnesses, or the differences of the two witnesses.
+  This is why `S ↦ h₇` must be collision resistant.
   For the borrower's own statements a collision has probability about `2^−256` per pair, and no
   one else chooses those statements.
 - **(c)** Proofs of distinct statements use independent nonces.
@@ -726,11 +837,16 @@ fresh.
   (Theorem 1(e)).
 - So the witnesses are equal. Then the nonces, `T = φ_S(k)`, `c` and `z` are equal too.
 
-**(b)** Take `S ≠ S'` with one `h₇`.
+**(b)** Take `S ≠ S*` with one `h₇`. The nonces are equal. The challenge is computed from `h₇`
+and `T` alone (`h₈ … h₁₄`), so after the collision `S` is absorbed only through `h₇`. Two cases:
 
-- The nonces are equal, but `T` differs, because `T4`, `T6` and `T7` depend on `A_w1`, `A_w2` and
-  `D'`. So the challenges differ, `c ≠ c'`.
-- For a secret common to both witnesses, such as `C`, `z_C − z'_C = (c − c')·C` reveals it.
+- **`S` and `S*` differ in `A_w1`, `A_w2` or `D'`.** Then `T` differs, because `T4`, `T6` and `T7`
+  depend on those points, and so the challenges differ, `c ≠ c*`, except with probability
+  `2^−255`. For a secret common to both witnesses, such as `C`, `z_C − z*_C = (c − c*)·C` reveals
+  it.
+- **They differ only in `V_s`, `W1`, `W2` or `Y`.** No `T_j` depends on these, so `T` and `c` are
+  equal. Then `z − z* = c·(w − w*)` reveals the differences of the witnesses, for instance
+  `c' − c''` and the difference of the `x`s.
 
 **(c)** This is A7, for distinct inputs `(h₇, m)`.
 
@@ -750,7 +866,7 @@ fresh.
 
 ## 10. Hiding of `V_k` given `Y_k`
 
-**Lemma 7.1 (the core, perfect).** For any `c ∈ Z_n`, let `Δ_c` be the distribution of
+**Lemma 10.1 (the core, perfect).** For any `c ∈ Z_n`, let `Δ_c` be the distribution of
 
 ```
 (c·A_c + x·G,  x·G + y·J)      with x, y uniform in Z_n.
@@ -766,8 +882,9 @@ uniform distribution. ∎
 So even an unbounded observer who holds `V_k` and `Y_k` learns nothing about `c_k`. To test a
 candidate `ĉ`, it would need `x_k·G = V_k − c_k·A_c`, which appears nowhere.
 
-**Theorem 7 (the observer).** Assume A3, A6, A7 and A8, and that no two successors at the same
-step become public (the note's "Never rebuild an index"). Take an observer that:
+**Theorem 7 (the observer).** Assume A3, A6 with per-offer freshness, A7 and A8. Assume also that
+no two successors with different amounts become public at the same step (the note's "Never
+rebuild an index with another amount"; L1). Take an observer that:
 
 - sees the whole chain of a loan: every transaction and witness, and the program with its
   parameters;
@@ -776,7 +893,8 @@ step become public (the note's "Never rebuild an index"). Take an observer that:
 Compare its view in two worlds:
 
 - **the real world;**
-- **the ideal world,** where for every step `k ≥ 1`:
+- **the ideal world,** which keeps every other derived value of the real world, and where for
+  every step `k ≥ 1`:
   - `Y_k` is an independent uniform point, with the tree and `BLINDER_ROOT` computed over these
     points;
   - the proofs are simulated;
@@ -786,8 +904,11 @@ Compare its view in two worlds:
 The observer tells the two worlds apart with advantage at most
 
 ```
-Adv^prf-derive + 2048·2^−127 + ε_zk.
+2·Adv^prf-derive + 2·2048·2^−127 + ε_zk.
 ```
+
+Per-offer freshness makes the `x_j` and `y_j` of different loans independent, so the bound holds
+per loan, and for many loans by a hybrid over them.
 
 In words: whatever the observer learns about `c_k` comes from the confidential transactions
 themselves (A3), as for any confidential output. The repair, the leaf, the path and the proof add
@@ -809,10 +930,14 @@ nothing.
     `Y_k` is uniform and independent of the rest of the view. Replacing it by an independent
     uniform point, and computing the tree over such points, changes nothing.
   - Now `x_k` appears only as `L_k`'s blinder, uniform and independent: an ordinary confidential
-    output with a fresh blinder. This hop loses nothing. ∎
+    output with a fresh blinder. This hop loses nothing.
+- **H4** switches `derive` back to the real function, for every value but the `x_j` and `y_j`,
+  which H3 no longer uses as derived values. This is the ideal world. The loss is again at most
+  `Adv^prf-derive` plus `2048·2^−127`. ∎
 
-Two successors at one step break the hop from H2 to H3, because `x_k` then blinds two outputs. That
-is the leak L1.
+Two successors with different amounts at one step break the hop from H2 to H3, because `x_k`
+then blinds two different points. That is the leak L1. Two builds with the same amount give the
+same successor point, so they reveal only that they are linked (L1).
 
 **Theorem 7′ (what the lender learns).** The lender knows `x_k` and `y_k`.
 
@@ -836,7 +961,7 @@ From the chain and its own secrets, the lender has:
 
 - `C`, `a_c` and `x_k`, derived;
 - `k`, by counting the installments on the real chain, or by finding the `k ≤ 1024` with
-  `enc(A_c + k·G)` equal to `L_k`'s asset commitment (Lemma 3.1);
+  `enc(A_c + k·G)` equal to `L_k`'s asset commitment (Lemma 5.1);
 - `V_k`, read from `L_k`.
 
 **The algorithm.**
@@ -860,7 +985,7 @@ The lender opens no installment. It needs only `D_k` as a point, for `h(A, D_k)`
 - **Uniqueness.** `c·A_c = c'·A_c` with `c, c' ∈ [1, C] ⊂ [1, n)` gives `c ≡ c' (mod n)`, so
   `c = c'`.
 - **The opening.**
-  - Asset: `L_k`'s asset commitment is `A_c + k·G = Gen(collateral) + (a_c + k)·G`, by Lemma 3.1.
+  - Asset: `L_k`'s asset commitment is `A_c + k·G = Gen(collateral) + (a_c + k)·G`, by Lemma 5.1.
   - Value: `c_k·(A_c + k·G) + (x_k − c_k·k)·G = V_k`. ∎
 
 *Remarks.*
@@ -887,9 +1012,9 @@ over the blinders.
 - `d' = d_i − p ≥ 1`, so `c' = ⌈d'·C/R⌉ ∈ [1, C]` and `e = c'·R − d'·C ∈ [0, R − 1]`.
 - The carries hold `e + 1` and `R − e`, both in `[1, R] ⊂ [1, 2^64)`. The successor's amount `c'`
   is at least 1.
-- The first installment spends the supply `S = 2^50 ≥ R + 2`, and burns `S − R − 1 ≥ 1`.
+- The first installment spends the supply `S_w = 2^50 ≥ R + 2`, and burns `S_w − R − 1 ≥ 1`.
 - The witness satisfies E1–E7: E7 holds with `τ = c'·r₀ − C·r'`, because `c'·R − d'·C − e = 0`.
-- The index and the path are the honest ones (Lemmas 3.2 and 3.3).
+- The index and the path are the honest ones (Lemmas 5.2 and 5.3).
 - V1–V7 hold by Theorem 1(a).
 - The honest `T`s and `Y` are curve points. ∎
 
@@ -900,20 +1025,35 @@ The edges `e = 0` and `e = R − 1` give the carries `(1, R)` and `(R, 1)`. A re
 
 ### Leaks
 
-- **L1, the rebuild at the same index.** Two public successors at one step share `x_(k+1)`:
+- **L1, the rebuild at the same index.** Two builds at one step share `x_(k+1)`. Assuming
+  per-offer freshness (A6), a loan's `x_j` are shared with no other loan. What leaks depends on
+  the amounts:
+  - **Different payments.** Payments `p ≠ p''` that give different successor amounts
+    `c ≠ c''` produce two different successors:
 
-  ```
-  V = c·A_c + x_(k+1)·G,    V' = c''·A_c + x_(k+1)·G,    V − V' = (c − c'')·A_c.
-  ```
+    ```
+    V = c·A_c + x_(k+1)·G,    V'' = c''·A_c + x_(k+1)·G,    V − V'' = (c − c'')·A_c.
+    ```
 
-  - Baby-step giant-step over `[−C, C]` recovers `c − c''` in about `2·√(2C)` operations.
-  - The two builds also carry the same `Y_(k+1)`, the same leaf and the same path, so they are
-    linked before any search.
-  - The proofs add nothing (Theorem 6): different statements have independent nonces, and the same
-    statement has the same proof.
-  - Phase 5's range-proof nonce reuse is a separate leak of the same event.
-  - The only defence is the app's rule: save a build before its first broadcast and rebroadcast it.
-    A build that never becomes public leaks nothing.
+    If both become public, baby-step giant-step over `[−C, C]` recovers `c − c''` in about
+    `2·√(2C)` operations.
+  - **The same payment.** The same `p` keeps `d'`, `c'` and `x_(k+1)`, so `V_s` is the same point,
+    and no amount is revealed. What remains is the link between the two builds. They carry the
+    same `V_s`, `Y_(k+1)`, leaf and path.
+  - **Different payments with one successor amount.** Payments that round to the same `c'` also
+    give the same `V_s`. Then only phase 5's range-proof leak, if any, and the link remain.
+  - **The proofs add nothing** (Theorem 6): different statements have independent nonces, and the
+    same statement has the same proof.
+  - **Phase 5's range-proof nonce reuse** is a separate leak of the same event, which phase 5's
+    rule governs.
+  - **The rule (the controller's ruling, 2026-11-21; note: "Never rebuild an index with another
+    amount").**
+    - The app saves a build before its first broadcast and rebroadcasts it.
+    - A saved installment that became unbroadcastable (a coin it spends was spent, or the fee must
+      rise) may be rebuilt only with the same amount `p`, and under phase 5's range-proof nonce
+      rule.
+    - Then the successor is the same point, and only the link leaks.
+    - A build that never becomes public leaks nothing.
   - The same holds for anyone who sends an output with asset commitment `A_c + j·G` to the loan's
     address and runs an installment on it. Only the borrower or the lender knows `a_c`, so such a
     party can only hurt its own privacy.
@@ -950,8 +1090,13 @@ The edges `e = 0` and `e = R − 1` give the carries `(1, R)` and `(R, 1)`. A re
 - **L7, the heuristics.**
   - The soundness bound is non-tight (section 6.3).
   - It holds in the ideal-compression and random-oracle models.
-  - It composes the knowledge extractors of A2 with rewinding, at the usual level of rigour for
-    such compositions. Only run 1's transactions are extracted, which keeps the composition simple.
+  - A2 is taken in straight-line form. Elements' range and surjection proofs are known to be
+    proofs of knowledge only by rewinding. The straight-line form is heuristic, and plausible in
+    the algebraic group model with random oracles.
+  - With it, Theorem 4's forked algorithm extracts in-line in both runs, with one selection rule,
+    as the general forking lemma requires.
+  - Without it, the proof would have to nest A2's rewinding of SHA-256 inside the fork's own
+    rewinding of `f`, over up to 1024 installments. Such a nested proof is not given.
 - **L8, the carry asset is not checked by the program.** The proofs do not need it (Theorem 2,
   remarks). A borrower that pays its carries in another asset harms only itself.
 - **L9, the responses are malleable modulo `n`.** A third party can replace a response `z` by
@@ -972,40 +1117,79 @@ The proofs assume all of these:
   - `D` passes decompression;
   - the other points come from decompressing commitments, or from the checked parameters.
 
+  The `T` and `Y` coordinates may be non-canonical (`x + p` below `2^256`). The proofs do not need
+  canonical coordinates, because the challenge and the tree bind the bytes, and the point is the
+  one those bytes denote. The honest prover writes canonical coordinates, which the tree's leaves
+  require.
+
   The jets' addition formulas do not use the curve's constant `b`, so an unchecked point off the
   curve would admit invalid-curve attacks.
 - **O3.** The challenge absorbs exactly the points that V1–V7 use, in the note's order, and the
-  program uses the very points it hashed.
+  program uses the very points it hashed. `W1` and `A_w1` come from the same output, 3, and `W2`
+  and `A_w2` from output 4. `V_s` comes from output 1, and `D'` from the witness's `D` and output
+  2's `V`.
 - **O4.** The index is rebuilt from exactly 10 bits and compared with `i`.
 - **O5.** Every normalization of a point at infinity fails (`unwrap`), so no check silently uses
   `O`. Check 4 covers `D'`.
-- **O6.** `J`, `LEAF_IV`, `NODE_IV` and `FS_IV` are fixed by known-answer tests. In `J`'s
+- **O6.** `J`, `LEAF_IV`, `NODE_IV` and `FS_IV` are fixed by known-answer tests. `FS_IV` hashes
+  all of `A`, `A_c`, `V_c0`, `D₀` and `J`, as the extraction needs (section 6.1). In `J`'s
   derivation, an `X_t ≥ p` is rejected, not reduced. Reducing it would only bias `J` by
   `2^−224`, but rejecting keeps the derivation exactly as stated.
 - **O7.** The app verifies each proof with the Rust verifier before broadcasting it (Theorem 6,
   remarks).
 - **O8.** Phase 5's encoding conversions are correct for both prefix bits. A point read as its
   negation would change the sign of an amount and void the integer argument.
+- **O9, the lender at acceptance.** Before accepting, the lender:
+  - recomputes every point parameter from the shared secret and the terms, and checks it against
+    its encoded twin:
+    - `A` against `REPAYMENT_ASSET`;
+    - `D₀` against `REPAYMENT_COMMITMENT = h(enc(A), enc(D₀))`;
+    - `A_c` and `V_c0` against `ACTIVE_COLLATERAL_COMMITMENT = h(enc(A_c), enc(V_c0))`;
+  - recomputes `FS_IV` over all of `A`, `A_c`, `V_c0`, `D₀` and `J`, and `BLINDER_ROOT` over
+    `Y_1..Y_1024`;
+  - checks `1 ≤ C ≤ 2^44` and `1 ≤ R ≤ 2^50 − 2`.
+
+  The contract seeds the storage from `REPAYMENT_COMMITMENT` (`accept_offer`), compares output 2
+  with the encoded `REPAYMENT_ASSET` (`get_debt_hash`), and pins `L_0` through
+  `ACTIVE_COLLATERAL_COMMITMENT`, while E1–E7 use the point twins.
+  - If `D₀` were not the point of `REPAYMENT_COMMITMENT`, Theorem 2's (g1) and (g4) would describe
+    different debts.
+  - The bound on `R` is soundness-critical, because no range proof bounds `R` (finding 2).
+
+  The note's "Checks at acceptance" lists these checks.
+- **O10, the burns hide `R`.** The confidential `OP_RETURN` burns, `S_w − R − 1` at the first
+  installment and `R + 1` at the full repayment, use the same range-proof parameters as the other
+  confidential outputs, so that they do not reveal their amounts (and so `R`).
+  - Elements treats the range proofs of unspendable outputs differently: a minimum of 0 is allowed
+    for them.
+  - The implementer confirms from Elements' source what such a proof's header reveals, and chooses
+    the parameters accordingly.
+  - The note's "Full repayment" lists this rule.
 
 ## 14. Map of the claims
 
-| Claim | Where | The note's part it covers | Assumptions |
+Line numbers are those of `2026-11-06-private-lending-v2-design.md` as committed with this
+revision.
+
+| Claim | Where | Note, lines | Assumptions |
 |---|---|---|---|
-| Special soundness, HVZK, shared responses | Thm 1 | E1–E7, V1–V7, one response per secret | none |
-| The integer argument | Thm 2, Thm 4 | "The integer argument", its bounds | A1, A2 |
-| No overpayment, release rule | Cor 4.1 | the statement; client rules | as Thm 4 |
-| Challenge as a random oracle | §6.1, Lem 4.1, Thm 3 | "The Fiat–Shamir challenge", `FS_IV` | A8 |
-| Binding of the index | Lem 3.1, 3.2 | checks 1, 5, 6, 7; the acceptance pin | A4 |
-| Binding of the leaf | Lem 3.3, Cor 3.4 | "The Merkle tree", check 8, E3 | A5, A1 |
-| Soundness of the installment | Thm 4 | checks 1–11 | A1, A2, A4, A5, A8 |
-| `J` nothing-up-my-sleeve | Lem 2.1 | "`J`" | A8 |
-| Zero knowledge | Thm 5 | the honest commitments and responses | A7, A8 |
-| Nonce derivation | Thm 6 | "Derivations", the Sigma nonces | A1, A7, A8 |
-| Hiding of `V_k` given `Y_k` | Lem 7.1, Thm 7 | "The blinder commitments" | A3, A6, A7, A8 |
-| What the lender learns | Thm 7′ | "Liquidation", "The lender rebuilds" | as Thm 5 |
-| The lender's search | Thm 8 | "Liquidation", "The lender rebuilds" | as Thm 4 |
-| Completeness | Prop 9 | "Installment", the edge tests | none |
-| The rebuild leak | L1 | "Never rebuild an index" | none |
+| Special soundness, HVZK, shared responses | Thm 1 | E1–E7 669–679, V1–V7 732–759 | none |
+| The integer argument | Thm 2, Thm 4 | 704–730 | A1, A2, O9 |
+| No overpayment, release rule | Cor 4.1 | 628–637, 661–679, 1005–1011 | as Thm 4 |
+| Challenge as a random oracle | §6.1, Lem 6.1, Thm 3 | 761–785 | A4, A8 |
+| Binding of the index | Lem 5.1, 5.2 | checks 879–890; 990–1003 | A4, O9 |
+| Binding of the leaf | Lem 5.3, Cor 5.4 | 699–702, 787–798, check 892 | A5, A1 |
+| Soundness of the installment | Thm 4 | 661–730, checks 879–901 | A1, A2, A4, A5, A8 |
+| `J` nothing-up-my-sleeve | Lem 2.1 | 800–806 | A8 |
+| Zero knowledge | Thm 5 | 746–759, 812–821 | A7, A8 |
+| Nonce derivation | Thm 6 | 812–821 | A1, A7, A8 |
+| Hiding of `V_k` given `Y_k` | Lem 10.1, Thm 7 | 642–652, 956–957 | A3, A6, A7, A8 |
+| What the lender learns | Thm 7′ | 979–986, 1032–1037 | as Thm 5 |
+| The lender's search | Thm 8 | 979–986, 1032–1037 | as Thm 4 |
+| Completeness | Prop 9 | 937–961 | none |
+| The rebuild leak and its rule | L1 | 1013–1022 | A6 (freshness) |
+| The lender's checks at acceptance | O9 | 990–1003 | none |
+| The burns hide `R` | O10 | 953–954, 963–972 | A3 |
 
 ## References
 

@@ -966,6 +966,10 @@ for by its own witness. The program was about 6.0 kB and the witness 1.2 kB.
   accepts the NFT's burn output).
 - It burns their `R + 1` units in one confidential `OP_RETURN`.
 - The collateral `c_k` goes to the borrower.
+- **The burns hide `R`.** Both confidential burns, `S − R − 1` at the first installment and `R + 1`
+  here, use the same range-proof parameters as the other confidential outputs, so that they do not
+  reveal their amounts (proofs, O10). The implementer confirms Elements' rules for the range proofs
+  of unspendable outputs from its source.
 - The contract does not require the sweep. Without it, the carries stay locked for ever once the
   borrower NFT is burned.
 
@@ -983,9 +987,17 @@ active collateral. At step `k ≥ 1`:
 
 ### Off chain
 
-**Checks at acceptance.** Before accepting, the lender checks:
+**Checks at acceptance.** Before accepting, the lender checks (proofs, O9):
 
-- `1 ≤ C ≤ 2^44` and `1 ≤ R ≤ 2^50 − 2`;
+- `1 ≤ C ≤ 2^44` and `1 ≤ R ≤ 2^50 − 2`. The bound on `R` is soundness-critical: `R` lives only
+  in `D₀` and `REPAYMENT_COMMITMENT`, which no consensus range proof bounds.
+- that every point parameter is the point of its encoded twin, all recomputed from the shared
+  secret and the terms:
+  - `A` of `REPAYMENT_ASSET`;
+  - `D₀` of `REPAYMENT_COMMITMENT = h(A, D₀)`;
+  - `A_c` and `V_c0` of `ACTIVE_COLLATERAL_COMMITMENT = h(A_c, V_c0)`.
+- that `FS_IV` and `BLINDER_ROOT` are the ones it recomputes, `FS_IV` over all of `A`, `A_c`,
+  `V_c0`, `D₀` and `J`;
 - that the offer's address is the one its own parameters give, including the new ones.
 
 The borrower's app refuses to create an offer outside these bounds.
@@ -998,12 +1010,16 @@ The borrower's app refuses to create an offer outside these bounds.
   repayment; zero or above it, refused.
 - The contract now also refuses an overpayment.
 
-**Never rebuild an index.**
+**Never rebuild an index with another amount.**
 
 - Two builds at the same step share `x_(k+1)`, so their successors differ by `(c' − c'')·A_c`.
   Anyone holding both can search for the difference of the amounts.
-- The app saves a build before its first broadcast and rebroadcasts it. It never builds a second
-  one for the same loan state, as phase 5 already does for its range-proof nonces.
+- Two builds with the same payment `p` keep `c'` and `x_(k+1)`, so their successors are the same
+  point. Then only the link between the two builds is revealed (proofs, L1).
+- The app saves a build before its first broadcast and rebroadcasts it.
+- **A saved build that can no longer be broadcast** (a coin it spends was spent, or the fee must
+  rise) may be rebuilt only with the same amount `p`, and under phase 5's range-proof nonce rule.
+- Otherwise the app never builds a second installment for the same loan state.
 
 **Rebuilding from the seed and the chain.** The borrower rebuilds:
 
