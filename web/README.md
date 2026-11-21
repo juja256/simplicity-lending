@@ -170,12 +170,16 @@ With no stage named, every stage below but `short-proposal` runs in this order.
 - `create`: the borrower creates an offer to the lender of a 1-day term, as the borrower's form
   sets it: it expires 1 440 + 60 blocks after the tip (`proposalExpiry`). It builds twice from the
   same coins and checks that the NFTs and the output 3 nonce differ, runs its self-check and
-  broadcasts; the lender then opens and verifies the offer. Counted by the term rule
+  broadcasts; the lender then opens and verifies the offer. Its terms carry a private message,
+  Cyrillic with an emoji, which the lender reads back when it opens the offer, and the borrower
+  when it opens its own from its seed. Counted by the term rule
   (`termBlocksOf`) from the block the creation confirmed in, the offer's term must be 1 day and
   its proposal within the `directory` stage's terms: a creation that confirms more than 60 blocks
   after it was built, or a `create` record built before the term rule, fails the stage.
 - `accept`: the lender accepts the `create` offer: the active offer, the principal locked to the
-  borrower NFT, and the lender NFT to the lender.
+  borrower NFT, and the lender NFT to the lender. The principal carries the lender's message, which
+  the borrower reads from the confirmed acceptance (`readMessage`), verified, and the lender cannot
+  read back (its nonce is random).
 - `claim-principal`: the borrower claims the principal with its borrower NFT.
 - `repay-partial`: the borrower pays two installments, each a third of what the loan owes then
   (records `repay-partial-1` and `repay-partial-2`), and between them the lender claims the first
@@ -184,10 +188,14 @@ With no stage named, every stage below but `short-proposal` runs in this order.
   installments, from the local testnet indexer (below), as the app does, and the stage checks them
   against the records. Before saving an installment, both parties read the loan back with it from
   their seeds: the borrower must rebuild what the loan owes, and the lender must open the
-  installment's amount. The second installment is left unclaimed.
+  installment's amount. Each installment carries the borrower's message, which both parties must
+  read from the loan's state, verified for that installment, before saving and again from the
+  chain once it confirmed. The second installment is left unclaimed.
 - `repay`: the borrower repays the rest, `R` minus the installments, taking the loan's output from
   the indexer as `repay-partial` does. The borrower NFT is burned, the repayment, whose value
-  commitment is the loan's debt, is locked to the lender NFT, and the collateral comes back.
+  commitment is the loan's debt, is locked to the lender NFT, and the collateral comes back. The
+  repayment carries the borrower's message, which the lender reads from the confirmed repayment,
+  verified, and the borrower cannot read back.
 - `claim-repayment`: the lender's final claim, which burns its lender NFT. It reads the loan the
   repayment spent and the unspent installments from the indexer, and must sweep the unclaimed
   second installment, then the repayment, with the combined opening. The lender's wallet must then
@@ -235,8 +243,11 @@ expiry.
 The dry stages `create-dry`, `accept-dry`, `claim-principal-dry`, `repay-partial-dry`,
 `repay-dry`, `claim-repayment-dry`, `cancel-dry` and `liquidate-dry` build, check, sign and
 finalize their stage's transaction from the wallets' current coins, and never save or broadcast
-it. `repay-partial-dry` builds the next installment of a third of what the loan owes, and reads it
-back as `repay-partial` does. They run
+it, each with the message its stage sends. `repay-partial-dry` builds the next installment of a
+third of what the loan owes, and reads it back as `repay-partial` does. `create-dry` also builds
+the creation, unsigned, with the longest message that fits (2915 bytes in UTF-8, Cyrillic and
+emoji) and with none: the lender must open each with its message, and the two output 3 range proofs
+must have the same length. A message one byte longer must be refused before building. They run
 only when named, and need the records the real transaction would spend: `cancel-dry` rebuilds the
 cancellation of the `cancel-create` offer, and `liquidate-dry` the liquidation of the
 `liquidate-accept` one, which below the expiry checks the refusal instead. Before that,
@@ -356,18 +367,22 @@ part:
 2. the borrower picks the lender on `/borrow`; the form opens at the lender's minimums, the
    summary sentence follows the typing, an APR one basis point low and a collateral one base unit
    low each show their error and keep "Lock collateral and send" disabled; at the minimums the
-   proposal is sent, the app moves to `/borrow/loans`, which shows it "Waiting for E2E Lender",
-   and once the wallet's scan sees the proposal, the wallet button moves on to a new address (the
-   proposal received at an address past the one the button showed);
+   proposal is sent with a private message to the lender, whose field counts its bytes; the app
+   moves to `/borrow/loans`, which shows it "Waiting for E2E Lender", and once the wallet's scan
+   sees the proposal, the wallet button moves on to a new address (the proposal received at an
+   address past the one the button showed);
 3. `pnpm e2e:private short-proposal` runs, and the lender's proposals show it as "Term shorter
    than 1 day"; as its term is 15 blocks, the lender accepts it at once, after ticking "Accept
    outside my terms";
-4. the lender accepts the borrower's proposal, within its terms; the borrower receives the
-   principal; the repay form opens on the whole repayment, and the borrower pays half of it as an
-   installment, which the loan book shows as repaid and claimable; the lender claims it; the
-   borrower repays the rest, and the lender's final claim takes that repayment, with no
-   installment left to sweep: the loan book then shows the loan claimed, repaid in full, with
-   nothing left to claim;
+4. the lender reviews the borrower's proposal, within its terms, with the borrower's message and
+   the note that a message is not part of the terms (screenshot `lend-review-message`), and accepts
+   it with a message of its own; the borrower's My loans links to "Messages (2)", whose timeline
+   shows the proposal's message as its own and the lender's acceptance message, verified
+   (screenshot `borrow-messages`); the borrower receives the principal; the repay form opens on
+   the whole repayment, and the borrower pays half of it as an installment, which the loan book
+   shows as repaid and claimable; the lender claims it; the borrower repays the rest, and the
+   lender's final claim takes that repayment, with no installment left to sweep: the loan book
+   then shows the loan claimed, repaid in full, with nothing left to claim;
 5. once the short loan expired, the lender liquidates it, and the loan book shows it liquidated;
 6. each borrower page has no horizontal scroll at 375 px, and every page of both areas gets a
    screenshot.

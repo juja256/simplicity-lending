@@ -83,7 +83,8 @@ Scanning:
 Opening:
 
 - `openCreationAsLender(key, creationTxHex)`, `openCreationAsBorrower(key, creationTxHex)`: open an
-  offer into an `OpenedOffer`.
+  offer into an `OpenedOffer`. Only terms of version 2, which carry the borrower's message, open;
+  any other version is `terms-invalid`.
 - `OpenedOffer` getters: `principalAsset`, `principalAmount`, `repaymentAmount`, `interestRateBps`,
   `loanExpirationTime`, `borrowerNft`, `lenderNft`, `borrowerPublicKey`, `lenderPublicKey`,
   `collateralAsset`, `collateralAmount`, `firstInput`.
@@ -158,6 +159,12 @@ Messages (the format and the limits are in the core's `message.rs`):
   `Installment`, which `LoanState.installment(j).message` reads.
 - A message that does not verify keeps its text: show it as unverified, since the other party
   knows the output's blinders and can move a message between outputs.
+- `ReadMessage.text`, `OpenedOffer.message()` and `InstallmentInfo.message` give the text as it was
+  sent, control characters included: the caller removes them before showing it (`displayMessage`
+  in `web/src/privateLending/messages.ts`).
+- The testnet e2e (`web/README.md`) reads each message back the way the app does: the creation's
+  through `message()`, the acceptance's as the borrower and the full repayment's as the lender
+  through `readMessage`, and each installment's as both parties through `loanState`.
 
 LWK helpers:
 

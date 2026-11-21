@@ -71,7 +71,7 @@ The borrower app does not list your own key.
    the lender's terms. A field outside them says which term it breaks, and the proposal cannot be
    sent until every field is within them. **Repayment** shows what you repay and the interest in it,
    and the summary sentence below says what you repay by which date and what the lender keeps if you
-   do not.
+   do not. You may add a private message to the lender; see [Private messages](#private-messages).
 4. Select **Lock collateral and send**, check the proposal, and approve signing. Wait for
    confirmation and indexer discovery. The proposal then appears under **My loans**, waiting for the
    lender.
@@ -100,6 +100,8 @@ what you still owe, in the repayment asset.
   token is burned.
 - **Nothing, or more than you owe**, is refused, as is an amount with more decimals than the asset
   has.
+
+The form has a **Private message (optional)** field for a message to the lender with the payment.
 
 Each installment is a transaction of its own with its own fee, and the lender claims it
 separately. Only you and the lender can read its amount: on chain it is hidden like the loan's
@@ -137,7 +139,8 @@ restart when the lender accepts.
 4. Select **Review**, check the amounts, the borrower, and the expiry block, then select **Accept
    and lend** and approve signing. You can accept a proposal outside your terms after the warning.
    Wait for confirmation and indexing. Acceptance is not offered once a proposal's expiry has
-   passed.
+   passed. The review shows the borrower's message, if any, under **Message from the borrower**,
+   and you may answer with a private message of your own.
 5. The loan then appears in **Loan book**, with what the borrower has repaid, what remains and what
    you can claim. When the borrower pays an installment, select **Claim** to receive it; the lender
    role token comes back to you. Once the borrower repays the rest, or closes a loan its
@@ -163,6 +166,50 @@ Liquidation depends on block height, not a price feed. The UI considers expiry p
 observed tip is strictly greater than the expiry height. Tip and indexer updates can lag. A borrower
 can still claim previously unclaimed principal after liquidation if its principal output remains
 unspent and the borrower retains the required role token.
+
+## Private messages
+
+A borrower and a lender can send each other a private message with a loan's transactions. The
+proposal form, the review's **Accept and lend** and the **Repay** form each have a **Private
+message (optional)** field. An empty field sends no message. The field counts the text in UTF-8
+bytes against its limit: a Latin letter is 1 byte, a Cyrillic letter 2 and an emoji 4. A text over
+the limit is refused before anything is built, and the field says how many bytes it has and how
+many fit.
+
+| Message | From | Who reads it | At most |
+| --- | --- | --- | --- |
+| With the proposal | The borrower | The lender, and the borrower on any device | 2915 bytes |
+| With the acceptance | The lender | The borrower; the lender only in the browser that sent it | 3068 bytes |
+| With an installment | The borrower | The lender, and the borrower on any device | 3068 bytes |
+| With the full repayment | The borrower | The lender; the borrower only in the browser that sent it | 3068 bytes |
+
+A cancellation, a claim, a liquidation and **Close the loan** carry no message.
+
+Only the two parties can read a loan's messages; on chain they are hidden like its amounts, and a
+transaction with a message looks the same as one without. The proposal's and the installments'
+messages read again from the sender's wallet on any device. The acceptance's and the full
+repayment's do not: their sender reads them again only in the browser that sent them, which keeps
+a record of every acceptance, installment and full repayment it sends, with its message. That
+record stays in the browser profile after you disconnect, like the saved transactions. A message
+you sent from another browser does not show, and the timeline says so: "Messages you sent from
+another browser do not show here." The text of a transaction that was discarded and never
+broadcast never shows as sent.
+
+The lender reads the borrower's message in the proposal's review. Afterwards, a loan with messages
+has a **Messages (n)** link, under **My loans** and in the **Loan book**, which opens its timeline:
+each message in chain order with its step (**Proposal**, **Acceptance**, **Installment n** or
+**Full repayment**), its sender's key fingerprint, the sender's directory name when its entry
+verifies, and "(you)" on your own.
+
+Every message shows the note "A message is not part of the terms, and the contract does not enforce
+it." A promise made in a message binds nobody; only the terms do. Messages show as plain text: no
+link in one is clickable, and control characters and bidirectional-text controls are removed. The
+browser signs the acceptance's, the installments' and the full repayment's messages with your
+lending key for that step of that loan; a Jade neither shows nor signs them. A message whose
+signature does not verify for its step shows **Unverified**: the other party can read the output
+that carries it, and may have moved it there from another step. A message that cannot be decoded
+shows "This message could not be read." Anyone who holds your wallet's confidential descriptor can
+derive your lending key and read your messages too.
 
 ## Expiry does not withdraw a pending offer
 
