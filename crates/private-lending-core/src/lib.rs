@@ -1,6 +1,7 @@
 //! Cryptography of Simplicity Lending private offers: lending keys, per-offer secrets, signed
 //! terms, the marker, pinned outputs, building offers, and finding, opening and checking them in
 //! their creation transactions; a loan's debt as a curve point, with the installments that pay it;
+//! the release of collateral by installments, with the derived values of the liquidation repair;
 //! the private messages of a loan's parties; and the terms lenders publish in the directory, with
 //! the check of a proposal against them.
 //!
@@ -24,6 +25,7 @@ mod marker;
 mod message;
 mod offer;
 mod pinned;
+mod release;
 mod secrets;
 mod terms;
 
@@ -55,6 +57,11 @@ pub use message::{
 };
 pub use offer::{NewOffer, OfferError, OfferPinned, OpenError, OpenedOffer};
 pub use pinned::PinnedOutput;
+pub use release::{
+    BlinderTree, CARRY_SUPPLY, LEAF_IV, MAX_COLLATERAL, MAX_REPAYMENT, MAX_STEPS, NODE_IV,
+    ReleaseError, carry_remainder, check_bounds, collateral_at, fold_path, fs_iv, release_j,
+    release_of,
+};
 pub use secrets::{OfferSecrets, PinnedRole, expiry_hash};
 pub use terms::{OfferTerms, SignedTerms, TERMS_VERSION, TermsError};
 

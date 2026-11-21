@@ -4,6 +4,7 @@ use elements::confidential::{AssetBlindingFactor, Nonce, ValueBlindingFactor};
 use elements::hashes::{Hash, HashEngine, sha256};
 use elements::secp256k1_zkp::{PublicKey, SECP256K1, SecretKey, XOnlyPublicKey};
 
+use crate::release::{MAX_STEPS, scalar};
 use crate::{LendingKey, lift_lending_key, tagged_hash};
 
 /// The prefix of the tags of values derived from the shared secret.
@@ -85,6 +86,31 @@ impl OfferSecrets {
         self.derive("expiry-salt")
     }
 
+    /// The blinders `x_j` and `y_j` of step `j`, for `j = 1 … 1024`:
+    /// `scalar(derive("release-x/<j>"))` and `scalar(derive("release-y/<j>"))` with `<j>` in
+    /// decimal, each reduced modulo the curve order. The collateral at step `j` has the value
+    /// commitment `c_j·A_c + x_j·G`, and the contract's Merkle tree commits to
+    /// `Y_j = x_j·G + y_j·J` ([`BlinderTree`](crate::BlinderTree)).
+    ///
+    /// # Panics
+    /// If `j` is 0 or above 1024.
+    pub fn release_blinders(&self, j: u32) -> (SecretKey, SecretKey) {
+        assert!(
+            (1..=MAX_STEPS).contains(&j),
+            "a loan has no step {j}: its steps are 1 to {MAX_STEPS}"
+        );
+        let secret_scalar = |label: String| {
+            SecretKey::from_slice(&scalar(&self.derive(&label)).to_be_bytes()).expect(
+                "a tagged hash is a multiple of the curve order with negligible probability",
+            )
+        };
+
+        (
+            secret_scalar(format!("release-x/{j}")),
+            secret_scalar(format!("release-y/{j}")),
+        )
+    }
+
     /// The value labelled `label`: `tagged_hash("simplicity-lending/private/v1/<label>",
     /// shared_secret)`.
     pub fn derive(&self, label: &str) -> [u8; 32] {
@@ -104,6 +130,14 @@ pub fn expiry_hash(salt: &[u8; 32], expiry: u32) -> [u8; 32] {
     engine.input(&expiry.to_be_bytes());
 
     sha256::Hash::from_engine(engine).to_byte_array()
+}
+
+#[cfg(test)]
+impl OfferSecrets {
+    /// The secrets of the offer whose shared secret is `shared_secret`.
+    pub(crate) fn from_shared_secret(shared_secret: SecretKey) -> OfferSecrets {
+        OfferSecrets { shared_secret }
+    }
 }
 
 #[cfg(test)]
@@ -214,6 +248,66 @@ mod tests {
         );
         let (borrower_side, lender_side) = both_sides(&[9; 32]);
         assert_eq!(borrower_side.expiry_salt(), lender_side.expiry_salt());
+    }
+
+    /// The frozen blinders of the first and the last step, for the same shared secret as
+    /// [`view_tag_and_blinders_known_answers`], so a change of tag, label or reduction fails.
+    #[test]
+    fn release_blinders_known_answers() {
+        let secrets = OfferSecrets {
+            shared_secret: SecretKey::from_slice(&sequence(0x80)).unwrap(),
+        };
+
+        let (x_1, y_1) = secrets.release_blinders(1);
+        assert_eq!(
+            x_1.secret_bytes().to_hex(),
+            "2347eab89207a4f4ed897eff8c12fa22f3c15d6eaa9cf5fa865c0a4014928343"
+        );
+        assert_eq!(
+            y_1.secret_bytes().to_hex(),
+            "6b8f846594e2a8ac32f33181b973782f3475615b06ab26275691da9e93571ce9"
+        );
+        let (x_1024, y_1024) = secrets.release_blinders(1024);
+        assert_eq!(
+            x_1024.secret_bytes().to_hex(),
+            "4bf102fe8a2240d7cb13f0f937afa43b8ae84b7a3ae7355d0cb7f54f7096d445"
+        );
+        assert_eq!(
+            y_1024.secret_bytes().to_hex(),
+            "d211d53fecf6ac05e7f1ad7e0a94761660ac6c711dbd8929e3b33a094b6cf6b2"
+        );
+        // the label is the decimal step, so x_1 is derived as "release-x/1"
+        assert_eq!(
+            x_1.secret_bytes(),
+            scalar(&secrets.derive("release-x/1")).to_be_bytes()
+        );
+    }
+
+    #[test]
+    fn both_sides_derive_the_same_release_blinders() {
+        let (borrower_side, lender_side) = both_sides(&[9; 32]);
+        for j in [1, 2, 1023, 1024] {
+            assert_eq!(
+                borrower_side.release_blinders(j),
+                lender_side.release_blinders(j)
+            );
+        }
+        let (x_1, y_1) = borrower_side.release_blinders(1);
+        let (x_2, _) = borrower_side.release_blinders(2);
+        assert_ne!(x_1, y_1);
+        assert_ne!(x_1, x_2);
+    }
+
+    #[test]
+    #[should_panic(expected = "no step")]
+    fn release_blinders_of_step_zero_panic() {
+        both_sides(&[9; 32]).0.release_blinders(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "no step")]
+    fn release_blinders_past_the_last_step_panic() {
+        both_sides(&[9; 32]).0.release_blinders(1025);
     }
 
     #[test]
