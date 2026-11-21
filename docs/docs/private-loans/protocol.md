@@ -90,7 +90,10 @@ what it sent instead (see [Client state](#client-state-and-implementation-map)).
 The message field is version `1` (1 byte) ‖ kind (1 byte; `1` is UTF-8 text, the only kind) ‖
 length (2 bytes, big-endian) ‖ the text's bytes. The text is non-empty, valid UTF-8. A reader
 refuses an unknown version or kind, a length past the end of the data, an empty text or invalid
-UTF-8: the message is unreadable, and the rest of the loan still reads.
+UTF-8: the message is unreadable, and the rest of the loan still reads. The creation's message is
+the exception: it is part of the borrower-signed terms, so a malformed one makes the whole proposal
+fail to open (`terms-invalid`) and the lender never sees it; only the borrower who signed it can
+cause this, and they can cancel the proposal.
 
 A range proof carries 3136 bytes of extra data. In the terms, a missing message is the single byte
 `0`. In the other range proofs it is no extra data at all, which rewinds as zeros. A range proof's

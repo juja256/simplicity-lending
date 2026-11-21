@@ -208,8 +208,10 @@ browser signs the acceptance's, the installments' and the full repayment's messa
 lending key for that step of that loan; a Jade neither shows nor signs them. A message whose
 signature does not verify for its step shows **Unverified**: the other party can read the output
 that carries it, and may have moved it there from another step. A message that cannot be decoded
-shows "This message could not be read." Anyone who holds your wallet's confidential descriptor can
-derive your lending key and read your messages too.
+shows "This message could not be read." The proposal's message is the exception: it is part of the
+terms the borrower signs, so a proposal whose message cannot be decoded does not open at all, and
+the lender never sees it. Anyone who holds your wallet's confidential descriptor can derive your
+lending key and read your messages too.
 
 ## Expiry does not withdraw a pending offer
 

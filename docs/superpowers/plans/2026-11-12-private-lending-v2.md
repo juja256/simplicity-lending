@@ -2348,5 +2348,19 @@ proposed for `main`. Each check names the screen of the app as phase 4 leaves it
    repayment in the console. Expected: the Jade shows the outputs and signs; the claim confirms
    with the installment swept into it, and the loan book shows the loan repaid with nothing left
    to claim.
+5. **The messages at the widths the demo skips** (phase 6). As the lender, open the review of a
+   proposal that carries a message in a window 375 px wide; as the borrower, open the
+   **Messages (n)** timeline of a loan with several messages at 1280 px. Expected: the message
+   and the timeline wrap inside their boxes with no horizontal scroll, and "Against your terms"
+   and the actions stay reachable below the proposal's message.
+6. **The lender reads the full repayment's message** (phase 6). As the borrower, repay a loan in
+   full with a message; as the lender, open **Messages (n)** on the repaid loan in the loan book.
+   Expected: the full repayment's message shows, without an **Unverified** badge (no automated
+   check reads it through the app's hook).
+7. **A full repayment through a network outage** (phase 6). As the borrower, repay a loan in full,
+   then cut the network (devtools offline) before it confirms and restore it after a minute.
+   Expected: the row moves from "waits for its confirmation" to repaid once the network is back
+   (a demo run once stalled there for 20 minutes while the indexer had the loan repaid; not
+   reproduced).
 
 Record the results in the commit that ticks them off.
