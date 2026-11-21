@@ -1426,6 +1426,7 @@ async function buildSignedInstallment(
     principalCoins,
     feeCoins,
     lendingKey: borrower.lendingKey,
+    tipHeight: await ctx.chain.tipHeight(),
   })
   out('blinded installment PSET:')
   describeOutputs(built.pset, {

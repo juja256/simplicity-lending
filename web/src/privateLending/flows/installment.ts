@@ -17,7 +17,8 @@
 // script, and both layout checks require them, and the built transaction is read back with the
 // borrower's lending key before it is signed: it must give the loan the plan expects.
 // The borrower NFT is spent as a plain input, as in the full repayment. The builder pays no
-// installment before the principal is claimed (`principalClaimedBefore`).
+// installment before the principal is claimed (`principalClaimedBefore`), nor from the expiry
+// block on (`installmentTermOpen`).
 import type { WalletTxOut } from 'lwk_wasm'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
@@ -33,6 +34,7 @@ import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 import type { PrivateFlowDeps } from '../deps'
 import { finalizePrivateOfferInput, pinnedAuthCovenant } from '../finalize'
 import { borrowerLoanInputs, type Loan } from '../loan'
+import { INSTALLMENT_AFTER_TERM_NOTE, installmentTermOpen } from '../repayPlan'
 import { walletInputSecret } from '../secrets'
 import type { VerifiedOffer } from '../verify'
 import {
@@ -50,6 +52,23 @@ import {
   walletCoinInput,
   wasmStep,
 } from './shared'
+
+/**
+ * An installment refused before building: the tip has reached the loan expiry, from which the
+ * lender's liquidation can be mined in the same block, and keep the installment as well. The
+ * message is the borrower's (`INSTALLMENT_AFTER_TERM_NOTE`).
+ */
+export class InstallmentAfterTermError extends Error {
+  readonly code = 'installment-after-term'
+
+  constructor(
+    readonly loanExpirationTime: number,
+    readonly tipHeight: number,
+  ) {
+    super(INSTALLMENT_AFTER_TERM_NOTE)
+    this.name = 'InstallmentAfterTermError'
+  }
+}
 
 export interface InstallmentParams {
   /** What the installment pays: more than 0 and less than `loan.state.remaining`. */
@@ -72,6 +91,8 @@ export interface InstallmentParams {
    * with it before it is signed.
    */
   lendingKey: LendingKey
+  /** The chain tip's height, read just before the build: below the loan expiry. */
+  tipHeight: number
 }
 
 export interface InstallmentSummary {
@@ -90,9 +111,11 @@ export interface InstallmentSummary {
 
 /**
  * Builds the borrower's installment of `params.amount` on the loan at `loan.state.loanOutpoint`,
- * blinded and ready to sign. Throws `PrincipalNotClaimedError` before building unless the borrower
- * NFT comes from the principal claim. `finalize` finalizes the wallet inputs (the borrower NFT
- * among them), then the loan (Installment), running the covenant on the transaction.
+ * blinded and ready to sign. Throws `InstallmentAfterTermError` before anything else once
+ * `params.tipHeight` has reached the loan expiry, and `PrincipalNotClaimedError` before building
+ * unless the borrower NFT comes from the principal claim. `finalize` finalizes the wallet inputs
+ * (the borrower NFT among them), then the loan (Installment), running the covenant on the
+ * transaction.
  */
 export async function buildPrivateInstallment(
   deps: PrivateFlowDeps,
@@ -103,6 +126,13 @@ export async function buildPrivateInstallment(
   const { lwk, wasm } = deps
   if (offer.role !== 'borrower') throw new Error('Only the borrower pays an installment')
   const opened = offer.opened
+  const expiry = opened.loanExpirationTime()
+  if (!Number.isInteger(params.tipHeight) || params.tipHeight <= 0) {
+    throw new Error('The tip height must be a block height')
+  }
+  if (!installmentTermOpen(params.tipHeight, expiry)) {
+    throw new InstallmentAfterTermError(expiry, params.tipHeight)
+  }
   const { state } = loan
   const { amount } = params
   const borrowerNft = opened.borrowerNft()

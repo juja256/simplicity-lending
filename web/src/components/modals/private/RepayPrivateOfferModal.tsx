@@ -11,6 +11,7 @@ import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import type { UpdatedPset } from '@/lwk/updatedPset'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
+import { asBorrowerError } from '@/privateLending/borrowerErrors'
 import { loanBorrowerNftOutpoint, utxoOutpoint } from '@/privateLending/candidate'
 import {
   buildPrivateInstallment,
@@ -21,7 +22,7 @@ import { outpointOf } from '@/privateLending/flows/shared'
 import { useLoan } from '@/privateLending/hooks/useLoan'
 import { unitsToDecimal } from '@/privateLending/lenderTerms'
 import { loadLoan } from '@/privateLending/loan'
-import { borrowerActions, isPastExpiry, offerTxState } from '@/privateLending/offerView'
+import { borrowerActions, borrowerTermEnded, offerTxState } from '@/privateLending/offerView'
 import {
   checkInstallmentTerm,
   installmentTraceInputs,
@@ -30,6 +31,8 @@ import {
   repayPlan,
 } from '@/privateLending/repayPlan'
 import { selectAssetCoins, selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
+import { loadPrivateTxsForWallet } from '@/providers/pendingTransactions/storage'
+import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
 import { usePendingTransactions } from '@/providers/pendingTransactions/usePendingTransactions'
 import { useWallet } from '@/providers/wallet/useWallet'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
@@ -60,7 +63,7 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
   const { item, unsentTx } = props
   const { terms } = item
   const { principalAsset } = NETWORK_CONFIG
-  const { confirmedBalances, getLendingKey } = useWallet()
+  const { confirmedBalances, getLendingKey, scriptPubkey } = useWallet()
   const { privateTxs, discardedTxs } = usePendingTransactions()
   const { data: tipHeight } = useBlockHeight()
   const { formatCollateralDisplay, formatPrincipalAmount } = useFormatAmount()
@@ -97,12 +100,14 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
   const pays = plan?.kind === 'refused' ? undefined : plan?.amount
   const insufficientBalance =
     pays !== undefined && BigInt(confirmedBalances[principalAsset.id] ?? 0) < pays
-  const isExpired = isPastExpiry(terms, tipHeight)
+  // From the expiry block on, as the plan refuses an installment.
+  const isExpired = borrowerTermEnded(terms, tipHeight)
 
   // `utxo` is the unspent loan output. The outpoints come from the indexer, read again now;
   // `loadLoan` walks the loan back on chain to this offer's acceptance, and the builder checks on
-  // chain that the borrower NFT comes from a transaction that claimed this offer's principal.
-  const build = async ({
+  // chain that the borrower NFT comes from a transaction that claimed this offer's principal. Its
+  // refusals are shown in the borrower's words (`borrowerErrorText`).
+  const buildPayment = async ({
     deps,
     offer,
     candidate,
@@ -120,13 +125,14 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
       )
     }
     // The form's plan, again against the loan read now and a fresh tip: the kind it is saved
-    // under must be the one built.
+    // under must be the one built. An installment's builder checks that tip again.
+    const freshTip = plan.kind === 'installment' ? await fetchLatestBlockHeight() : tipHeight
     const freshPlan = repayPlan({
       remaining: freshOwed,
       amountText,
       decimals: principalAsset.decimals,
       symbol: principalAsset.symbol,
-      tipHeight: plan.kind === 'installment' ? await fetchLatestBlockHeight() : tipHeight,
+      tipHeight: freshTip,
       expiry,
     })
     if (freshPlan.kind === 'refused') throw new Error(freshPlan.message)
@@ -171,10 +177,18 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
     // An installment derives its key from the loan output, its first wallet input (input 2) and
     // the NFT's receiver script: it never starts from the first input of an earlier installment
     // of this loan saved here (discarded, or failed), which may have reached the network with the
-    // same key.
+    // same key. The saved records are read again now, as another tab may have saved one since
+    // this tab loaded its list, and no installment is built if they cannot be read.
+    let stored: PrivateTxRecord[]
+    try {
+      if (scriptPubkey === null) throw new Error('No wallet is connected')
+      stored = await loadPrivateTxsForWallet(scriptPubkey)
+    } catch (error) {
+      throw new Error('Saved payments could not be read; reload the page', { cause: error })
+    }
     const traced = installmentTraceInputs(
       deps.lwk,
-      [...privateTxs, ...discardedTxs],
+      [...stored, ...privateTxs, ...discardedTxs],
       fresh.state.loanOutpoint,
     )
     const usable = coins.filter(coin => !traced.has(outpointOf(coin)))
@@ -209,8 +223,13 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
       principalCoins,
       feeCoins,
       lendingKey,
+      tipHeight: freshTip,
     })
   }
+  const build = (fresh: FreshOffer) =>
+    buildPayment(fresh).catch((error: unknown) => {
+      throw asBorrowerError(error)
+    })
 
   // An installment is sent only before the expiry block, checked again with a fresh tip.
   const beforeBroadcast = isInstallment
@@ -267,7 +286,7 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
       {loan === undefined ? (
         loanQuery.isError ? (
           <Notice role='alert'>
-            The loan could not be read: {ErrorHandler.describe(loanQuery.error)}
+            The loan could not be read: {ErrorHandler.describe(asBorrowerError(loanQuery.error))}
           </Notice>
         ) : (
           <p role='status' className='text-muted text-sm'>

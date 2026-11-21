@@ -75,7 +75,8 @@ function toneOf(status: BorrowerStatus): Tone {
     case 'accepted':
       return 'accent'
     case 'active':
-      return status.blocksLeft !== null && status.blocksLeft < 0 ? 'danger' : 'success'
+      // From the expiry block on, as the note says the term has ended (`borrowerTermEnded`).
+      return status.blocksLeft !== null && status.blocksLeft <= 0 ? 'danger' : 'success'
     case 'collateralTaken':
       return 'danger'
     default:

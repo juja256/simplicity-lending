@@ -396,6 +396,21 @@ describe("the borrower's installments", () => {
     })
   })
 
+  // The note and the repay form share one boundary: from the expiry block on, the form refuses an
+  // installment, and the note says why.
+  it('says the term has ended from the expiry block on, as the form refuses an installment', () => {
+    const item = own('active', PAID_ONCE)
+    const loan = figures([{ outpoint: INSTALLMENT, amount: 30_000n }], 80_000n)
+    const ended = 'The term has ended: the lender may take your collateral at any time.'
+    for (const tip of [EXPIRY, EXPIRY + 1]) {
+      expect(borrowerView(item, tip, loan)).toEqual({ action: 'repay', note: ended })
+    }
+    // before it, and while the tip is unknown, nothing
+    for (const tip of [EXPIRY - 1, 0]) {
+      expect(borrowerView(item, tip, loan)).toEqual({ action: 'repay' })
+    }
+  })
+
   it('closes the loan once the installments paid the whole debt', () => {
     const item = own('active', PAID_ONCE)
     const loan = figures([{ outpoint: INSTALLMENT, amount: 110_000n }], 0n)

@@ -3,6 +3,7 @@ import { useMemo } from 'react'
 
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
+import { asBorrowerError } from '@/privateLending/borrowerErrors'
 import { loanBorrowerNftOutpoint, utxoOutpoint } from '@/privateLending/candidate'
 import { buildZeroDebtClose } from '@/privateLending/flows/zeroDebtClose'
 import { loadLoan } from '@/privateLending/loan'
@@ -33,8 +34,9 @@ export default function CloseZeroDebtModal(props: PrivateOfferActionModalProps) 
 
   // `utxo` is the unspent loan output. The outpoints come from the indexer, read again now;
   // `loadLoan` walks the loan back on chain to this offer's acceptance, and the builder checks on
-  // chain that the borrower NFT comes from a transaction that claimed this offer's principal.
-  const build = async ({ deps, offer, candidate, utxo }: FreshOffer) => {
+  // chain that the borrower NFT comes from a transaction that claimed this offer's principal. Its
+  // refusals are shown in the borrower's words (`borrowerErrorText`).
+  const buildClose = async ({ deps, offer, candidate, utxo }: FreshOffer) => {
     const loan = await loadLoan(deps, offer, await getLendingKey(), utxoOutpoint(utxo))
     if (loan.state.remaining !== 0n) {
       throw new Error(
@@ -61,6 +63,10 @@ export default function CloseZeroDebtModal(props: PrivateOfferActionModalProps) 
       collateralReceiver: walletReceiver(deps),
     })
   }
+  const build = (fresh: FreshOffer) =>
+    buildClose(fresh).catch((error: unknown) => {
+      throw asBorrowerError(error)
+    })
 
   const summary = useMemo(
     () => [

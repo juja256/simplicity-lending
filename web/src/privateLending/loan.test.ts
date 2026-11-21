@@ -11,7 +11,11 @@ import type { PrivateFlowDeps } from './deps'
 import { pinnedAuthCovenant } from './finalize'
 import { buildInstallmentClaim, findLenderNft } from './flows/claimInstallments'
 import { buildFinalClaim, NothingToClaimError } from './flows/claimRepayment'
-import { assertInstallmentReadsBack, buildPrivateInstallment } from './flows/installment'
+import {
+  assertInstallmentReadsBack,
+  buildPrivateInstallment,
+  InstallmentAfterTermError,
+} from './flows/installment'
 import { buildPrivateLiquidation, ExpiryNotReachedError } from './flows/liquidation'
 import { buildPrivateRepayment } from './flows/repayment'
 import { buildZeroDebtClose } from './flows/zeroDebtClose'
@@ -386,6 +390,7 @@ describe("the borrower's flows", () => {
           principalCoins,
           feeCoins,
           lendingKey: keys.borrower,
+          tipHeight: offer.opened.loanExpirationTime() - 1,
         }),
       (deps: PrivateFlowDeps) =>
         buildPrivateRepayment(deps, offer, loan, {
@@ -402,6 +407,28 @@ describe("the borrower's flows", () => {
       expect((refusal as PrincipalNotClaimedError).borrowerNftOutpoint).toBe(nft)
       // the walk alone: the installment, whose input 0 spends the creation's output 0
       expect(fetched).toEqual([installmentTxid])
+    }
+  })
+
+  // From the expiry block on, the lender's liquidation can be mined with the installment, and keep
+  // it: the builder refuses before it fetches anything, whatever the form checked.
+  it('refuse an installment from the expiry block on, before anything is fetched', async () => {
+    const offer = await openOffer('borrower')
+    const { deps: walk } = fakeChain()
+    const loan = await loadLoan(walk, offer, keys.borrower, fixture.loan.loan_outpoint)
+    const expiry = offer.opened.loanExpirationTime()
+    for (const tipHeight of [expiry, expiry + 1]) {
+      const { deps, fetched } = fakeChain()
+      const refusal = await buildPrivateInstallment(deps, offer, loan, {
+        amount: 1_000n,
+        borrowerNftOutpoint: `${installmentTxid}:0`,
+        principalCoins: [coin(`${'c1'.repeat(32)}:0`, offer.opened.principalAsset(), 5_000n)],
+        feeCoins: [coin(`${'c2'.repeat(32)}:0`, OTHER_ASSET, 2_000n)],
+        lendingKey: keys.borrower,
+        tipHeight,
+      }).catch((error: unknown) => error)
+      expect(refusal).toBeInstanceOf(InstallmentAfterTermError)
+      expect(fetched).toEqual([])
     }
   })
 

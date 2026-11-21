@@ -5,25 +5,37 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react'
 
-import { fetchTxConfirmations } from '@/api/esplora/methods'
+import {
+  fetchLatestBlockHeight,
+  fetchTxConfirmations,
+  fetchTxOutspends,
+} from '@/api/esplora/methods'
 import { useLatestRef } from '@/hooks/useLatestRef'
-import { keepsDiscardTrace } from '@/privateLending/repayPlan'
+import { getLwk } from '@/lwk'
+import {
+  installmentLoanOutpoint,
+  isInstallmentTrace,
+  keepsDiscardTrace,
+  staleInstallmentRecords,
+} from '@/privateLending/repayPlan'
 import { useWallet } from '@/providers/wallet/useWallet'
 
 import { PendingTransactionsContext } from './PendingTransactionsContext'
 import { deletePrivateTx, getPrivateTx, loadPrivateTxsForWallet, putPrivateTx } from './storage'
-import type { PrivateTxRecord, SavePrivateTxInput } from './types'
+import { FINALIZED_THRESHOLD, type PrivateTxRecord, type SavePrivateTxInput } from './types'
 
 const CONFIRMATION_POLL_MS = 15_000
 const CONFIRMED_THRESHOLD = 1
-const FINALIZED_THRESHOLD = 2
 /** Defensive cap on how long a pending record can sit untracked before we give up on it. */
 const MAX_PENDING_AGE_MS = 24 * 60 * 60 * 1000
 const FINALIZED_CLEANUP_GRACE_MS = 10 * 60 * 1000
 const SWEEP_INTERVAL_MS = 15_000
+/** How often the sweep looks for installment traces that can go (`staleInstallmentRecords`). */
+const STALE_TRACE_CHECK_MS = 24 * 60 * 60 * 1000
 
 type TrackedTxStatus = 'processing' | 'confirmed' | 'finalized'
 
@@ -65,6 +77,34 @@ function sweepAction(record: SweptRecord, now: number): 'fail' | 'remove' | null
     return 'remove'
   }
   return null
+}
+
+/**
+ * The confirmations of the spend of each loan outpoint (`"<txid>:<vout>"`), read from esplora one
+ * at a time: null while it is unspent, 0 while the spend is in the mempool. Null too when esplora
+ * cannot tell, so that the trace stays.
+ */
+async function loanSpendDepths(outpoints: Iterable<string>): Promise<Map<string, number | null>> {
+  const tip = await fetchLatestBlockHeight()
+  const depths = new Map<string, number | null>()
+  for (const outpoint of outpoints) {
+    const [txid, vout] = outpoint.split(':')
+    try {
+      const spend = (await fetchTxOutspends(txid))[Number(vout)]
+      if (!spend?.spent || spend.txid === undefined) {
+        depths.set(outpoint, null)
+      } else if (spend.status?.confirmed !== true) {
+        depths.set(outpoint, 0)
+      } else {
+        const height = spend.status.block_height
+        depths.set(outpoint, height === undefined ? null : tip - height + 1)
+      }
+    } catch (error) {
+      console.warn('[PendingTransactions] Could not read the spend of', outpoint, error)
+      depths.set(outpoint, null)
+    }
+  }
+  return depths
 }
 
 function usePendingTxConfirmationTracking(
@@ -125,8 +165,8 @@ function usePendingTxConfirmationTracking(
 /**
  * The wallet's private lending transactions: saved finalized before their first broadcast,
  * tracked to finality, then forgotten. A discarded installment stays, untracked, as its discard's
- * trace (`discardedTxs`). Disabled for wallets that cannot run private loans: then it opens no
- * database and runs no timer.
+ * trace (`discardedTxs`), as a failed one does, until the spend of its loan output is finalized.
+ * Disabled for wallets that cannot run private loans: then it opens no database and runs no timer.
  */
 function usePrivateTxStore(scriptPubkey: string | null, enabled: boolean) {
   const [records, setRecords] = useState<PrivateTxRecord[]>([])
@@ -139,6 +179,7 @@ function usePrivateTxStore(scriptPubkey: string | null, enabled: boolean) {
     [records],
   )
   const privateTxsRef = useLatestRef(privateTxs)
+  const recordsRef = useLatestRef(records)
 
   useEffect(() => {
     if (!scriptPubkey || !enabled) return
@@ -243,6 +284,19 @@ function usePrivateTxStore(scriptPubkey: string | null, enabled: boolean) {
   )
   usePendingTxConfirmationTracking(trackedPrivateTxs, onPrivateTxStatus)
 
+  // The discarded and failed installments are kept as traces (`installmentTraceInputs`) until the
+  // spend of their loan output is finalized: then no installment can spend it again.
+  const dropStaleTraces = useCallback(async () => {
+    const traces = recordsRef.current.filter(isInstallmentTrace)
+    const lwk = await getLwk()
+    const outpoints = new Set(traces.flatMap(record => installmentLoanOutpoint(lwk, record) ?? []))
+    const depths = await loanSpendDepths(outpoints)
+    const stale = staleInstallmentRecords(lwk, traces, outpoint => depths.get(outpoint) ?? null)
+    for (const record of stale) await removePrivateTx(record.txid)
+  }, [recordsRef, removePrivateTx])
+  // Set before a check starts, so that a failed one waits for the next day too.
+  const lastTraceCheckRef = useRef(0)
+
   useEffect(() => {
     if (!enabled) return
     const id = setInterval(() => {
@@ -252,9 +306,18 @@ function usePrivateTxStore(scriptPubkey: string | null, enabled: boolean) {
         if (action === 'fail') void updatePrivateTx(record.txid, TRACKING_TIMED_OUT)
         else if (action === 'remove') void removePrivateTx(record.txid)
       }
+      if (
+        now - lastTraceCheckRef.current >= STALE_TRACE_CHECK_MS &&
+        recordsRef.current.some(isInstallmentTrace)
+      ) {
+        lastTraceCheckRef.current = now
+        dropStaleTraces().catch((error: unknown) =>
+          console.warn('[PendingTransactions] Could not drop stale installment traces', error),
+        )
+      }
     }, SWEEP_INTERVAL_MS)
     return () => clearInterval(id)
-  }, [enabled, privateTxsRef, updatePrivateTx, removePrivateTx])
+  }, [enabled, privateTxsRef, recordsRef, updatePrivateTx, removePrivateTx, dropStaleTraces])
 
   return {
     privateTxs,

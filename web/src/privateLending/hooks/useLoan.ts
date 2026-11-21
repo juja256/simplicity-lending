@@ -2,7 +2,9 @@
 // indexer lists, for either party, and kept as plain figures. The figures only decide what a page
 // shows and offers: every build loads its loan fresh through the gate, and the loan's state, which
 // holds its blinders, is freed once read. A loan output's history never changes, so a loan is read
-// once per loan output and session; a new installment or a close moves the loan to another one.
+// once per loan output and session; a new installment or a close moves the loan to another one. A
+// read that failed is tried again every 30 seconds, as a transient esplora error must not hide the
+// loan's actions for good.
 import { useQueries, useQuery, type UseQueryOptions } from '@tanstack/react-query'
 import { useCallback } from 'react'
 
@@ -15,6 +17,9 @@ import { useWallet } from '@/providers/wallet/useWallet'
 
 import { privateLoanQueryKey } from './queryKeys'
 import { PRIVATE_API_BASE_URL, usePrivateFlowDeps } from './usePrivateFlowDeps'
+
+/** How often a loan read that failed is tried again. */
+const LOAN_RETRY_MS = 30_000
 
 /** A loan's figures for the party that opened its offer, as `loadLoan` read them. */
 export interface LoanFigures {
@@ -66,8 +71,10 @@ function useLoanQuery(): (item: OpenedOfferItem) => UseQueryOptions<LoanFigures>
         ),
         enabled: isReady && privateCapable && scriptPubkey !== null && loanOutpoint !== '',
         staleTime: Infinity,
-        // a loan output that does not lead back to the acceptance stays refused
         retry: 1,
+        // Only while in error: a loan output that does not lead back to the acceptance is read
+        // again then too, and refused again.
+        refetchInterval: query => (query.state.status === 'error' ? LOAN_RETRY_MS : false),
         queryFn: async () => {
           const [deps, key] = await Promise.all([getDeps(), getLendingKey()])
           const { txid, role } = item
