@@ -1,0 +1,8 @@
+fn main() {
+    let a: Gej = jet::scale(1, ((0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798, 0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8), 1));
+    let b: Gej = jet::scale(2, ((0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798, 0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8), 1));
+    let c: Gej = jet::scale(3, ((0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798, 0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8), 1));
+    let d: Gej = jet::scale(4, ((0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798, 0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8), 1));
+    let acc: Gej = jet::gej_add(jet::gej_add(a, b), jet::gej_add(c, d));
+    assert!(jet::eq_1(<bool>::into(jet::gej_is_infinity(acc)), 0));
+}

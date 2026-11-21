@@ -42,6 +42,9 @@ Builds on [the v1 design](2026-10-28-private-lending-design.md) and
      `2^64`, so the installments add up to the debt exactly. (b) Releasing collateral in
      proportion needs a BP++ circuit (products of hidden values under different asset
      generators) and the verifier taking commitments from the transaction.
+   - A feasibility spike for (b) ran on 2026-11-21 (`2026-11-21-phase-7-spike/note.md`): buildable
+     with Sigma proofs and consensus range proofs plus a liquidation repair, about 43,000 WU per
+     installment; (b) stays postponed.
    - The phase 5 design note (below) builds (a). It closes the loan by equality instead of the
      BIP340 signature under `D_final`, and by revealing the blinder `k` of `D = k·G` when the debt
      is already zero, decided 2026-11-18.

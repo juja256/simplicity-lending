@@ -2312,13 +2312,23 @@ The phase review follows (whole branch, Opus).
 (phase 5's item 3(a)). This phase starts only when the user brings it back; v2's final checks run
 after phase 6. The notes below stay for that day.
 
-Branch `v2/phase-7-proportional-release`.
+**The spike ran on 2026-11-21, and the user postponed phase 7 again after it.** The note and its
+prototypes are in `docs/superpowers/specs/2026-11-21-phase-7-spike/`. In short: proportional release
+is buildable with the note's route C (Sigma proofs, with the remainder's range checked by consensus
+through two carry outputs) plus a repair that keeps liquidation possible after an installment the
+lender cannot read. An installment that releases collateral measured about 43,000 WU on regtest
+(24,794 today), with no padding; the lender's search for the collateral's opening at liquidation
+takes about 9 s in wasm for collateral below 2^40 units. Owed before building: the soundness
+proofs listed in the note's section 7, and the user's choice between route C and BP++ from their
+fork (one measurement: two 64-bit reciprocal range proofs compiled by the fork).
 
-- **Gate first: a throwaway research spike.** Can a BP++ verifier check the release
-  `floor((paid + p)·C/R) − floor(paid·C/R)` in Simplicity, within the transaction's cost budget,
-  with the commitments taken from the transaction? The spike ends with a note in the spec giving
-  the circuit, the cost and the jets it needs. If it is not feasible, stop and bring the note to
-  the user before writing any task.
+Branch `v2/phase-7-proportional-release` (when it comes back).
+
+- **Gate first: a throwaway research spike** (done 2026-11-21, above). Can a BP++ verifier check the
+  release `floor((paid + p)·C/R) − floor(paid·C/R)` in Simplicity, within the transaction's cost
+  budget, with the commitments taken from the transaction? The spike ends with a note in the spec
+  giving the circuit, the cost and the jets it needs. If it is not feasible, stop and bring the note
+  to the user before writing any task.
 - If feasible: a second contract revision (no migration), the prover in `private-lending-core`,
   the wasm bindings, the flow and the UI that shows the released collateral.
 - **Done when:** the releases add up exactly (128-bit arithmetic), phase 5's liveness test is

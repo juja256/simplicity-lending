@@ -1,0 +1,21 @@
+[package]
+name = "p7-bsgs"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "bsgs-native"
+path = "src/main.rs"
+
+[dependencies]
+k256 = { version = "=0.13.4", default-features = false, features = ["arithmetic"] }
+
+[profile.release]
+opt-level = 3
+lto = true

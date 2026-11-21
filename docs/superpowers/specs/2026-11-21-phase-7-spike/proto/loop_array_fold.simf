@@ -1,0 +1,10 @@
+fn step(k: u256, acc: Gej) -> Gej {
+    let p: Gej = jet::scale(k, ((0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798, 0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8), 1));
+    jet::gej_add(acc, p)
+}
+
+fn main() {
+    let ks: [u256; 64] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64];
+    let acc: Gej = array_fold::<step, 64>(ks, ((0, 0), 0));
+    assert!(jet::eq_1(<bool>::into(jet::gej_is_infinity(acc)), 0));
+}

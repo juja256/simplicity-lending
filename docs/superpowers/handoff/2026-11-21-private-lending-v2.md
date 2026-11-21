@@ -232,6 +232,10 @@ signature proves a put, not the key's latest.
 2. **Final manual checks** by the user, the plan's "Final manual checks" items 1 to 7, in `pnpm
    dev` on testnet; then `v2` may be proposed for `main`.
 
+Phase 6 is merged (`552aab6`). On 2026-11-21 the user brought phase 7 back for its feasibility
+spike, then postponed it again: the note and prototypes are in
+`docs/superpowers/specs/2026-11-21-phase-7-spike/`, and the plan's phase 7 section sums it up.
+
 ## Environment (the user's Mac), additions to the 2026-11-16 handoff
 
 - The private lending wasm under `web/src/wasm/private-lending/` is git-ignored output: after

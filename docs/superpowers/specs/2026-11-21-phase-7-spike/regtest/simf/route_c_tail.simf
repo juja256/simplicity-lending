@@ -1,0 +1,172 @@
+
+// ---------------------------------------------------------------------------------------------
+// P7 spike additions
+//
+// Layout of the installment (spike): input 0 the loan; output 0 the successor loan, output 1 the
+// installment, output 2 the carry W1 (e' + 1), output 3 the carry W2 (R − e'), both paid to
+// CARRY_SCRIPT_HASH, a spendable script, so consensus bounds both amounts to [1, 2^64). The release,
+// the changes and the fee follow and are not constrained. (The real contract also passes the borrower
+// NFT at index 0 and pins the installment's script; both are cheap and left out here.)
+//
+// Parameters (checked by the lender off chain, like every parameter):
+//   A_GE, A_C_GE, V_C0_GE, D0_GE: the repayment asset commitment A, the collateral's asset
+//     commitment at acceptance A_c, its value commitment V_c0 = C·A_c + rho·G, and D0 = R·A + r0·G,
+//     as affine points;
+//   J_GE: a NUMS point; Y_ROOT: the Merkle root of Y_i = x_i·G + y_i·J; FS_IV: SHA-256 of the
+//     constants above, the chaining value of the Fiat–Shamir challenge.
+// ---------------------------------------------------------------------------------------------
+
+// T + k·P, affine
+fn add_scaled(t: Ge, k: u256, p: Ge) -> Ge {
+    unwrap(jet::gej_normalize(jet::gej_ge_add(jet::scale(k, (p, 1)), t)))
+}
+
+fn absorb(h: u256, p: Ge) -> u256 {
+    let (x, y): (u256, u256) = p;
+    jet::sha_256_block(h, x, y)
+}
+
+fn u16_to_u256(i: u16) -> u256 {
+    <(u128, u128)>::into((0, <(u64, u64)>::into((0, <(u32, u32)>::into((0, <(u16, u16)>::into((0, i))))))))
+}
+
+// One level of the Merkle path: (is the node a right child, its sibling)
+fn merkle_step(step: (bool, u256), acc: (u256, u16, u16)) -> (u256, u16, u16) {
+    let (is_right, sibling): (bool, u256) = step;
+    let (node, index, weight): (u256, u16, u16) = acc;
+    let (carry_w, next_weight): (bool, u16) = jet::add_16(weight, weight);
+    match is_right {
+        true => {
+            let (carry_i, next_index): (bool, u16) = jet::add_16(index, weight);
+            (jet::sha_256_block(param::NODE_IV, sibling, node), next_index, next_weight)
+        },
+        false => (jet::sha_256_block(param::NODE_IV, node, sibling), index, next_weight),
+    }
+}
+
+// The input's asset commitment is A_c + i·G: binds the installment's index to the collateral's
+// public re-blinding step.
+fn check_index(input_asset: (u1, u256), index: u16) {
+    let expected: Ge = unwrap(jet::gej_normalize(
+        jet::gej_ge_add(jet::generate(u16_to_u256(index)), param::A_C_GE)
+    ));
+    check_commitment_encodings_eq(input_asset, get_point_commitment(expected));
+}
+
+// Y_(i+1) is leaf i of Y_ROOT
+fn check_blinder_commitment(y: Ge, index: u16, path: [(bool, u256); 10]) {
+    let leaf: u256 = absorb(param::LEAF_IV, y);
+    let (root, path_index, weight): (u256, u16, u16) =
+        array_fold::<merkle_step, 10>(path, (leaf, 0, 1));
+    assert!(jet::eq_256(root, param::Y_ROOT));
+    assert!(jet::eq_16(path_index, index));
+}
+
+// The Sigma proof. Secrets: C, rho, c', x, y, e, w1, R, r0, w2, tau.
+//   E1  V_c0      = C·A_c + rho·G
+//   E2  V_s       = c'·A_c + x·G
+//   E3  Y         = x·G + y·J
+//   E4  W1 − A_w1 = e·A_w1 + w1·G          (W1 holds e + 1)
+//   E5  D0        = R·A + r0·G
+//   E6  W2        = (R − e)·A_w2 + w2·G    (W2 holds R − e)
+//   E7  0         = c'·D0 − C·D' − e·A − tau·G
+fn verify_release(
+    debt_left: Ge,
+    successor_value: Ge,
+    w1: Ge, a_w1: Ge,
+    w2: Ge, a_w2: Ge,
+    y: Ge,
+    ts: (Ge, Ge, Ge, Ge, Ge, Ge, Ge),
+    zs: ((u256, u256, u256, u256), (u256, u256, u256, u256), (u256, u256, u256))
+) {
+    let (t1, t2, t3, t4, t5, t6, t7): (Ge, Ge, Ge, Ge, Ge, Ge, Ge) = ts;
+    let ((z_cap, z_rho, z_c, z_x), (z_y, z_e, z_w1, z_r), (z_r0, z_w2, z_tau)):
+        ((u256, u256, u256, u256), (u256, u256, u256, u256), (u256, u256, u256)) = zs;
+
+    // challenge over the statement and the commitments
+    let h: u256 = absorb(param::FS_IV, debt_left);
+    let h: u256 = absorb(h, successor_value);
+    let h: u256 = absorb(h, w1);
+    let h: u256 = absorb(h, a_w1);
+    let h: u256 = absorb(h, w2);
+    let h: u256 = absorb(h, a_w2);
+    let h: u256 = absorb(h, y);
+    let h: u256 = absorb(h, t1);
+    let h: u256 = absorb(h, t2);
+    let h: u256 = absorb(h, t3);
+    let h: u256 = absorb(h, t4);
+    let h: u256 = absorb(h, t5);
+    let h: u256 = absorb(h, t6);
+    let c: u256 = jet::scalar_normalize(absorb(h, t7));
+
+    jet::linear_verify_1(((z_cap, param::A_C_GE), z_rho), add_scaled(t1, c, param::V_C0_GE));
+    jet::linear_verify_1(((z_c, param::A_C_GE), z_x), add_scaled(t2, c, successor_value));
+    jet::linear_verify_1(((z_y, param::J_GE), z_x), add_scaled(t3, c, y));
+    let w1_minus: Ge = unwrap(jet::gej_normalize(jet::gej_ge_add((w1, 1), jet::ge_negate(a_w1))));
+    jet::linear_verify_1(((z_e, a_w1), z_w1), add_scaled(t4, c, w1_minus));
+    jet::linear_verify_1(((z_r, param::A_GE), z_r0), add_scaled(t5, c, param::D0_GE));
+    jet::linear_verify_1(
+        ((jet::scalar_add(z_r, jet::scalar_negate(z_e)), a_w2), z_w2),
+        add_scaled(t6, c, w2)
+    );
+    jet::linear_verify_1(
+        ((z_c, param::D0_GE), jet::scalar_negate(z_tau)),
+        add_scaled(add_scaled(t7, z_cap, debt_left), z_e, param::A_GE)
+    );
+}
+
+fn pay_installment(params: ((bool, u256), u16, Ge, [(bool, u256); 10], (Ge, Ge, Ge, Ge, Ge, Ge, Ge), ((u256, u256, u256, u256), (u256, u256, u256, u256), (u256, u256, u256)))) {
+    let (debt_witness, index, y, path, ts, zs): ((bool, u256), u16, Ge, [(bool, u256); 10], (Ge, Ge, Ge, Ge, Ge, Ge, Ge), ((u256, u256, u256, u256), (u256, u256, u256, u256), (u256, u256, u256))) = params;
+    let debt: (u1, u256) = get_commitment(debt_witness);
+
+    assert!(jet::eq_32(jet::current_index(), 0));
+    ensure_input_script_hash(0, get_script_hash_for_storage(true, get_debt_hash(debt)));
+
+    // the installment V under A
+    let (installment_asset, installment_value): ((u1, u256), (u1, u256)) =
+        get_confidential_asset_and_amount(1, false);
+    check_commitment_encodings_eq(installment_asset, get_repayment_asset());
+    let debt_left: Ge = get_debt_left(debt, installment_value);
+    ensure_output_script_hash(0, get_script_hash_for_storage(true, get_debt_hash(get_point_commitment(debt_left))));
+
+    // the successor: same asset, re-blinded by G; its amount is the proof's c'
+    let (collateral_asset, collateral_value): ((u1, u256), (u1, u256)) =
+        get_confidential_asset_and_amount(0, true);
+    let (successor_asset, successor_value): ((u1, u256), (u1, u256)) =
+        get_confidential_asset_and_amount(0, false);
+    check_commitment_encodings_eq(
+        successor_asset,
+        get_point_commitment(get_point_plus_generator(get_commitment_point(collateral_asset)))
+    );
+
+    // the repair: index and committed blinder
+    check_index(collateral_asset, index);
+    check_blinder_commitment(y, index, path);
+
+    // the carries, to the pinned spendable script
+    ensure_output_script_hash(2, param::CARRY_SCRIPT_HASH);
+    ensure_output_script_hash(3, param::CARRY_SCRIPT_HASH);
+    let (w1_asset, w1_value): ((u1, u256), (u1, u256)) = get_confidential_asset_and_amount(2, false);
+    let (w2_asset, w2_value): ((u1, u256), (u1, u256)) = get_confidential_asset_and_amount(3, false);
+
+    verify_release(
+        debt_left,
+        get_commitment_point(successor_value),
+        get_commitment_point(w1_value), get_commitment_point(w1_asset),
+        get_commitment_point(w2_value), get_commitment_point(w2_asset),
+        y, ts, zs
+    );
+}
+
+// Left: the installment. Right: a stand-in for the liquidation, which checks nothing here: the
+// spike only shows that the lender can open and spend the collateral after a release.
+fn main() {
+    match witness::PATH {
+        Left(params: ((bool, u256), u16, Ge, [(bool, u256); 10], (Ge, Ge, Ge, Ge, Ge, Ge, Ge), ((u256, u256, u256, u256), (u256, u256, u256, u256), (u256, u256, u256)))) => {
+            pay_installment(params);
+        },
+        Right(unit: ()) => {
+            assert!(jet::eq_32(jet::current_index(), 0));
+        },
+    }
+}
