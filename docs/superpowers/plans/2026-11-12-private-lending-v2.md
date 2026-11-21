@@ -2340,6 +2340,216 @@ Branch `v2/phase-7-proportional-release`, from `v2/main` (`dcc18a3`).
 - **Done when:** the releases add up exactly (128-bit arithmetic), phase 5's liveness test is
   extended to releases, and `pnpm parity` and the e2e stages pass.
 
+The design is the spec's "Phase 7 design note" (`59feb04`): the statement and E1–E7, M, the
+challenge, the tree, `J`, the derivations, the contract's checks in order, the layouts, the client
+rules and the done-when tests are there and are not repeated here. Every implementer reads it
+before their task. The spike's note and prototypes
+(`docs/superpowers/specs/2026-11-21-phase-7-spike/`, `regtest/` above all) are a reference
+implementation to port, not code to copy blindly.
+
+Decided at phase start (2026-11-21), beyond the design note:
+- **Execution** as in phase 6: one implementer and one task review per task, Opus for the
+  implementers, a whole-branch review at the end. Tasks marked **Review now** get an Opus review.
+- **The proofs gate the code.** If task 1 finds that a statement cannot be proved as designed, the
+  phase stops and the note goes to the user before task 2.
+- **No migration:** offers of the phase 5 program are not read (the program id changes).
+- **Names.** The installment flow keeps its file, `flows/installment.ts`; the lender's search lives
+  in `private-lending-core` (`release_search.rs`) and runs in the browser in a Web Worker.
+
+### Phase 7 review focus
+
+1. A loan whose installments the lender cannot read: the liquidation must still be built, by the
+   search, from the chain and the lender's secrets alone. Tasks 4, 5 and 8 test it.
+2. A rebuild at the same step: two builds share `x_(k+1)`. The app must rebroadcast a saved build
+   and never build a second one for the same loan state. Task 8 tests it.
+3. The bounds at acceptance: `C = 2^44` and `R = 2^50 − 2` accepted, one more refused, by the
+   lender's console and by the borrower's form. Tasks 8 and 9 test it.
+4. Carries found through the indexer: the app must verify each carry on chain (the previous
+   installment's outputs 3 and 4, or creation's output 4) before spending it. Task 8 tests it.
+5. The edges of the arithmetic: `e = 0`, `e = R − 1`, a release of 0, the first installment's
+   leftover burn, and step 1024. Tasks 2, 5 and 8 test them.
+
+### Task 1: The soundness proofs (**Review now**: the contract is written to these statements)
+
+**Files:** Create `docs/superpowers/specs/2026-11-21-phase-7-proofs.md`.
+
+- [ ] **Step 1:** State and prove, against the design note's equations and bounds: special
+  soundness and honest-verifier zero-knowledge of E1–E7 with shared responses; the integer
+  argument (E7 over the integers from the bounds, hence `c' = ceil(d'C/R)` and no overpayment); the
+  challenge as a random oracle over the chained compressions with `FS_IV`; binding of the index
+  (the asset commitment's step) and of the leaf (M, under collision resistance with fixed IVs);
+  hiding of `V_k` given `Y_k` and the transcript; that the lender's search recovers the opening;
+  and the rebuild-at-the-same-index leak as a stated limitation.
+- [ ] **Step 2:** For each theorem, name its assumptions (discrete logarithms of `A`, `A_c`, `A_w1`,
+  `A_w2`, `J`; consensus bounds; the PRF of `derive`) and the design-note line it covers. If a
+  statement fails or needs a design change, say so first and stop.
+- [ ] **Step 3: Commit** `docs: v2 phase 7 soundness proofs`.
+
+### Task 2: The release arithmetic and the derivations, in the core
+
+**Files:** Create `crates/private-lending-core/src/release.rs`; modify `lib.rs`, `secrets.rs`.
+
+**Interfaces (produces):**
+- `collateral_at(debt: u64, collateral: u64, repayment: u64) -> u64` (`ceil` in `u128`),
+  `carry_remainder(...) -> u64` (`e`), `release_of(...)`, and `check_bounds(collateral, repayment)
+  -> Result<(), ReleaseError>` (`C ≤ 2^44`, `R ≤ 2^50 − 2`); `CARRY_SUPPLY: u64 = 1 << 50`;
+  `MAX_STEPS: u32 = 1024`.
+- `release_j() -> PublicKey` (`J`), `LEAF_IV`, `NODE_IV`, `fs_iv(A, A_c, V_c0, D₀) -> [u8; 32]`;
+  `OfferSecrets::release_blinders(j) -> (SecretKey, SecretKey)` (`x_j`, `y_j`);
+  `BlinderTree::new(secrets) -> BlinderTree` with `root()`, `leaf(i)`, `path(i) -> [(bool,
+  [u8; 32]); 10]`.
+
+- [ ] **Step 1: Write the failing tests:** property tests that the releases of random sequences add
+  up to `C` and each is `floor(paid_k·C/R) − floor(paid_(k−1)·C/R)`; `e = 0` and `e = R − 1` cases;
+  the bounds at, and one past, each limit; known answers for `J`, the IVs, `fs_iv`, `x_j`, `y_j`
+  and the root of a fixed offer; a path that folds to the root for leaves 0, 1 and 1023.
+- [ ] **Step 2: Run them to see them fail.** `cargo test -p private-lending-core`. Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Check.** `cargo test -p private-lending-core`; clippy; fmt. Expected: pass.
+- [ ] **Step 5: Commit** `core: the release arithmetic and the repair's derivations`.
+
+### Task 3: The prover and a Rust verifier (**Review now**: a prover and verifier that agree with each other but not with the program would pass every core test)
+
+**Files:** Create `crates/private-lending-core/src/release_proof.rs`.
+
+**Interfaces (produces):**
+- `ReleaseStatement { a, a_c, v_c0, d0, d_next, v_s, w1, a_w1, w2, a_w2, y }` (points);
+  `ReleaseSecrets { … the eleven secrets }`; `ReleaseProof { t: [PublicKey; 7], z: [Scalar; 11] }`.
+- `prove(statement, secrets, borrower: &LendingKey) -> ReleaseProof` (nonces per the note);
+  `verify(statement, proof, fs_iv) -> bool` (V1–V7 and the challenge, exactly as the program does);
+  `challenge(fs_iv, statement, t) -> Scalar`.
+
+- [ ] **Step 1: Write the failing tests:** an honest proof verifies; each tamper of the note's
+  done-when list that is visible at the proof level fails (`c' ± 1`, carries split wrong, a random
+  blinder against `Y`, another `Y`, an altered response, a proof of another statement); two builds
+  of one statement give the same proof; a known-answer challenge.
+- [ ] **Step 2–4:** fail, implement, pass (`cargo test -p private-lending-core`, clippy, fmt).
+- [ ] **Step 5: Commit** `core: the release proof`.
+
+### Task 4: The lender's search
+
+**Files:** Create `crates/private-lending-core/src/release_search.rs` (port of the spike's
+`bsgs/`).
+
+**Interfaces (produces):** `find_collateral(v_k, a_c, x_k, max: u64) -> Option<u64>` and
+`collateral_opening(k, c_k, a_c_blinder, x_k) -> (AssetBlindingFactor, ValueBlindingFactor)`.
+
+- [ ] **Step 1: Write the failing tests:** amounts found at 1, `max` and random values for `max =
+  2^36`; `None` for an amount above `max`; an ignored test at `2^44` that prints its time.
+- [ ] **Step 2–4:** fail, implement (batched normalisation, a compact table), pass.
+- [ ] **Step 5: Commit** `core: the lender's search for the collateral's opening`.
+
+### Task 5: The contract revision (**Review now**: a wrong check releases collateral the borrower has not paid for, or makes the loan impossible to liquidate)
+
+**Files:** Modify `crates/contracts/simf/private_lending.simf`,
+`crates/contracts/src/programs/private_lending/{params,witness,core,verify}.rs`; the regtest tests
+in `crates/contracts/tests/private_lending/` (`setup.rs`, `offer_installment_flows.rs`,
+`liveness.rs`, `claim_flows.rs`, `parity_fixture.rs`; remove `zero_debt_close_flows.rs`); the
+parity fixture (regenerated).
+
+**Interfaces (produces):** the new parameters and the witness path of the note's "The program";
+`attach_installment` with release and carries; `attach_creation` with the carry issuance;
+`attach_cancellation` burning the supply; `attach_full_repayment` sweeping the carries;
+`attach_liquidation` taking the collateral's opening from the search.
+
+- [ ] **Step 1: Write the failing tests:** every contract item of the note's "Done when": the
+  success set, the refusal set (each tamper isolating one check), the liveness test with releases
+  (a lender that reads no installment liquidates by the search, `C ≤ 2^32`), exact sums, the
+  weight and budget test (no annex, below 100,000 WU, printing the weight), creation, cancellation
+  and full repayment with the carries, and phase 5's final claim after releases.
+- [ ] **Step 2: Run them to see them fail.** The audit file aside, `cd crates/contracts && simplex
+  build && simplex test`. Expected: FAIL.
+- [ ] **Step 3: Implement**, porting the spike's `route_c_tail.simf`; remove the zero-debt close
+  branch and its helpers; regenerate the fixture.
+- [ ] **Step 4: Check.** `simplex test`; `cargo test -p lending-contracts --lib`; clippy; fmt.
+  Expected: pass.
+- [ ] **Step 5: Commit** `contracts: proportional release, and the zero-debt close goes`.
+
+### Task 6: The wasm and the parity check
+
+**Files:** Modify `crates/private-lending-wasm/src/{loan,open,build}.rs`, its README;
+`web/scripts/check-private-lending-parity.ts`.
+
+**Interfaces (produces):** `LoanState` gains `collateral` (`c_k` when known),
+`releasePreview(amount)`, `carries()` (the borrower's openings of the current carries); `planInstallment` builds the witness
+of the note (`index`, `Y`, path, `T`s, `z`s) and the successor's and carries' pinned blindings;
+`findCollateral(...)` and `collateralOpening(...)` wrap task 4; `OpenedOffer` exposes the new
+parameters; `checkOfferBounds()` for the lender's acceptance check.
+
+- [ ] **Step 1: Write the failing tests** (wasm unit tests and parity): the witness encoding
+  against the fixture; the release preview against the core; the bounds; the search at `2^24`.
+- [ ] **Step 2–4:** fail, implement, pass (`cargo test -p private-lending-wasm`; `cd web && pnpm
+  build:wasm && pnpm parity`).
+- [ ] **Step 5: Commit** `wasm: installments that release collateral`.
+
+### Task 7: The indexer reads carries
+
+**Files:** Modify `crates/indexer/src/indexer/trackers/private_offers/core.rs`, its models; a
+migration adding `carry` to `private_utxo_type`; `crates/indexer/tests/private_offers_indexing.rs`.
+
+- [ ] **Step 1: Write the failing tests:** creation's output 4 is the first `carry`; an
+  installment's outputs 3 and 4 are carries and spend the previous ones; the full repayment and
+  the cancellation spend them; the zero-debt close case is gone.
+- [ ] **Step 2–4:** fail, implement, pass (`cargo test -p lending-indexer` on a scratch database;
+  `cargo sqlx prepare --workspace --check -- --all-targets`).
+- [ ] **Step 5: Commit** `indexer: the carry outputs`.
+
+### Task 8: The flows
+
+**Files:** Modify `web/src/privateLending/flows/{creation,cancellation,installment,repayment,liquidation}.ts`,
+`web/src/privateLending/{loan,repayPlan,candidate}.ts`, `web/src/simplicity/private-lending/{layout,witness,scripts}.ts`,
+`web/src/lwk/psetBuilder.ts` if the third issuance needs it; remove `flows/zeroDebtClose.ts`,
+`CloseZeroDebtModal.tsx` and their tests; create `web/src/privateLending/searchWorker.ts`.
+
+- [ ] **Step 1: Write the failing tests** (Vitest): the creation's layout with the carry issuance
+  (output 4, `S` units); the installment's layout (inputs 0–3, outputs 0–4, the release, the first
+  installment's leftover burn); the carries verified on chain before they are spent (a carry the
+  indexer names that is not the previous installment's output 3 or 4 is refused); the bounds at
+  acceptance; step 1024 offers only the full repayment; the saved-build rule for a second build of
+  one loan state; the liquidation taking its opening from the search when an installment does not
+  open.
+- [ ] **Step 2–4:** fail, implement, pass (`pnpm test`, `pnpm lint`, `VITE_DEBUG_MNEMONIC= pnpm
+  build`, `pnpm parity`, tsc on the three configs).
+- [ ] **Step 5: Commit** `web: the flows of proportional release`.
+
+### Task 9: What the apps show
+
+**Files:** Modify `RepayPrivateOfferModal.tsx`, `web/src/areas/borrow/MyLoansPage.tsx`,
+`web/src/areas/lend/{LoanBookPage,bookSummary}.tsx`/`.ts`, `useLoan.ts`, the proposal form and the
+console's review (the bounds).
+
+- [ ] **Step 1: Write the failing tests:** the repay form's release preview for an amount; the
+  collateral released and left in My loans and the loan book; "computing" while the search runs;
+  the bounds' messages in the proposal form and the review.
+- [ ] **Step 2–4:** fail, implement, pass (as task 8).
+- [ ] **Step 5: Commit** `web: the collateral released and left`.
+
+### Task 10: The e2e stages, the demo and the docs
+
+**Files:** Modify `web/scripts/e2e-private-lending.ts`, `web/scripts/demo/demo.spec.ts`,
+`web/README.md`, `docs/docs/private-loans/{guide,protocol}.md`, `docs/docs/simplicity.md`.
+
+- [ ] **Step 1:** `repay-partial` releases collateral and checks the borrower's wallet received
+  it; `repay` after releases; `cancel` burns the carry supply; the zero-debt case of the dry
+  stages goes.
+- [ ] **Step 2:** The demo shows a release in the borrower's and the lender's views.
+- [ ] **Step 3:** The guide and `protocol.md` describe the release, the carries, the bounds and the
+  lender's search.
+- [ ] **Step 4: Check.** The stages above on testnet from an empty state with a fresh indexer
+  database; `pnpm demo:testnet`; the docs build.
+- [ ] **Step 5: Commit** `web, docs: proportional release in the e2e, the demo and the guide`.
+
+### Task 11: Verify the phase
+
+- [ ] **Step 1:** Rust: the non-regtest packages, `simplex test` (audit file aside), clippy, fmt,
+  the sqlx prepare check.
+- [ ] **Step 2:** Web: `pnpm test`, build, lint, parity, check:config, tsc; every e2e stage from an
+  empty state with a fresh local indexer database.
+- [ ] **Step 3:** `pnpm demo:testnet`; both compose builds; the docs build.
+- [ ] **Step 4:** Commit `docs: v2 phase 7 verified` with the results.
+
+The phase review follows (whole branch, Opus).
+
 ---
 
 ## Final manual checks (deferred from task 1.5)
