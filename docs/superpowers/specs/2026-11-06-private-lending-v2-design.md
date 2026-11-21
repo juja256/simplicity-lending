@@ -1172,7 +1172,8 @@ arithmetic.
   carries are blinded to the borrower's lending key.
 - **The bounds** `C ≤ 2^44` and `R ≤ 2^50 − 2`, both checked by the lender.
 - **The derivations:** the labels of `x_j` and `y_j`; nonces from the borrower's lending key over
-  `h₇`; `J` by try-and-increment; and the IVs and `FS_IV` with their tags.
+  `h₇` and the witness digest `W` (proofs, R1); `J` by try-and-increment; and the IVs and `FS_IV`
+  with their tags.
 - **On-curve checks** of the witness's `T`s and `Y`. The spike did not check them. An off-curve
   point would break the group-law argument the proofs rely on.
 - **The layouts:**

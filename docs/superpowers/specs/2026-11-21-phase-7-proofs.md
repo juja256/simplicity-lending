@@ -48,9 +48,10 @@ section 2. The findings, most important first:
    secret" is true only computationally. `φ_S` maps `Z_n^11` into `𝔾^7`, so every statement
    has at least `n^4` witnesses. But every nonzero element of the kernel gives away a discrete
    logarithm (Theorem 1(e)), so nobody can compute two. The nonce derivation also needs `h₇` not to
-   collide between two of the borrower's statements. Such a collision would reveal `C`, `ρ`, `R`
-   and `r₀`, or the differences of the two witnesses (Theorem 6(b)). It happens only with
-   probability about `2^−256` per pair.
+   collide between two of the borrower's statements that have one witness. Such a collision would
+   reveal that witness. With the adopted witness digest `W` in the nonce input, a collision between
+   different witnesses leaks nothing (Theorem 6(b)). It happens only with probability about
+   `2^−256` per pair.
 6. **Leaks beyond the one the note states** (section 13):
    - **L2:** the lender learns `c_k` at every step, by design. For an installment it cannot read,
      that gives it the debt to within `⌈R/C⌉` units, and exactly when `C ≥ R`.
@@ -64,8 +65,11 @@ section 2. The findings, most important first:
    - at acceptance, the lender checks every point parameter against its encoded twin, recomputes
      `FS_IV` and `BLINDER_ROOT`, and checks the caps (O9);
    - the confidential burns hide their amounts (O10).
-8. **Optional hardening.** Bind the witness into the nonce derivation (R1). Mask the release
-   output's presence (R2).
+8. **Hardening.**
+   - R1, binding the witness into the nonce derivation, is adopted: task 3 defined
+     `W = tagged_hash("…/release-witness", the 11 secrets)` (note: "Derivations"), and A7,
+     Theorem 5 and Theorem 6 cover it.
+   - Masking the release output's presence (R2) remains optional.
 
 The Fiat–Shamir step loses a square root, as Schnorr signatures do under the forking lemma
 (section 6.3). The extraction treats consensus's range and surjection proofs as extractable in a
@@ -216,11 +220,23 @@ of an adversary of the stated resources.
   - **Per-offer freshness.** The shared secret is fresh for every offer:
     `OfferSecrets::for_borrower` computes it from a per-offer ephemeral key. So the `x_j` and `y_j`
     of different loans are independent. Theorem 7 and L1 assume this.
-- **A7, the PRF of the nonce derivation.**
-  `(h₇, m) ↦ tagged_hash("simplicity-lending/private/v1/release-nonce", borrower_sk ‖ h₇ ‖ m)` is
-  a pseudorandom function keyed by `borrower_sk`. It stays one given the key's other uses (its
-  public key, ECDH, signatures under other tags). Its advantage is `Adv^prf-nonce`. Neither the
-  lender nor the observer knows the key.
+- **A7, the PRF of the nonce derivation.** The map
+
+  ```
+  (h₇, W, m) ↦ tagged_hash("simplicity-lending/private/v1/release-nonce",
+                           borrower_sk ‖ h₇ ‖ W ‖ m)
+  ```
+
+  is a pseudorandom function keyed by `borrower_sk`, where
+  `W = tagged_hash("simplicity-lending/private/v1/release-witness", C ‖ ρ ‖ … ‖ τ)` is the
+  witness's digest, with the 11 secrets as 32-byte big-endian scalars (note: "Derivations").
+  - It stays a PRF given the key's other uses: its public key, ECDH, and signatures under other
+    tags.
+  - Its advantage is `Adv^prf-nonce`.
+  - The key is unchanged, and the input is only longer, so the assumption is the same one over a
+    larger domain.
+  - `W` stays inside the prover and is never published.
+  - Neither the lender nor the observer knows the key.
 - **A8, idealized hashing.**
   - The challenge function `H_c` is a random oracle. Lemma 6.1 derives this from an ideal
     compression function `f`, a stronger heuristic than the ideal cipher model for SHA-256's
@@ -791,13 +807,16 @@ fresh.
 
 *Proof.* By hybrids.
 
-- **H0** is the real prover, with nonces derived from `borrower_sk` over `(h₇, m)`.
+- **H0** is the real prover, with nonces derived from `borrower_sk` over `(h₇, W, m)`.
 - **H1** replaces the derivation by a random function. The loss is at most `Adv^prf-nonce`. Then
   `scalar` of a uniform string is within `2^−127` of uniform per nonce, which costs
   `11·q_s·2^−127` in all.
-- **H2** adds that distinct statements have distinct `h₇`. They collide with probability at most
-  `q_s²·2^−256` (section 6.2). With distinct `h₇`, the nonces of distinct statements are
-  independent and uniform. A repeated statement gets the identical proof (Theorem 6(a)).
+- **H2** adds that distinct statements have distinct nonce inputs `(h₇, W)`.
+  - Two statements share an input only if `h₇` collides and the witnesses agree. That has
+    probability at most `q_s²·2^−256` (section 6.2).
+  - With distinct inputs, the nonces of distinct statements are independent and uniform.
+  - A repeated statement has one witness, hence one input, and gets the identical proof
+    (Theorem 6(a)).
 - **H3** is `Sim`.
   - In H2, `T1 = k_C·A_c + k_ρ·G` is uniform in `𝔾`. So the input `(FS_IV, S, T)` was queried
     before with probability at most `(q + q_s)/n`.
@@ -818,17 +837,18 @@ fresh.
 
 ## 9. The nonce derivation
 
-**Theorem 6 (the nonces from `borrower_sk` over `h₇`).** Assume A1, A7 and A8.
+**Theorem 6 (the nonces from `borrower_sk` over `h₇` and `W`).** Assume A1, A7 and A8.
 
 - **(a)** Two proofs by the honest borrower with the same `h₇` are identical, except with the
   probability that `h₇` collides between two distinct statements, or that the borrower computes a
   relation for A1.
-- **(b)** A collision of `h₇` between distinct statements would reveal either `C`, `ρ`, `R`, `r₀`
-  and every other secret common to the two witnesses, or the differences of the two witnesses.
-  This is why `S ↦ h₇` must be collision resistant.
-  For the borrower's own statements a collision has probability about `2^−256` per pair, and no
-  one else chooses those statements.
-- **(c)** Proofs of distinct statements use independent nonces.
+- **(b)** A collision of `h₇` between distinct statements does no harm when their witnesses
+  differ, since `W` then gives them independent nonces. It is harmful only when the two witnesses
+  are equal: then it reveals that witness. So `S ↦ h₇` must still be collision resistant. For the
+  borrower's own statements a collision has probability about `2^−256` per pair, and no one else
+  chooses those statements.
+- **(c)** Proofs with distinct nonce inputs `(h₇, W)` use independent nonces, in particular
+  proofs of distinct statements, except in (b)'s case.
 - **(d)** The lender cannot compute the nonces.
 
 *Proof.*
@@ -839,20 +859,20 @@ fresh.
   and `e` from the arithmetic, `w1` and `w2` from the carries' blinders, and `τ` from `r'`.
 - Two different witnesses for one `S` would give a nonzero element of `ker φ_S`, hence a relation
   (Theorem 1(e)).
-- So the witnesses are equal. Then the nonces, `T = φ_S(k)`, `c` and `z` are equal too.
+- So the witnesses are equal, and so are `W`, the nonces, `T = φ_S(k)`, `c` and `z`.
 
-**(b)** Take `S ≠ S*` with one `h₇`. The nonces are equal. The challenge is computed from `h₇`
-and `T` alone (`h₈ … h₁₄`), so after the collision `S` is absorbed only through `h₇`. Two cases:
+**(b)** Take `S ≠ S*` with one `h₇`, and witnesses `w` and `w*`. The challenge is computed from
+`h₇` and `T` alone (`h₈ … h₁₄`), so after the collision `S` is absorbed only through `h₇`.
 
-- **`S` and `S*` differ in `A_w1`, `A_w2` or `D'`.** Then `T` differs, because `T4`, `T6` and `T7`
-  depend on those points, and so the challenges differ, `c ≠ c*`, except with probability
-  `2^−255`. For a secret common to both witnesses, such as `C`, `z_C − z*_C = (c − c*)·C` reveals
-  it.
-- **They differ only in `V_s`, `W1`, `W2` or `Y`.** No `T_j` depends on these, so `T` and `c` are
-  equal. Then `z − z* = c·(w − w*)` reveals the differences of the witnesses, for instance
-  `c' − c''` and the difference of the `x`s.
+- **`w ≠ w*`.** Then `W ≠ W*`, except for a collision of the tagged hash. By A7 the two proofs'
+  nonces are independent, and each proof is simulatable on its own (Theorem 5), so nothing leaks.
+  Without `W`, this case would reveal either the common secrets or `w − w*`.
+- **`w = w*`.** Then the nonces are equal. Since `φ_S(w) = X_S` and `φ_(S*)(w) = X_(S*)`, the
+  statements can differ only if a base that `φ` uses differs: `A_w1`, `A_w2` or `D'`. Then `T`
+  differs, because `T4`, `T6` or `T7` depends on it, so `c ≠ c*` except with probability
+  `2^−255`, and `z − z* = (c − c*)·w` reveals the whole witness.
 
-**(c)** This is A7, for distinct inputs `(h₇, m)`.
+**(c)** This is A7, for distinct inputs `(h₇, W, m)`.
 
 **(d)** The lender lacks `borrower_sk`. ∎
 
@@ -863,10 +883,12 @@ and `T` alone (`h₈ … h₁₄`), so after the collision `S` is absorbed only 
 - **The note's reasoning, made precise.** The note justifies the derivation with "the statement
   fixes every secret, because the commitments bind under the unknown discrete logarithms". The
   precise form is Theorem 1(e): many witnesses exist, but nobody can compute two.
-- **R1, optional hardening.** Add the witness, or a hash of it, to the nonce's input, as RFC 6979
-  and BIP340 bind the message. Under the current derivation, a bug that pairs one statement with a
-  second, wrong witness would publish `z − z' = c·(w − w')` once both proofs are out. The cheaper
-  fix is obligation O7: never publish a proof that fails the local verifier.
+- **R1, adopted in task 3.** The witness's digest `W` is part of the nonce's input, as RFC 6979
+  and BIP340 bind the message.
+  - A bug that paired one statement with a second, wrong witness now gets other nonces, so its two
+    proofs no longer publish `z − z' = c·(w − w')`.
+  - It also confines (b)'s collision to equal witnesses.
+  - Obligation O7, never to publish a proof that fails the local verifier, stays.
 
 ## 10. Hiding of `V_k` given `Y_k`
 
@@ -1219,22 +1241,22 @@ revision.
 |---|---|---|---|
 | Special soundness, HVZK, shared responses | Thm 1 | E1–E7 669–679, V1–V7 732–759 | none |
 | The integer argument | Thm 2, Thm 4 | 704–730 | A1, A2, O9 |
-| No overpayment, release rule | Cor 4.1 | 628–637, 661–679, 1014–1020 | as Thm 4 |
+| No overpayment, release rule | Cor 4.1 | 628–637, 661–679, 1022–1028 | as Thm 4 |
 | Challenge as a random oracle | §6.1, Lem 6.1, Thm 3 | 761–785 | A4, A8 |
-| Binding of the index | Lem 5.1, 5.2 | checks 882–893; 999–1012 | A4, O9 |
-| Binding of the leaf | Lem 5.3, Cor 5.4 | 699–702, 787–798, check 895 | A5, A1 |
-| Soundness of the installment | Thm 4 | 661–730, checks 882–906 | A1, A2, A4, A5, A8 |
+| Binding of the index | Lem 5.1, 5.2 | checks 890–901; 1007–1020 | A4, O9 |
+| Binding of the leaf | Lem 5.3, Cor 5.4 | 699–702, 787–798, check 903 | A5, A1 |
+| Soundness of the installment | Thm 4 | 661–730, checks 890–914 | A1, A2, A4, A5, A8 |
 | `J` nothing-up-my-sleeve | Lem 2.1 | 800–806 | A8 |
-| Zero knowledge | Thm 5 | 746–759, 812–821 | A7, A8 |
-| Nonce derivation | Thm 6 | 812–821 | A1, A7, A8 |
-| Hiding of `V_k` given `Y_k` | Lem 10.1, Thm 7 | 642–652, 965–966 | A3, A6, A7, A8 |
-| What the lender learns | Thm 7′ | 988–995, 1047–1052 | as Thm 5 |
-| The lender's search | Thm 8 | 988–995, 1047–1052 | as Thm 4 |
-| Completeness | Prop 9 | 942–970 | none |
-| The rebuild leak and its rule | L1 | 1022–1037 | A6 (freshness) |
-| The lender's checks at acceptance | O9 | 999–1012 | none |
-| The burns hide `R` | O10 | 962–963, 972–981 | A3 |
-| Input 2 is never a carry | O11 | 879–880, 904–906, 942–953, 1143–1146 | none |
+| Zero knowledge | Thm 5 | 746–759, 812–829 | A7, A8 |
+| Nonce derivation | Thm 6 | 812–829 | A1, A7, A8 |
+| Hiding of `V_k` given `Y_k` | Lem 10.1, Thm 7 | 642–652, 973–974 | A3, A6, A7, A8 |
+| What the lender learns | Thm 7′ | 996–1003, 1055–1060 | as Thm 5 |
+| The lender's search | Thm 8 | 996–1003, 1055–1060 | as Thm 4 |
+| Completeness | Prop 9 | 950–978 | none |
+| The rebuild leak and its rule | L1 | 1030–1045 | A6 (freshness) |
+| The lender's checks at acceptance | O9 | 1007–1020 | none |
+| The burns hide `R` | O10 | 970–971, 980–989 | A3 |
+| Input 2 is never a carry | O11 | 887–888, 912–914, 950–961, 1151–1154 | none |
 
 ## References
 
