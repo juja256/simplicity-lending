@@ -30,6 +30,10 @@ export interface Loan {
   acceptanceTxid: string
   /** The installments in chain order: the `j`-th (from 1) holds loan output `j` at its output 1. */
   installmentTxids: string[]
+  /** The acceptance as read, in hex: a new installment is read back with it before signing. */
+  acceptanceHex: string
+  /** The installments as read, in hex and in chain order. */
+  installmentHexes: string[]
 }
 
 /**
@@ -186,6 +190,8 @@ export async function loadLoan(
     state,
     acceptanceTxid: acceptance.txid().toString(),
     installmentTxids: installments.map(tx => tx.txid().toString()),
+    acceptanceHex: acceptance.toString(),
+    installmentHexes: installments.map(tx => tx.toString()),
   }
 }
 

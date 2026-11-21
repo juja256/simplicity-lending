@@ -1425,6 +1425,7 @@ async function buildSignedInstallment(
     borrowerNftOutpoint: borrowerNftOutpoint(),
     principalCoins,
     feeCoins,
+    lendingKey: borrower.lendingKey,
   })
   out('blinded installment PSET:')
   describeOutputs(built.pset, {

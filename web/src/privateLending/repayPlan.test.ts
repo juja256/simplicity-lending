@@ -4,9 +4,9 @@ import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
 import { lwk } from '@/test/lwk'
 
 import {
-  discardedInstallmentInputs,
   INSTALLMENT_AFTER_TERM_NOTE,
   INSTALLMENT_UNSENT_AFTER_TERM_NOTE,
+  installmentTraceInputs,
   keepsDiscardTrace,
   repayBroadcast,
   repayPlan,
@@ -142,7 +142,7 @@ function record(kind: PrivateTxRecord['kind'], inputs: string[]): PrivateTxRecor
   }
 }
 
-describe('a discarded installment', () => {
+describe('an earlier installment of the loan', () => {
   const nft = `${'01'.repeat(32)}:0`
   const firstCoin = `${'02'.repeat(32)}:3`
   const secondCoin = `${'03'.repeat(32)}:0`
@@ -169,8 +169,20 @@ describe('a discarded installment', () => {
       // a full repayment of the loan has the same inputs, but derives no installment key
       record('private_repay_offer', [nft, LOAN, secondCoin]),
     ]
-    expect(discardedInstallmentInputs(lwk, discarded, LOAN)).toEqual(new Set([firstCoin]))
-    expect(discardedInstallmentInputs(lwk, discarded, OTHER_LOAN)).toEqual(new Set([secondCoin]))
-    expect(discardedInstallmentInputs(lwk, discarded, `${'cc'.repeat(32)}:1`)).toEqual(new Set())
+    expect(installmentTraceInputs(lwk, discarded, LOAN)).toEqual(new Set([firstCoin]))
+    expect(installmentTraceInputs(lwk, discarded, OTHER_LOAN)).toEqual(new Set([secondCoin]))
+    expect(installmentTraceInputs(lwk, discarded, `${'cc'.repeat(32)}:1`)).toEqual(new Set())
+  })
+
+  // A broadcast installment the network dropped is marked failed when its tracking times out,
+  // not discarded, and the form then offers Repay again: its first input is a trace all the same.
+  it('counts a failed installment that was never discarded as a trace too', () => {
+    const failed: PrivateTxRecord = {
+      ...record('private_installment', [nft, LOAN, firstCoin]),
+      broadcastStatus: 'broadcast',
+      confirmationStatus: 'failed',
+      discardedAt: undefined,
+    }
+    expect(installmentTraceInputs(lwk, [failed], LOAN)).toEqual(new Set([firstCoin]))
   })
 })

@@ -14,7 +14,8 @@
 // output 0's script (`LoanState.planInstallment`), so that both parties rewind it from the chain.
 // An installment built otherwise would confirm, and the borrower could no longer rebuild its debt
 // from the seed and close the loan. So the plan is made from exactly input 2 and output 0's
-// script, and both layout checks require them.
+// script, and both layout checks require them, and the built transaction is read back with the
+// borrower's lending key before it is signed: it must give the loan the plan expects.
 // The borrower NFT is spent as a plain input, as in the full repayment. The builder pays no
 // installment before the principal is claimed (`principalClaimedBefore`).
 import type { WalletTxOut } from 'lwk_wasm'
@@ -27,6 +28,7 @@ import {
   NFT_AMOUNT,
 } from '@/simplicity/private-lending/layout'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
+import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from '../deps'
 import { finalizePrivateOfferInput, pinnedAuthCovenant } from '../finalize'
@@ -65,6 +67,11 @@ export interface InstallmentParams {
   principalCoins: WalletTxOut[]
   /** The borrower's policy-asset coins, which pay the fee. */
   feeCoins: WalletTxOut[]
+  /**
+   * The borrower's lending key, the one the loan was read with: the built installment is read back
+   * with it before it is signed.
+   */
+  lendingKey: LendingKey
 }
 
 export interface InstallmentSummary {
@@ -339,15 +346,26 @@ export async function buildPrivateInstallment(
 
     // 8. The layout again, now blinded.
     assertSpendLayout(deps, blinded, layout, true, 'Installment')
-    const builtTxid = new lwk.Pset(blindedBase64).extractTx().txid().toString()
+    const builtTx = new lwk.Pset(blindedBase64).extractTx()
+    const builtTxid = builtTx.txid().toString()
+    const remaining = owed - amount
+
+    // 9. The installment read back as the borrower will read it from the chain. Neither the layout
+    // checks nor the covenant look at output 2's range proof: if it did not open with the plan's
+    // key, the installment would confirm and the borrower could no longer rebuild the debt.
+    assertInstallmentReadsBack(offer, loan, params.lendingKey, builtTx.toString(), {
+      loanOutpoint: `${builtTxid}:${INSTALLMENT_OUTPUT.loan}`,
+      amount,
+      remaining,
+      successorDebtHash,
+    })
     const prevouts = () => [
       requireOutput(nftTx, nftRef.vout, 'The borrower NFT'),
       requireOutput(loanTx, loanRef.vout, 'The loan'),
       ...prevoutsOf(walletPrevoutTxs, walletInputs),
     ]
-    const remaining = owed - amount
 
-    // 9. Sign (by the caller), then finalize the wallet inputs and the covenant.
+    // 10. Sign (by the caller), then finalize the wallet inputs and the covenant.
     return {
       pset: blinded,
       finalize: signedPset => {
@@ -384,5 +402,45 @@ export async function buildPrivateInstallment(
   } finally {
     // the plan holds the installment's key
     plan.free()
+  }
+}
+
+/**
+ * Reads the loan again with the built installment `txHex` appended, with `key`, and requires what
+ * the plan expects: one more installment, of `expected.amount`, the loan at its output 1 owing
+ * `expected.remaining` under `expected.successorDebtHash`. Throws before anything is signed.
+ */
+export function assertInstallmentReadsBack(
+  offer: VerifiedOffer,
+  loan: Loan,
+  key: LendingKey,
+  txHex: string,
+  expected: { loanOutpoint: string; amount: bigint; remaining: bigint; successorDebtHash: string },
+): void {
+  const after = wasmStep('Reading the installment back', () =>
+    offer.opened.loanState(key, loan.acceptanceHex, [...loan.installmentHexes, txHex]),
+  )
+  try {
+    const j = after.installmentCount
+    const paid = j === loan.installmentHexes.length + 1 ? after.installment(j) : undefined
+    let paidAmount: bigint | undefined
+    try {
+      paidAmount = paid?.amount
+    } finally {
+      paid?.free()
+    }
+    if (
+      paidAmount !== expected.amount ||
+      after.loanOutpoint !== expected.loanOutpoint ||
+      after.remaining !== expected.remaining ||
+      after.debtHash !== expected.successorDebtHash
+    ) {
+      throw new Error(
+        'The installment does not read back as built: it was not signed. Its amount would not ' +
+          'open with your key, and the loan could not be closed after it',
+      )
+    }
+  } finally {
+    after.free()
   }
 }
