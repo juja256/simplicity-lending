@@ -8,8 +8,9 @@ use elements::secp256k1_zkp::{PublicKey, SECP256K1, SecretKey, XOnlyPublicKey};
 use elements::{AssetId, OutPoint, TxOutSecrets};
 
 use crate::{
-    FoundOffer, LendingKey, Marker, OfferSecrets, OfferTerms, PinnedBlinding, PinnedOutput,
-    PinnedRole, RewindError, SignedTerms, TermsError, ephemeral_key, rewind,
+    FoundOffer, LendingKey, MAX_CREATION_MESSAGE_BYTES, Marker, Message, OfferSecrets, OfferTerms,
+    PinnedBlinding, PinnedOutput, PinnedRole, RewindError, SignedTerms, TermsError, ephemeral_key,
+    rewind,
 };
 
 /// The four pinned outputs of an offer, their blinding factors derived from the offer's shared
@@ -109,7 +110,7 @@ fn small_scalar(value: u128) -> ValueBlindingFactor {
 }
 
 /// An offer a borrower is about to create: everything its creation transaction needs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewOffer {
     /// The lender the offer is for, whose lending key the collateral output is blinded to.
     pub lender: XOnlyPublicKey,
@@ -126,7 +127,8 @@ pub struct NewOffer {
 
 impl NewOffer {
     /// Builds the offer from `borrower` to `lender` whose creation transaction spends
-    /// `first_input` as its input 0 and issues the terms' NFTs, with `program_id` in the marker.
+    /// `first_input` as its input 0 and issues the terms' NFTs, with `program_id` in the marker
+    /// and the borrower's `message` to the lender in the signed terms.
     ///
     /// The ephemeral key, and so every blinder and the range proof's nonce, depend only on the
     /// borrower, the first input and the NFT ids. Two different transactions with the same values
@@ -143,7 +145,9 @@ impl NewOffer {
     /// # Errors
     /// Returns an error if the collateral or the principal amount is zero (confidential amounts
     /// must be positive), the repayment amount is below the principal amount, or the expiration
-    /// is not a block height (from 500 000 000 on, a lock time is a timestamp).
+    /// is not a block height (from 500 000 000 on, a lock time is a timestamp), or the message is
+    /// longer than [`MAX_CREATION_MESSAGE_BYTES`].
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         borrower: &LendingKey,
         lender: &XOnlyPublicKey,
@@ -152,6 +156,7 @@ impl NewOffer {
         collateral_asset: AssetId,
         collateral_amount: u64,
         terms: OfferTerms,
+        message: Option<Message>,
     ) -> Result<NewOffer, OfferError> {
         if collateral_amount == 0 || terms.principal_amount == 0 {
             return Err(OfferError::ZeroAmount);
@@ -161,6 +166,12 @@ impl NewOffer {
         }
         if terms.loan_expiration_time >= LOCK_TIME_THRESHOLD {
             return Err(OfferError::ExpirationNotBlockHeight);
+        }
+        if message
+            .as_ref()
+            .is_some_and(|message| message.as_text().len() > MAX_CREATION_MESSAGE_BYTES)
+        {
+            return Err(OfferError::MessageTooLong);
         }
 
         let (borrower_nft, lender_nft) = (terms.borrower_nft, terms.lender_nft);
@@ -181,7 +192,7 @@ impl NewOffer {
             first_input: *first_input,
             ephemeral_sk,
             secrets,
-            signed_terms: SignedTerms::sign(terms, borrower, lender, first_input),
+            signed_terms: SignedTerms::sign(terms, message, borrower, lender, first_input),
             pinned: OfferPinned::derive(&secrets, collateral_asset, collateral_amount, &terms),
             marker,
         })
@@ -212,7 +223,7 @@ impl NewOffer {
 /// first input, and the collateral output is exactly the pinned pending collateral. Opening does
 /// not check the output's script pubkey: the caller still has to recompute the offer's address
 /// from the terms and `pinned`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenedOffer {
     pub signed_terms: SignedTerms,
     pub lender: XOnlyPublicKey,
@@ -232,6 +243,9 @@ pub enum OfferError {
     /// The expiration is a lock time from 500 000 000 on, a timestamp, which a block height
     /// never reaches: the lender could never liquidate.
     ExpirationNotBlockHeight,
+    /// The message is longer than [`MAX_CREATION_MESSAGE_BYTES`], past which the terms do not fit
+    /// in the collateral output's range proof.
+    MessageTooLong,
 }
 
 impl fmt::Display for OfferError {
@@ -242,6 +256,10 @@ impl fmt::Display for OfferError {
                 f.write_str("the repayment amount is below the principal amount")
             }
             Self::ExpirationNotBlockHeight => f.write_str("the expiration is not a block height"),
+            Self::MessageTooLong => write!(
+                f,
+                "the message is longer than {MAX_CREATION_MESSAGE_BYTES} bytes"
+            ),
         }
     }
 }
@@ -404,7 +422,7 @@ mod tests {
     use rand::thread_rng;
 
     use super::*;
-    use crate::{blind_pset, lift_lending_key};
+    use crate::{MESSAGE_ROOM, blind_pset, lift_lending_key};
 
     const PROGRAM_ID: [u8; 4] = [0x10, 0x11, 0x12, 0x13];
     const COLLATERAL_AMOUNT: u64 = 50_000;
@@ -457,6 +475,7 @@ mod tests {
             collateral_asset(),
             collateral_amount,
             terms,
+            None,
         )
     }
 
@@ -811,6 +830,7 @@ mod tests {
         let mut new = sample_offer();
         new.signed_terms = SignedTerms::sign(
             sample_terms(),
+            None,
             &OTHER_BORROWER,
             &LENDER.x_only_public_key(),
             &FIRST_INPUT,
@@ -874,6 +894,55 @@ mod tests {
             ..sample_terms()
         };
         assert!(build(COLLATERAL_AMOUNT, last_height).is_ok());
+    }
+
+    #[test]
+    fn build_refuses_a_creation_message_past_the_limit() {
+        let build_with = |text: String| {
+            NewOffer::build(
+                &BORROWER,
+                &LENDER.x_only_public_key(),
+                &FIRST_INPUT,
+                PROGRAM_ID,
+                collateral_asset(),
+                COLLATERAL_AMOUNT,
+                sample_terms(),
+                Some(Message::text(&text).unwrap()),
+            )
+        };
+
+        let longest = build_with("a".repeat(MAX_CREATION_MESSAGE_BYTES)).unwrap();
+        assert_eq!(
+            longest.collateral_blinding(0).extra_data.len(),
+            MESSAGE_ROOM
+        );
+        assert_eq!(
+            build_with("a".repeat(MAX_CREATION_MESSAGE_BYTES + 1)).err(),
+            Some(OfferError::MessageTooLong)
+        );
+    }
+
+    #[test]
+    fn lender_reads_the_creation_message() {
+        let new = NewOffer::build(
+            &BORROWER,
+            &LENDER.x_only_public_key(),
+            &FIRST_INPUT,
+            PROGRAM_ID,
+            collateral_asset(),
+            COLLATERAL_AMOUNT,
+            sample_terms(),
+            Some(Message::text("please accept by Friday").unwrap()),
+        )
+        .unwrap();
+        let found = found(&new, blinded_offer_output(&new));
+
+        let opened = open_as_lender(&LENDER, &found).unwrap();
+        assert_eq!(
+            opened.signed_terms.message.as_ref().map(Message::as_text),
+            Some("please accept by Friday")
+        );
+        assert_eq!(open_as_borrower(&BORROWER, &found).unwrap(), opened);
     }
 
     #[test]

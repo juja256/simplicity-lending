@@ -66,6 +66,7 @@ impl NewOffer {
             parse::<AssetId>("collateral asset", collateral_asset)?,
             collateral_amount,
             terms.0,
+            None,
         )
         .map_err(bad_input)?;
         Ok(Self { inner })

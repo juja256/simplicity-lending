@@ -1,14 +1,16 @@
 //! Cryptography of Simplicity Lending private offers: lending keys, per-offer secrets, signed
 //! terms, the marker, pinned outputs, building offers, and finding, opening and checking them in
 //! their creation transactions; a loan's debt as a curve point, with the installments that pay it;
-//! and the terms lenders publish in the directory, with the check of a proposal against them.
+//! the private messages of a loan's parties; and the terms lenders publish in the directory, with
+//! the check of a proposal against them.
 //!
 //! The crate depends only on `elements`, `rand` and `k256` (whose field arithmetic tells whether a
 //! commitment's `y` is a square), so the contracts crate and the browser's wasm module run the same
 //! code.
 //!
-//! Signing the terms ([`SignedTerms::sign`]) draws its auxiliary randomness from `rand`'s thread
-//! RNG, as does a caller that passes `rand::thread_rng()` to [`blind_pset`]. The thread RNG seeds
+//! Signing the terms ([`SignedTerms::sign`]) or a message ([`SignedMessage::sign`]) draws its
+//! auxiliary randomness from `rand`'s thread RNG, as does a caller that passes `rand::thread_rng()`
+//! to [`blind_pset`]. The thread RNG seeds
 //! from the operating system through `getrandom`, which on `wasm32-unknown-unknown` has no source
 //! unless its `js` feature is enabled: a wasm build must depend on `getrandom` 0.2 (the version
 //! `rand` 0.8 uses) with `features = ["js"]`.
@@ -20,6 +22,7 @@ mod directory;
 mod keys;
 mod lender_terms;
 mod marker;
+mod message;
 mod offer;
 mod pinned;
 mod secrets;
@@ -46,6 +49,10 @@ pub use lender_terms::{
     min_collateral, min_repayment, principal_per_collateral,
 };
 pub use marker::Marker;
+pub use message::{
+    MAX_CREATION_MESSAGE_BYTES, MAX_SIGNED_MESSAGE_BYTES, MESSAGE_ROOM, Message, MessageError,
+    MessageKind, MessagePhase, SignedMessage,
+};
 pub use offer::{NewOffer, OfferError, OfferPinned, OpenError, OpenedOffer};
 pub use pinned::PinnedOutput;
 pub use secrets::{OfferSecrets, PinnedRole, expiry_hash};

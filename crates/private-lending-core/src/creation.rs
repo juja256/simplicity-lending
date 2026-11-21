@@ -329,7 +329,7 @@ mod tests {
             first_input: *FIRST_INPUT,
             ephemeral_sk,
             secrets,
-            signed_terms: SignedTerms::sign(terms, &BORROWER, &lender, &FIRST_INPUT),
+            signed_terms: SignedTerms::sign(terms, None, &BORROWER, &lender, &FIRST_INPUT),
             pinned: OfferPinned::derive(&secrets, collateral_asset(), COLLATERAL_AMOUNT, &terms),
             marker: Marker::new(
                 PROGRAM_ID,
@@ -352,6 +352,7 @@ mod tests {
             collateral_asset(),
             COLLATERAL_AMOUNT,
             sample_terms(),
+            None,
         )
         .unwrap()
     }
@@ -532,7 +533,7 @@ mod tests {
         ];
         for tx in &not_found {
             assert_eq!(find_offer(tx, PROGRAM_ID), None);
-            assert_eq!(open_both(tx), [Err(CreationError::NotFound); 2]);
+            assert_eq!(open_both(tx), [CreationError::NotFound; 2].map(Err));
         }
 
         // another program's marker
@@ -574,7 +575,7 @@ mod tests {
         for terms in invalid {
             let tx = creation_tx(&unchecked_offer(terms));
 
-            assert_eq!(open_both(&tx), [Err(CreationError::InvalidTerms); 2]);
+            assert_eq!(open_both(&tx), [CreationError::InvalidTerms; 2].map(Err));
         }
 
         let last_height = OfferTerms {
@@ -614,7 +615,10 @@ mod tests {
         ];
         assert_eq!(not_unique[3].input[1].issuance_ids().0, lender_nft());
         for tx in &not_unique {
-            assert_eq!(open_both(tx), [Err(CreationError::LenderNftNotUnique); 2]);
+            assert_eq!(
+                open_both(tx),
+                [CreationError::LenderNftNotUnique; 2].map(Err)
+            );
         }
 
         // terms that name another lender NFT than the one input 1 issues
@@ -623,7 +627,10 @@ mod tests {
             ..sample_terms()
         };
         let tx = creation_tx(&unchecked_offer(other_nft));
-        assert_eq!(open_both(&tx), [Err(CreationError::LenderNftNotUnique); 2]);
+        assert_eq!(
+            open_both(&tx),
+            [CreationError::LenderNftNotUnique; 2].map(Err)
+        );
     }
 
     #[test]

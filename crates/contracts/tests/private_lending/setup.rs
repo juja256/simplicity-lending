@@ -343,6 +343,7 @@ pub(super) fn setup_pending_private_offer(
         policy_asset,
         offer_parameters.collateral_amount,
         terms,
+        None,
     )?;
 
     let parameters =

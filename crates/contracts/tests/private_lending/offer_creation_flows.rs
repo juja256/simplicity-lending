@@ -85,6 +85,7 @@ impl OffChainOffer {
             network.policy_asset(),
             COLLATERAL_AMOUNT,
             terms,
+            None,
         )
         .unwrap();
         let parameters = PrivateLendingParameters::from_terms(
