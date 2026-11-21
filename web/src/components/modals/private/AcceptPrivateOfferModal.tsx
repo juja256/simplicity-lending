@@ -10,11 +10,10 @@ import { OfferStatusChip } from '@/components/OfferStatusChip'
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { buildPrivateAcceptance } from '@/privateLending/flows/acceptance'
-import { openSentMessages } from '@/privateLending/hooks/usePrivateOffers'
 import { MESSAGE_NOTE, messageError, messageToSend } from '@/privateLending/messages'
 import { canStillAccept, checkStillAcceptable, TERM_PASSED_NOTE } from '@/privateLending/offerView'
 import type { TermsVerdict } from '@/privateLending/proposalCheck'
-import { recordingSent } from '@/privateLending/sentMessages'
+import { recordingSent, sentMessagesOf } from '@/privateLending/sentMessages'
 import { selectAssetCoins, selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
 import { useLwk } from '@/providers/lwk/useLwk'
 import { useWallet } from '@/providers/wallet/useWallet'
@@ -181,7 +180,7 @@ export default function AcceptPrivateOfferModal({
     )
     const lendingKey = await getLendingKey()
     const message = messageToSend(messageText)
-    const sent = await openSentMessages(network, lendingKey)
+    const sent = sentMessagesOf(network, lendingKey.fingerprint())
     const built = await buildPrivateAcceptance(deps, offer, {
       principalCoins,
       feeCoins,

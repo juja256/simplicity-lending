@@ -1,19 +1,15 @@
+import 'fake-indexeddb/auto'
+
 import type { Pset } from 'lwk_wasm'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
 
-import type { ScanKv, ScanScope } from './scanStore'
-import { kvSentMessages, recordingSent, type SentMessage, sentMessagesKey } from './sentMessages'
+import * as sentMessagesModule from './sentMessages'
+import { recordingSent, type SentMessage, type SentMessages, sentMessagesOf } from './sentMessages'
 
 const OFFER = 'aa'.repeat(32)
 const OTHER_OFFER = 'bb'.repeat(32)
-const SCOPE: ScanScope = { network: 'testnet', apiBaseUrl: 'https://indexer.example/api/' }
-
-function mapKv(): ScanKv & { map: Map<string, Uint8Array> } {
-  const map = new Map<string, Uint8Array>()
-  return { map, get: key => map.get(key), put: (key, value) => void map.set(key, value) }
-}
 
 const acceptance: SentMessage = {
   offerTxid: OFFER,
@@ -30,91 +26,133 @@ const installment: SentMessage = {
   savedAt: 1_700_000_100_000,
 }
 
-describe('kvSentMessages', () => {
-  it('round-trips the messages of one offer, and none of another', () => {
-    const kv = mapKv()
-    const store = kvSentMessages(kv, SCOPE, 'f1')
-    store.save(acceptance)
-    store.save(installment)
-    store.save({ ...installment, offerTxid: OTHER_OFFER, txid: '03'.repeat(32) })
+// Every test writes under a fingerprint of its own, so the shared fake database needs no reset.
+let fingerprints = 0
+const freshFingerprint = () => `f${++fingerprints}`
 
-    const reread = kvSentMessages(kv, SCOPE, 'f1')
-    expect(reread.forOffer(OFFER)).toEqual([acceptance, installment])
-    expect(reread.forOffer(OTHER_OFFER)).toHaveLength(1)
-    expect(reread.forOffer('cc'.repeat(32))).toEqual([])
+/**
+ * The module as another tab of the browser loads it: a fresh instance, with its own connection to
+ * the same IndexedDB.
+ */
+async function anotherTab(): Promise<typeof sentMessagesModule> {
+  vi.resetModules()
+  return import('./sentMessages')
+}
+
+/** The raw records in the database, to see exactly what was stored. */
+async function rawRecords(): Promise<unknown[]> {
+  const { openDB } = await import('idb')
+  const db = await openDB(sentMessagesModule.SENT_MESSAGES_DB_NAME)
+  try {
+    return await db.getAll(sentMessagesModule.SENT_MESSAGES_STORE_NAME)
+  } finally {
+    db.close()
+  }
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
+describe('sentMessagesOf', () => {
+  it('round-trips the messages of one offer, and none of another', async () => {
+    const fingerprint = freshFingerprint()
+    const store = sentMessagesOf('testnet', fingerprint)
+    await store.save(installment)
+    await store.save(acceptance)
+    await store.save({ ...installment, offerTxid: OTHER_OFFER, txid: '03'.repeat(32) })
+
+    const reread = sentMessagesOf('testnet', fingerprint)
+    // in the order they were saved: by `savedAt`
+    expect(await reread.forOffer(OFFER)).toEqual([acceptance, installment])
+    expect(await reread.forOffer(OTHER_OFFER)).toHaveLength(1)
+    expect(await reread.forOffer('cc'.repeat(32))).toEqual([])
   })
 
-  it('keeps fingerprints and networks apart, under the documented key', () => {
-    const kv = mapKv()
-    kvSentMessages(kv, SCOPE, 'f1').save(acceptance)
-    expect(kvSentMessages(kv, SCOPE, 'f2').forOffer(OFFER)).toEqual([])
-    expect(kvSentMessages(kv, { ...SCOPE, network: 'liquid' }, 'f1').forOffer(OFFER)).toEqual([])
-    // the indexer does not matter: a sent message is the wallet's, whatever indexer read it
-    expect(
-      kvSentMessages(kv, { ...SCOPE, apiBaseUrl: 'https://other.example' }, 'f1').forOffer(OFFER),
-    ).toEqual([acceptance])
-    expect([...kv.map.keys()]).toEqual([JSON.stringify(['sent', 'testnet', 'f1'])])
-    expect(sentMessagesKey(SCOPE, 'f1')).toBe(JSON.stringify(['sent', 'testnet', 'f1']))
+  it('keeps fingerprints and networks apart', async () => {
+    const fingerprint = freshFingerprint()
+    await sentMessagesOf('testnet', fingerprint).save(acceptance)
+    expect(await sentMessagesOf('testnet', freshFingerprint()).forOffer(OFFER)).toEqual([])
+    expect(await sentMessagesOf('liquid', fingerprint).forOffer(OFFER)).toEqual([])
+    expect(await sentMessagesOf('testnet', fingerprint).forOffer(OFFER)).toEqual([acceptance])
   })
 
-  it('replaces the record of a transaction saved again', () => {
-    const kv = mapKv()
-    const store = kvSentMessages(kv, SCOPE, 'f1')
-    store.save(acceptance)
-    store.save(installment)
-    const resent = { ...acceptance, text: 'the second text', savedAt: acceptance.savedAt + 1 }
-    store.save(resent)
-    expect(store.forOffer(OFFER)).toEqual([installment, resent])
+  // The bug this store fixes: each tab held the list in memory and wrote it back whole, so a tab's
+  // save erased the records another tab had saved since it loaded.
+  it("shares the records between tabs: neither tab's save erases the other's", async () => {
+    const fingerprint = freshFingerprint()
+    const tabA = sentMessagesOf('testnet', fingerprint)
+    const tabB = (await anotherTab()).sentMessagesOf('testnet', fingerprint)
+    expect(await tabA.forOffer(OFFER)).toEqual([])
+    expect(await tabB.forOffer(OFFER)).toEqual([])
+    await tabA.save(acceptance)
+    await tabB.save(installment)
+    expect(await tabA.forOffer(OFFER)).toEqual([acceptance, installment])
+    expect(await tabB.forOffer(OFFER)).toEqual([acceptance, installment])
   })
 
-  it('stores only the fields of a sent message', () => {
-    const kv = mapKv()
-    const store = kvSentMessages(kv, SCOPE, 'f1')
-    store.save({ ...installment, secret: 'never stored' } as SentMessage)
-    const stored = new TextDecoder().decode(kv.map.get(sentMessagesKey(SCOPE, 'f1')))
-    expect(stored).not.toContain('never stored')
-    expect(store.forOffer(OFFER)).toEqual([installment])
+  it('replaces the record of a transaction saved again', async () => {
+    const store = sentMessagesOf('testnet', freshFingerprint())
+    await store.save(acceptance)
+    await store.save(installment)
+    const resent = { ...acceptance, text: 'the second text', savedAt: installment.savedAt + 1 }
+    await store.save(resent)
+    expect(await store.forOffer(OFFER)).toEqual([installment, resent])
   })
 
-  it('refuses to save a record it could not read back, keeping the others', () => {
-    const kv = mapKv()
-    const store = kvSentMessages(kv, SCOPE, 'f1')
-    store.save(acceptance)
+  it('stores only the fields of a sent message, with its network and fingerprint', async () => {
+    const fingerprint = freshFingerprint()
+    const txid = '0a'.repeat(32)
+    const store = sentMessagesOf('testnet', fingerprint)
+    await store.save({ ...installment, txid, secret: 'never stored' } as SentMessage)
+    const stored = (await rawRecords()).find(record => (record as SentMessage).txid === txid)
+    expect(stored).toEqual({ ...installment, txid, network: 'testnet', fingerprint })
+    expect(await store.forOffer(OFFER)).toEqual([{ ...installment, txid }])
+  })
+
+  it('refuses to save a record it could not read back, keeping the others', async () => {
+    const store = sentMessagesOf('testnet', freshFingerprint())
+    await store.save(acceptance)
     const bad = [
       { ...installment, installment: undefined },
       { ...installment, installment: 0 },
       { ...installment, txid: 'AA'.repeat(32) },
       { ...acceptance, txid: '04'.repeat(32), text: '' },
     ]
-    for (const message of bad) expect(() => store.save(message)).toThrow()
-    expect(store.forOffer(OFFER)).toEqual([acceptance])
+    for (const message of bad) await expect(store.save(message)).rejects.toThrow()
+    expect(await store.forOffer(OFFER)).toEqual([acceptance])
   })
 
-  it('reads a value that does not decode as none, and a save starts over', () => {
-    const key = sentMessagesKey(SCOPE, 'f1')
-    const valid = (messages: unknown[]) =>
-      new TextEncoder().encode(JSON.stringify({ version: 1, messages }))
+  it('skips a stored record that does not decode, and reads the others', async () => {
+    const fingerprint = freshFingerprint()
+    const store = sentMessagesOf('testnet', fingerprint)
+    await store.save(acceptance)
+    const scope = { network: 'testnet', fingerprint }
     const corrupt = [
-      new Uint8Array([0xff, 0xfe]),
-      new TextEncoder().encode('not json'),
-      new TextEncoder().encode(JSON.stringify({ version: 2, messages: [] })),
-      new TextEncoder().encode(JSON.stringify({ version: 1, messages: [], extra: 1 })),
-      valid([{ ...acceptance, extra: 1 }]),
-      valid([{ ...acceptance, txid: 'not a txid' }]),
-      valid([{ ...acceptance, phase: 'claim' }]),
-      valid([{ ...acceptance, text: '' }]),
-      valid([{ ...acceptance, installment: 1 }]),
-      valid([{ ...installment, installment: undefined }]),
-      valid([{ ...installment, installment: 0 }]),
+      { ...installment, ...scope, extra: 1 },
+      { ...installment, ...scope, txid: '05'.repeat(32), phase: 'claim' },
+      { ...installment, ...scope, txid: '06'.repeat(32), text: '' },
+      { ...acceptance, ...scope, txid: '07'.repeat(32), installment: 1 },
+      { ...installment, ...scope, txid: '08'.repeat(32), installment: 0 },
+      { ...installment, ...scope, txid: '09'.repeat(32), savedAt: -1 },
     ]
-    for (const bytes of corrupt) {
-      const kv = mapKv()
-      kv.put(key, bytes)
-      const store = kvSentMessages(kv, SCOPE, 'f1')
-      expect(store.forOffer(OFFER)).toEqual([])
-      store.save(installment)
-      expect(store.forOffer(OFFER)).toEqual([installment])
+    const { openDB } = await import('idb')
+    const db = await openDB(sentMessagesModule.SENT_MESSAGES_DB_NAME)
+    try {
+      for (const record of corrupt) {
+        await db.put(sentMessagesModule.SENT_MESSAGES_STORE_NAME, record)
+      }
+    } finally {
+      db.close()
     }
+    expect(await store.forOffer(OFFER)).toEqual([acceptance])
+  })
+
+  it('rejects a save and a read where IndexedDB is unavailable', async () => {
+    vi.stubGlobal('indexedDB', undefined)
+    const store = (await anotherTab()).sentMessagesOf('testnet', freshFingerprint())
+    await expect(store.save(acceptance)).rejects.toThrow()
+    await expect(store.forOffer(OFFER)).rejects.toThrow()
   })
 })
 
@@ -140,45 +178,88 @@ describe('recordingSent', () => {
     text: 'a private text',
   } as const
 
-  it('records the message under the finalized txid, once finalize ran', () => {
-    const store = kvSentMessages(mapKv(), SCOPE, 'f1')
+  it('records the message under the finalized txid before finalize resolves', async () => {
+    const fingerprint = freshFingerprint()
+    const store = sentMessagesOf('testnet', fingerprint)
     const inner = built()
     const recording = recordingSent(inner, store, sent)
     expect(recording.pset).toBe(inner.pset)
-    expect(store.forOffer(OFFER)).toEqual([])
+    expect(await store.forOffer(OFFER)).toEqual([])
     const before = Date.now()
-    expect(recording.finalize({} as Pset).summary).toBe('summary')
+    expect((await recording.finalize({} as Pset)).summary).toBe('summary')
     expect(inner.finalized).toBe(1)
-    const [record] = store.forOffer(OFFER)
+    // read through another tab: the record is in IndexedDB once finalize resolved
+    const reread = (await anotherTab()).sentMessagesOf('testnet', fingerprint)
+    const [record] = await reread.forOffer(OFFER)
     expect(record).toEqual({ ...sent, txid: TXID, savedAt: record.savedAt })
     expect(record.savedAt).toBeGreaterThanOrEqual(before)
   })
 
-  it('records a transaction without a message as such', () => {
-    const store = kvSentMessages(mapKv(), SCOPE, 'f1')
-    recordingSent(built(), store, { offerTxid: OFFER, phase: 'repayment' }).finalize({} as Pset)
-    expect(store.forOffer(OFFER)).toEqual([
+  it('awaits the save: finalize does not resolve before it', async () => {
+    let finishSave = () => {}
+    const store: SentMessages = {
+      save: () => new Promise<void>(resolve => (finishSave = resolve)),
+      forOffer: () => Promise.resolve([]),
+    }
+    let resolved = false
+    const finalizing = recordingSent(built(), store, sent)
+      .finalize({} as Pset)
+      .then(result => {
+        resolved = true
+        return result
+      })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(resolved).toBe(false)
+    finishSave()
+    expect((await finalizing).summary).toBe('summary')
+  })
+
+  it('records a transaction without a message as such', async () => {
+    const store = sentMessagesOf('testnet', freshFingerprint())
+    await recordingSent(built(), store, { offerTxid: OFFER, phase: 'repayment' }).finalize(
+      {} as Pset,
+    )
+    expect(await store.forOffer(OFFER)).toEqual([
       { offerTxid: OFFER, txid: TXID, phase: 'repayment', savedAt: expect.any(Number) },
     ])
   })
 
-  it('never holds up the transaction: without a store, or when the save throws', () => {
+  it('never holds up the transaction: when the save rejects, or IndexedDB is unavailable', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
-      const throwing = {
-        save: () => {
-          throw new Error('quota')
-        },
-        forOffer: () => [],
+      const rejecting: SentMessages = {
+        save: () => Promise.reject(new Error('quota')),
+        forOffer: () => Promise.resolve([]),
       }
-      for (const store of [undefined, throwing]) {
-        expect(recordingSent(built(), store, sent).finalize({} as Pset).summary).toBe('summary')
+      vi.stubGlobal('indexedDB', undefined)
+      const unavailable = (await anotherTab()).sentMessagesOf('testnet', freshFingerprint())
+      for (const store of [rejecting, unavailable]) {
+        expect((await recordingSent(built(), store, sent).finalize({} as Pset)).summary).toBe(
+          'summary',
+        )
       }
       expect(error).toHaveBeenCalledTimes(2)
-      // the console never shows the text
+      // the console names the phase and the txid, never the text
+      for (const [text] of error.mock.calls) {
+        expect(text).toBe(`The installment ${TXID} was sent without a record of its message`)
+      }
       expect(JSON.stringify(error.mock.calls.map(([text]) => text))).not.toContain(sent.text)
     } finally {
       error.mockRestore()
     }
+  })
+
+  it("passes on the inner finalize's error, and records nothing", async () => {
+    const store = sentMessagesOf('testnet', freshFingerprint())
+    const failing = {
+      ...built(),
+      finalize: () => {
+        throw new Error('Finalizing changed the installment')
+      },
+    }
+    await expect(recordingSent(failing, store, sent).finalize({} as Pset)).rejects.toThrow(
+      'Finalizing changed the installment',
+    )
+    expect(await store.forOffer(OFFER)).toEqual([])
   })
 })

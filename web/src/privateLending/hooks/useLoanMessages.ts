@@ -16,7 +16,7 @@ import {
 } from '@/privateLending/loanMessages'
 import type { OpenedOfferItem } from '@/privateLending/offerView'
 import { loadVerifiedOffer } from '@/privateLending/scan'
-import type { SentMessage } from '@/privateLending/sentMessages'
+import { type SentMessage, sentMessagesOf } from '@/privateLending/sentMessages'
 import { useLwk } from '@/providers/lwk/useLwk'
 import { useWallet } from '@/providers/wallet/useWallet'
 import { REPAYMENT_INPUT, REPAYMENT_OUTPUT } from '@/simplicity/private-lending/layout'
@@ -25,7 +25,6 @@ import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 import { privateLoanMessagesQueryKey } from './queryKeys'
 import { useLoan } from './useLoan'
 import { PRIVATE_API_BASE_URL, usePrivateFlowDeps } from './usePrivateFlowDeps'
-import { openSentMessages } from './usePrivateOffers'
 
 /** What `useLoanMessages` reads beside the loan. */
 interface BesideLoan {
@@ -80,6 +79,20 @@ async function readRepayment(
 }
 
 /**
+ * This wallet's records for the offer `offerTxid`, read from IndexedDB now, as another tab may have
+ * sent since; none, said in the console, when they cannot be read, so the chain's messages still
+ * show.
+ */
+async function readSent(network: string, key: LendingKey, offerTxid: string) {
+  try {
+    return await sentMessagesOf(network, key.fingerprint()).forOffer(offerTxid)
+  } catch (error) {
+    console.error('The records of sent messages could not be read', error)
+    return []
+  }
+}
+
+/**
  * The messages of `item`'s loan in chain order, for either party, and whether they are still being
  * read. An offer never accepted has at most the creation's.
  */
@@ -116,7 +129,7 @@ export function useLoanMessages(item: OpenedOfferItem): {
         : false,
     queryFn: async (): Promise<BesideLoan> => {
       const [deps, key] = await Promise.all([getDeps(), getLendingKey()])
-      const sent = (await openSentMessages(network, key))?.forOffer(item.txid) ?? []
+      const sent = await readSent(network, key, item.txid)
       if (repaymentTxid === undefined || loanOutpoint === undefined) {
         return { sent, repaymentFailed: false }
       }

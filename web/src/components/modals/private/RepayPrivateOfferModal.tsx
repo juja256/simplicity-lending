@@ -10,7 +10,7 @@ import Notice from '@/components/Notice'
 import { UiTextField } from '@/components/ui/UiTextField'
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
-import type { UpdatedPset } from '@/lwk/updatedPset'
+import type { AsyncUpdatedPset } from '@/lwk/updatedPset'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { asBorrowerError } from '@/privateLending/borrowerErrors'
 import { loanBorrowerNftOutpoint, utxoOutpoint } from '@/privateLending/candidate'
@@ -21,7 +21,6 @@ import {
 import { buildPrivateRepayment, type RepaymentSummary } from '@/privateLending/flows/repayment'
 import { outpointOf } from '@/privateLending/flows/shared'
 import { useLoan } from '@/privateLending/hooks/useLoan'
-import { openSentMessages } from '@/privateLending/hooks/usePrivateOffers'
 import { unitsToDecimal } from '@/privateLending/lenderTerms'
 import { loadLoan } from '@/privateLending/loan'
 import { messageError, messageToSend } from '@/privateLending/messages'
@@ -33,7 +32,7 @@ import {
   type RepayPlan,
   repayPlan,
 } from '@/privateLending/repayPlan'
-import { recordingSent } from '@/privateLending/sentMessages'
+import { recordingSent, sentMessagesOf } from '@/privateLending/sentMessages'
 import { selectAssetCoins, selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
 import { useLwk } from '@/providers/lwk/useLwk'
 import { loadPrivateTxsForWallet } from '@/providers/pendingTransactions/storage'
@@ -121,7 +120,7 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
     offer,
     candidate,
     utxo,
-  }: FreshOffer): Promise<UpdatedPset<InstallmentSummary | RepaymentSummary>> => {
+  }: FreshOffer): Promise<AsyncUpdatedPset<InstallmentSummary | RepaymentSummary>> => {
     if (plan === undefined || plan.kind === 'refused') {
       throw new Error(plan?.message ?? 'The amount this loan still owes is not read yet')
     }
@@ -163,7 +162,7 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
       throw new Error(`The loan's principal is not ${principalAsset.symbol}`)
     }
     const coins = deps.walletUtxos()
-    const sent = await openSentMessages(network, lendingKey)
+    const sent = sentMessagesOf(network, lendingKey.fingerprint())
     const sentText = message === undefined ? {} : { text: message }
     const offerTxid = offer.creationTx.txid().toString()
     if (freshPlan.kind === 'full') {

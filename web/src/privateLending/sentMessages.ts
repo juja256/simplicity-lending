@@ -1,20 +1,24 @@
-// The messages this wallet sent, over the scan database's key-value store (the app's
-// `PersistentKv`; a `Map` in Node), kept per network and lending-key fingerprint.
+// The messages this wallet sent, in an IndexedDB database of their own: one record per transaction,
+// keyed by its txid, with the network and the lending-key fingerprint of the wallet that sent it.
 //
-// Unlike the scan states beside it, this store holds plaintext: the text of every acceptance,
-// installment and full repayment this browser sends, or a record that it sent none. Their range
-// proofs' nonces are random for the acceptance and the full repayment, so the sender cannot reread
-// them from the chain; the record is how the timeline shows them. The trade-off is decided: like
-// the saved transactions, they stay on the device after a disconnect. A sent message records its
+// Unlike the scan states, this store holds plaintext: the text of every acceptance, installment and
+// full repayment this browser sends, or a record that it sent none. Their range proofs' nonces are
+// random for the acceptance and the full repayment, so the sender cannot reread them from the
+// chain; the record is how the timeline shows them. The trade-off is decided: like the saved
+// transactions, they stay on the device after a disconnect. A sent message records its
 // transaction's txid, for the timeline to match against the loan's transactions, so that a
 // discarded draft's text never shows as sent.
 //
-// A stored value that does not decode reads as no messages, and the next save starts over.
+// Every save is awaited before the transaction's first broadcast (`recordingSent`), and every read
+// goes to IndexedDB, with nothing held in memory: the browser's tabs see each other's records, and
+// no tab writes over another's. Earlier builds kept the records in the scan database's key-value
+// store, under ['sent', network, fingerprint]; those are ignored, with no migration (v2 is a demo).
+//
+// A stored record that does not decode is skipped; the others still read.
+import { type DBSchema, type IDBPDatabase, openDB } from 'idb'
 import { z as zod } from 'zod'
 
-import type { UpdatedPset } from '@/lwk/updatedPset'
-
-import type { ScanKv, ScanScope } from './scanStore'
+import type { AsyncUpdatedPset, UpdatedPset } from '@/lwk/updatedPset'
 
 /** A message this wallet sent, or the record that a transaction it sent carried none. */
 export interface SentMessage {
@@ -34,30 +38,47 @@ export interface SentMessage {
 /** The sent messages of one wallet on one network. */
 export interface SentMessages {
   /**
-   * Records `message`, replacing an earlier record of the same transaction. Throws for a message
-   * the store could not read back (a txid that is not 64 lowercase hex characters, an empty text,
-   * an installment without its index), so one bad record never makes the others unreadable.
+   * Records `message` in IndexedDB, replacing an earlier record of the same transaction; resolves
+   * once it is committed. Rejects for a message the store could not read back (a txid that is not
+   * 64 lowercase hex characters, an empty text, an installment without its index), so one bad
+   * record never makes the others unreadable, and when IndexedDB is unavailable or the write fails.
    */
-  save(message: SentMessage): void
-  /** The records of the offer whose creation txid is `offerTxid`, in the order they were saved. */
-  forOffer(offerTxid: string): SentMessage[]
+  save(message: SentMessage): Promise<void>
+  /**
+   * The records of the offer whose creation txid is `offerTxid`, read from IndexedDB now, in the
+   * order they were saved. Rejects when IndexedDB is unavailable.
+   */
+  forOffer(offerTxid: string): Promise<SentMessage[]>
 }
 
-const STORE_VERSION = 1
+export const SENT_MESSAGES_DB_NAME = 'simplicity-lending:sent-messages'
+export const SENT_MESSAGES_STORE_NAME = 'sent'
+const DB_VERSION = 1
+const OFFER_INDEX = 'by-wallet-offer'
 
-const encoder = new TextEncoder()
-const decoder = new TextDecoder('utf-8', { fatal: true })
+/** A record as stored: a sent message, and the wallet that sent it. */
+type StoredMessage = SentMessage & { network: string; fingerprint: string }
+
+interface SentMessagesDBSchema extends DBSchema {
+  [SENT_MESSAGES_STORE_NAME]: {
+    key: string
+    value: StoredMessage
+    indexes: { [OFFER_INDEX]: [string, string, string] }
+  }
+}
 
 const txidSchema = zod.string().regex(/^[0-9a-f]{64}$/)
 
 const common = {
+  network: zod.string().min(1),
+  fingerprint: zod.string().min(1),
   offerTxid: txidSchema,
   txid: txidSchema,
   text: zod.string().min(1).optional(),
   savedAt: zod.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
 }
 
-const messageSchema = zod.discriminatedUnion('phase', [
+const storedSchema = zod.discriminatedUnion('phase', [
   zod.object({ ...common, phase: zod.literal('acceptance') }).strict(),
   zod
     .object({
@@ -69,17 +90,8 @@ const messageSchema = zod.discriminatedUnion('phase', [
   zod.object({ ...common, phase: zod.literal('repayment') }).strict(),
 ])
 
-const storedSchema = zod
-  .object({ version: zod.literal(STORE_VERSION), messages: zod.array(messageSchema) })
-  .strict()
-
-/** The key of a wallet's sent messages: `sent`, the network and the lending-key fingerprint. */
-export function sentMessagesKey(scope: ScanScope, fingerprint: string): string {
-  return JSON.stringify(['sent', scope.network, fingerprint])
-}
-
 /** Copies only the fields of `SentMessage`, so nothing else a caller attached is ever stored. */
-function toStored(message: SentMessage): SentMessage {
+function toSentMessage(message: SentMessage): SentMessage {
   return {
     offerTxid: message.offerTxid,
     txid: message.txid,
@@ -90,55 +102,68 @@ function toStored(message: SentMessage): SentMessage {
   }
 }
 
-function decode(bytes: Uint8Array): SentMessage[] | undefined {
-  try {
-    const parsed = storedSchema.safeParse(JSON.parse(decoder.decode(bytes)))
-    return parsed.success ? parsed.data.messages : undefined
-  } catch {
-    return undefined
-  }
+let dbPromise: Promise<IDBPDatabase<SentMessagesDBSchema>> | null = null
+
+/** The database, opened once per page; rejects where IndexedDB is unavailable. */
+function getDb(): Promise<IDBPDatabase<SentMessagesDBSchema>> {
+  dbPromise ??= (async () =>
+    openDB<SentMessagesDBSchema>(SENT_MESSAGES_DB_NAME, DB_VERSION, {
+      upgrade(db) {
+        const store = db.createObjectStore(SENT_MESSAGES_STORE_NAME, { keyPath: 'txid' })
+        store.createIndex(OFFER_INDEX, ['network', 'fingerprint', 'offerTxid'])
+      },
+    }))().catch(error => {
+    // Not cached, so a later call tries again.
+    dbPromise = null
+    throw error
+  })
+  return dbPromise
 }
 
-/** The sent messages of the wallet with `fingerprint` on `scope`'s network, kept in `kv`. */
-export function kvSentMessages(kv: ScanKv, scope: ScanScope, fingerprint: string): SentMessages {
-  const key = sentMessagesKey(scope, fingerprint)
-  const read = (): SentMessage[] => {
-    const bytes = kv.get(key)
-    return (bytes === undefined ? undefined : decode(bytes)) ?? []
-  }
+/** The sent messages of the wallet with lending-key fingerprint `fingerprint` on `network`. */
+export function sentMessagesOf(network: string, fingerprint: string): SentMessages {
   return {
-    save(message) {
-      const stored = messageSchema.parse(toStored(message))
-      const messages = read().filter(saved => saved.txid !== stored.txid)
-      messages.push(stored)
-      const value = { version: STORE_VERSION, messages }
-      kv.put(key, encoder.encode(JSON.stringify(value)))
+    async save(message) {
+      const stored = storedSchema.parse({ ...toSentMessage(message), network, fingerprint })
+      const db = await getDb()
+      await db.put(SENT_MESSAGES_STORE_NAME, stored)
     },
-    forOffer(offerTxid) {
-      return read().filter(message => message.offerTxid === offerTxid)
+    async forOffer(offerTxid) {
+      const db = await getDb()
+      const records = await db.getAllFromIndex(SENT_MESSAGES_STORE_NAME, OFFER_INDEX, [
+        network,
+        fingerprint,
+        offerTxid,
+      ])
+      return records
+        .flatMap(record => {
+          const parsed = storedSchema.safeParse(record)
+          return parsed.success ? [toSentMessage(parsed.data)] : []
+        })
+        .sort((a, b) => a.savedAt - b.savedAt)
     },
   }
 }
 
 /**
  * `built`, whose `finalize` also records `sent` in `store` under the finalized transaction's txid,
- * as the caller goes on to save the transaction itself, before its first broadcast. Without a
- * store, or when the record cannot be saved, the console says so (never with the text) and the
+ * and resolves only once the record is committed: the caller goes on to save the transaction
+ * itself, then broadcasts it. When the record cannot be saved (IndexedDB unavailable, or the write
+ * failed), the console says so with the phase and the txid only, never the text, and the
  * transaction goes on all the same: a record never holds up a payment.
  */
 export function recordingSent<TSummary>(
   built: UpdatedPset<TSummary>,
-  store: SentMessages | undefined,
+  store: SentMessages,
   sent: Omit<SentMessage, 'txid' | 'savedAt'>,
-): UpdatedPset<TSummary> {
+): AsyncUpdatedPset<TSummary> {
   return {
     pset: built.pset,
-    finalize: signedPset => {
+    finalize: async signedPset => {
       const finalized = built.finalize(signedPset)
       const txid = finalized.finalizedTx.txid().toString()
       try {
-        if (store === undefined) throw new Error('The store of sent messages did not open')
-        store.save({ ...sent, txid, savedAt: Date.now() })
+        await store.save({ ...sent, txid, savedAt: Date.now() })
       } catch (error) {
         console.error(`The ${sent.phase} ${txid} was sent without a record of its message`, error)
       }

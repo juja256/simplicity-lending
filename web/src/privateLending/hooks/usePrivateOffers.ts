@@ -22,7 +22,6 @@ import {
   syncOffers,
 } from '@/privateLending/scan'
 import { kvScanStore, type ScanScope, scanStoreKey } from '@/privateLending/scanStore'
-import { kvSentMessages, type SentMessages } from '@/privateLending/sentMessages'
 import type { VerifiedOffer } from '@/privateLending/verify'
 import { useLwk } from '@/providers/lwk/useLwk'
 import { useWallet } from '@/providers/wallet/useWallet'
@@ -102,23 +101,6 @@ function getScanKv(): Promise<PersistentKv> {
     throw error
   })
   return scanKv
-}
-
-/**
- * The messages the wallet of lending key `key` sent on `network`, kept beside its scan states; or
- * undefined, said in the console, when the scan database does not open.
- */
-export async function openSentMessages(
-  network: string,
-  key: LendingKey,
-): Promise<SentMessages | undefined> {
-  try {
-    const scope = { network, apiBaseUrl: PRIVATE_API_BASE_URL }
-    return kvSentMessages(await getScanKv(), scope, key.fingerprint())
-  } catch (error) {
-    console.error('The store of sent messages did not open', error)
-    return undefined
-  }
 }
 
 /** The sync running for each scan state (by store key), and the key it runs with. */
