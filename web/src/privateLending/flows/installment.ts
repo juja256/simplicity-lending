@@ -15,11 +15,13 @@
 // An installment built otherwise would confirm, and the borrower could no longer rebuild its debt
 // from the seed and close the loan. So the plan is made from exactly input 2 and output 0's
 // script, and both layout checks require them, and the built transaction is read back with the
-// borrower's lending key before it is signed: it must give the loan the plan expects.
+// borrower's lending key before it is signed: it must give the loan the plan expects. That read
+// rebuilds the borrower's key and never reads output 2's nonce, which the lender opens it with, so
+// the built transaction's nonce must be the plan's ephemeral key too (`installmentNonceMatches`).
 // The borrower NFT is spent as a plain input, as in the full repayment. The builder pays no
 // installment before the principal is claimed (`principalClaimedBefore`), nor from the expiry
 // block on (`installmentTermOpen`).
-import type { WalletTxOut } from 'lwk_wasm'
+import type { Transaction, WalletTxOut } from 'lwk_wasm'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
@@ -29,6 +31,7 @@ import {
   NFT_AMOUNT,
 } from '@/simplicity/private-lending/layout'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
+import { bytesToHex, normalizeHex } from '@/utils/hex'
 import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from '../deps'
@@ -210,6 +213,7 @@ export async function buildPrivateInstallment(
   try {
     const debtWitness = plan.debtWitness
     const successorDebtHash = plan.successorDebtHash
+    const ephemeralPublicKey = plan.ephemeralPublicKey
     const installment = plan.installment
     const successor = plan.successor
     // `A` and the collateral after one more step: the covenant's checks 3 and 6, checked here too
@@ -380,9 +384,16 @@ export async function buildPrivateInstallment(
     const builtTxid = builtTx.txid().toString()
     const remaining = owed - amount
 
-    // 9. The installment read back as the borrower will read it from the chain. Neither the layout
+    // 9. The installment read back as the parties will read it from the chain. Neither the layout
     // checks nor the covenant look at output 2's range proof: if it did not open with the plan's
-    // key, the installment would confirm and the borrower could no longer rebuild the debt.
+    // key, the installment would confirm and the borrower could no longer rebuild the debt, nor
+    // the lender open it from its nonce.
+    if (!installmentNonceMatches(builtTx, ephemeralPublicKey)) {
+      throw new Error(
+        "The installment's nonce is not the planned one: it was not signed. The lender could not " +
+          'open its amount',
+      )
+    }
     assertInstallmentReadsBack(offer, loan, params.lendingKey, builtTx.toString(), {
       loanOutpoint: `${builtTxid}:${INSTALLMENT_OUTPUT.loan}`,
       amount,
@@ -432,6 +443,79 @@ export async function buildPrivateInstallment(
   } finally {
     // the plan holds the installment's key
     plan.free()
+  }
+}
+
+/**
+ * Whether output 2 of `tx`, the installment, carries the nonce `ephemeralPublicKey` (a 33-byte
+ * compressed public key, hex): the plan's, with which the lender opens the installment. LWK's
+ * `TxOut` does not expose the nonce, so this reads the transaction's consensus encoding.
+ */
+export function installmentNonceMatches(tx: Transaction, ephemeralPublicKey: string): boolean {
+  const nonce = outputNonce(tx.toBytes(), INSTALLMENT_OUTPUT.installment)
+  return nonce !== undefined && nonce === normalizeHex(ephemeralPublicKey)
+}
+
+/**
+ * The nonce of output `vout` of the transaction `bytes`, in Elements' consensus encoding, as a
+ * 33-byte compressed public key, hex. Undefined when the output has no such nonce, when the
+ * transaction has fewer outputs, and for any encoding this does not read, an input with an
+ * issuance or a peg-in among them: an installment has neither.
+ */
+function outputNonce(bytes: Uint8Array, vout: number): string | undefined {
+  let at = 0
+  const take = (length: number): Uint8Array => {
+    if (at + length > bytes.length) throw new RangeError('The transaction ends early')
+    at += length
+    return bytes.subarray(at - length, at)
+  }
+  const u8 = () => take(1)[0]
+  const u32 = () => new DataView(take(4).slice().buffer).getUint32(0, true)
+  const varint = () => {
+    const first = u8()
+    if (first < 0xfd) return first
+    if (first === 0xfd) return new DataView(take(2).slice().buffer).getUint16(0, true)
+    if (first === 0xfe) return u32()
+    throw new RangeError('A length beyond 32 bits')
+  }
+  // A confidential asset, value or nonce: null (0), explicit (1, then `explicit` bytes) or a
+  // commitment (one of `commitments`, then x). Returns the prefix.
+  const confidential = (explicit: number, commitments: number[]): number => {
+    const prefix = u8()
+    if (prefix === 1) take(explicit)
+    else if (commitments.includes(prefix)) take(32)
+    else if (prefix !== 0) throw new RangeError(`An unknown prefix ${prefix}`)
+    return prefix
+  }
+
+  try {
+    take(4) // the version
+    if (u8() > 1) return undefined // the witness flag
+    const inputs = varint()
+    for (let input = 0; input < inputs; input++) {
+      take(32) // the prevout's txid
+      const prevoutVout = u32()
+      take(varint()) // the script sig
+      take(4) // the sequence
+      // bit 31 marks an issuance, bit 30 a peg-in, except in the null prevout's 0xffffffff
+      if (prevoutVout !== 0xffffffff && prevoutVout >= 0x40000000) return undefined
+    }
+    const outputs = varint()
+    if (vout >= outputs) return undefined
+    for (let output = 0; output < vout; output++) {
+      confidential(32, [0x0a, 0x0b]) // the asset
+      confidential(8, [0x08, 0x09]) // the value
+      confidential(32, [0x02, 0x03]) // the nonce
+      take(varint()) // the script pubkey
+    }
+    confidential(32, [0x0a, 0x0b])
+    confidential(8, [0x08, 0x09])
+    const start = at
+    const prefix = confidential(32, [0x02, 0x03])
+    return prefix === 0x02 || prefix === 0x03 ? bytesToHex(bytes.subarray(start, at)) : undefined
+  } catch (error) {
+    if (error instanceof RangeError) return undefined
+    throw error
   }
 }
 

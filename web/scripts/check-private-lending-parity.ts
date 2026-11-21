@@ -80,8 +80,12 @@ interface Fixture {
   pending_offer_script_pubkey: string
   active_offer_script_pubkey: string
   lender_nft_script_pubkey: string
+  // `debt` is the 33-byte consensus encoding of a value commitment, hex, as the web's witness
+  // takes it; `debt_hash` is the debt hash of the loan each vector spends, `h(A, D)`.
   witness_vectors: {
+    installment: WitnessVector & { debt_hash: string; debt: string }
     full_repayment: WitnessVector & { debt_hash: string }
+    zero_debt_close: WitnessVector & { debt_hash: string; debt: string; k: string }
     liquidation: WitnessVector & { debt_hash: string; salt: string; expiry: number }
   }
   // The offer's loan on regtest, after its acceptance and one installment, which both parties
@@ -395,20 +399,49 @@ async function main(): Promise<void> {
 }
 
 /**
- * The web's witnesses of the branches it builds, run by LWK on the fixture's synthetic spends of the
- * active offer: each must give the bytes the contracts' Rust serializes for the same values, so a
- * wrong byte order of a 32-byte value cannot pass. A reversed debt hash or salt must fail to run.
+ * The web's witnesses of the branches of the active offer, run by LWK on the fixture's synthetic
+ * spends of the loan at each vector's debt hash: each must give the bytes the contracts' Rust
+ * serializes for the same values, so a wrong byte order of a 32-byte value, or a wrong prefix bit
+ * of a debt, cannot pass. A reversed debt x, debt hash, key or salt must fail to run.
  */
 function checkWitnessVectors(scripts: PrivateOfferScripts, network: lwk.Network): void {
-  const { full_repayment: repayment, liquidation } = fixture.witness_vectors
+  const {
+    installment,
+    full_repayment: repayment,
+    zero_debt_close: close,
+    liquidation,
+  } = fixture.witness_vectors
   const reversed = (value: string) => Buffer.from(value, 'hex').reverse().toString('hex')
-  const cases: [string, WitnessVector, (reverse: boolean) => PrivateLendingWitness][] = [
+  // the debt's prefix, then its x reversed
+  const reversedX = (debt: string) => debt.slice(0, 2) + reversed(debt.slice(2))
+  const cases: [
+    string,
+    WitnessVector & { debt_hash: string },
+    (reverse: boolean) => PrivateLendingWitness,
+  ][] = [
+    [
+      'installment',
+      installment,
+      reverse => ({
+        branch: 'Installment',
+        debt: reverse ? reversedX(installment.debt) : installment.debt,
+      }),
+    ],
     [
       'full repayment',
       repayment,
       reverse => ({
         branch: 'FullRepayment',
         debtHash: reverse ? reversed(repayment.debt_hash) : repayment.debt_hash,
+      }),
+    ],
+    [
+      'zero-debt close',
+      close,
+      reverse => ({
+        branch: 'ZeroDebtClose',
+        debt: close.debt,
+        key: reverse ? reversed(close.k) : close.k,
       }),
     ],
     [
@@ -426,7 +459,7 @@ function checkWitnessVectors(scripts: PrivateOfferScripts, network: lwk.Network)
     const run = (reverse: boolean) =>
       scripts.program.run(
         lwk.Transaction.fromString(vector.tx),
-        scripts.activeSpendInfo.controlBlock(scripts.program.cmr),
+        scripts.activeSpendInfoAt(vector.debt_hash).controlBlock(scripts.program.cmr),
         lwk.Transaction.fromString(vector.prevouts_tx).outputs,
         vector.input_index,
         buildPrivateLendingWitness(witness(reverse)),

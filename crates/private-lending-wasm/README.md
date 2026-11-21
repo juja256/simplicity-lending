@@ -116,17 +116,20 @@ Loans:
 
 - `OpenedOffer.loanState(key, acceptanceTxHex, installmentTxHexes)`: the `LoanState` after the
   acceptance and the installments, read with the lending key of the party that opened the offer.
-  Each installment must spend the previous loan output at input 1, hold the collateral after it
-  at output 1 and pay `A` at output 2. The scripts are the caller's to check, against
-  `activeOfferAt(state.debtHashAt(j))` in `web/src/simplicity/private-lending/scripts.ts`.
+  The acceptance must spend the creation's pending offer (output 3) at input 0 and hold the active
+  collateral at output 0. Each installment must spend the previous loan output at input 1, hold
+  the collateral after it at output 1 and pay `A` at output 2. The scripts are the caller's to
+  check, against `activeOfferAt(state.debtHashAt(j))` in
+  `web/src/simplicity/private-lending/scripts.ts`.
 - `LoanState` getters: `installmentCount`, `loanOutpoint`, `debtCommitment`, `debtHash`, `paid`
   (what opened for the party) and `remaining` (`undefined` unless every installment opened);
   `debtHashAt(j)` (0 the acceptance's loan output), `installment(j)` (from 1),
   `loanInputSecret(inputIndex)` and `collateral()`.
 - Borrower only, else `bad-input`: `planInstallment(amount, firstWalletInput,
-  nftReceiverScript)`, an `InstallmentPlan` (`debtWitness`, `successorDebtHash`, `installment`,
-  `successor`, `installmentBlinding(i)`, `successorBlinding(i)`) for an amount above 0 and below
-  the remaining debt; `repaymentBlinding(i)` while an amount is owed; `zeroDebtKey()` once none is.
+  nftReceiverScript)`, an `InstallmentPlan` (`debtWitness`, `successorDebtHash`,
+  `ephemeralPublicKey`, the installment's nonce, `installment`, `successor`,
+  `installmentBlinding(i)`, `successorBlinding(i)`) for an amount above 0 and below the remaining
+  debt; `repaymentBlinding(i)` while an amount is owed; `zeroDebtKey()` once none is.
 - Lender only, else `bad-input`: `sweep(closeTxHex, unspent)`, the `Sweep` (`outpoints()`,
   `amount`, `inputSecret(position, inputIndex)`) of the final claim after the full repayment or
   the zero-debt close, or of a liquidation when `closeTxHex` is `undefined`.

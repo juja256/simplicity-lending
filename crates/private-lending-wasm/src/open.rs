@@ -2,7 +2,7 @@
 
 use elements::encode::deserialize;
 use elements::hex::ToHex;
-use elements::{OutPoint, Transaction, confidential};
+use elements::{OutPoint, Transaction, Txid, confidential};
 use private_lending_core::{
     CreationError, OfferPinned, OfferSecrets, OfferTerms, OpenedOffer as CoreOpenedOffer,
     PinnedOutput, PinnedRole as CorePinnedRole, expiry_hash, lift_lending_key,
@@ -46,6 +46,9 @@ pub(crate) enum Party {
 #[wasm_bindgen]
 pub struct OpenedOffer {
     offer: CoreOpenedOffer,
+    /// The creation transaction's txid: its output 3 is the pending offer, which the acceptance
+    /// spends at input 0.
+    creation_txid: Txid,
     first_input: String,
     party: Party,
 }
@@ -60,6 +63,11 @@ impl OpenedOffer {
         self.party
     }
 
+    /// The creation transaction's txid.
+    pub(crate) fn creation_txid(&self) -> Txid {
+        self.creation_txid
+    }
+
     fn new(offer: CoreOpenedOffer, tx: &Transaction, party: Party) -> Result<Self, String> {
         let outpoint = tx
             .input
@@ -68,6 +76,7 @@ impl OpenedOffer {
             .previous_output;
         Ok(Self {
             offer,
+            creation_txid: tx.txid(),
             first_input: outpoint_string(&outpoint),
             party,
         })

@@ -13,7 +13,7 @@ use std::collections::HashSet;
 
 use elements::confidential::{self, ValueBlindingFactor};
 use elements::encode::serialize;
-use elements::secp256k1_zkp::{SecretKey, XOnlyPublicKey};
+use elements::secp256k1_zkp::{SECP256K1, SecretKey, XOnlyPublicKey};
 use elements::{OutPoint, Script, Transaction, TxOut, TxOutSecrets};
 use private_lending_core::{
     DebtOpening, LendingKey as CoreLendingKey, OfferPinned, OfferSecrets,
@@ -30,6 +30,10 @@ use crate::keys::LendingKey;
 use crate::open::{OpenedOffer, Party, PinnedOutputInfo, outpoint_string, parse_tx};
 use crate::scan::parse;
 
+/// The creation's output that holds the pending offer, which the acceptance spends.
+const CREATION_PENDING_OFFER_OUTPUT: u32 = 3;
+/// The acceptance's input that spends the pending offer.
+const ACCEPTANCE_OFFER_INPUT: usize = 0;
 /// The acceptance's output that holds the loan.
 const ACCEPTANCE_LOAN_OUTPUT: u32 = 0;
 /// The input of an installment or a close that spends the loan.
@@ -76,11 +80,12 @@ impl OpenedOffer {
     /// the offer (`bad-input` for another key).
     ///
     /// A transaction that is not the loan's is `loan-mismatch`, naming the acceptance or the
-    /// installment (from 1): the acceptance's output 0 must be the active collateral, and each
-    /// installment must spend the previous loan output at its input 1, put the collateral after
-    /// it at output 1 (`collateral_after(j)` of the `j`-th installment) and pay the repayment
-    /// asset `A` at output 2. These do not check the scripts: the caller requires each loan
-    /// output's script to be the active offer at its debt hash (`debtHashAt`).
+    /// installment (from 1): the acceptance's output 0 must be the active collateral and its input
+    /// 0 must spend the creation's pending offer (output 3), and each installment must spend the
+    /// previous loan output at its input 1, put the collateral after it at output 1
+    /// (`collateral_after(j)` of the `j`-th installment) and pay the repayment asset `A` at output
+    /// 2. These do not check the scripts: the caller requires each loan output's script to be the
+    /// active offer at its debt hash (`debtHashAt`).
     #[wasm_bindgen(js_name = loanState)]
     pub fn loan_state(
         &self,
@@ -110,6 +115,7 @@ impl OpenedOffer {
 
         LoanState::read(
             offer,
+            OutPoint::new(self.creation_txid(), CREATION_PENDING_OFFER_OUTPUT),
             self.party(),
             *key.inner(),
             &acceptance,
@@ -119,8 +125,10 @@ impl OpenedOffer {
 }
 
 impl LoanState {
+    /// The loan that `acceptance` starts, which must spend `pending_offer`, and `installments`.
     fn read(
         offer: &CoreOpenedOffer,
+        pending_offer: OutPoint,
         party: Party,
         key: CoreLendingKey,
         acceptance: &Transaction,
@@ -133,6 +141,18 @@ impl LoanState {
                 "output {ACCEPTANCE_LOAN_OUTPUT} of the acceptance {} is not the offer's active \
                  collateral",
                 acceptance.txid()
+            )));
+        }
+        let spent = acceptance
+            .input
+            .get(ACCEPTANCE_OFFER_INPUT)
+            .map(|input| input.previous_output);
+        if spent != Some(pending_offer) {
+            return Err(loan_mismatch(format!(
+                "input {ACCEPTANCE_OFFER_INPUT} of the acceptance {} does not spend the offer's \
+                 pending offer {}",
+                acceptance.txid(),
+                outpoint_string(&pending_offer)
             )));
         }
 
@@ -695,6 +715,13 @@ impl InstallmentPlan {
         encode_hex(&self.successor_debt_hash)
     }
 
+    /// The installment's nonce, the derived key's public key (33-byte compressed, hex): output 2
+    /// of the blinded transaction must carry it, or the lender could not open the installment.
+    #[wasm_bindgen(getter, js_name = ephemeralPublicKey)]
+    pub fn ephemeral_public_key(&self) -> String {
+        encode_hex(&self.ephemeral_sk.public_key(SECP256K1).serialize())
+    }
+
     /// How to blind the installment, output `output_index`: its nonce is the derived key's, and
     /// the PSET output must carry the lender's blinding key (`lenderBlindingKey()`), so that both
     /// parties rewind it from the chain.
@@ -782,7 +809,7 @@ mod tests {
     use elements::hashes::Hash;
     use elements::hex::ToHex;
     use elements::pset::{Input, Output, PartiallySignedTransaction};
-    use elements::secp256k1_zkp::{PublicKey, SECP256K1, SecretKey};
+    use elements::secp256k1_zkp::PublicKey;
     use elements::{
         AssetId, OutPoint, Script, Transaction, TxOut, Txid, VerificationError, bitcoin,
     };
@@ -1349,6 +1376,11 @@ mod tests {
         assert_eq!(plan.debt_witness(), state.debt_commitment());
         let tx = planned(&f, &from, &plan, f.lender_blinding_key());
         let expected = from.owed.after(opening_of(&plan.payment)).unwrap();
+        // the installment's nonce, which the lender opens it with, is the plan's ephemeral key
+        assert_eq!(
+            encode_hex(&serialize(&tx.output[2].nonce)),
+            plan.ephemeral_public_key()
+        );
 
         // on a new device, with nothing saved: the seed and the chain
         let key = key_of(&f.value, "borrower_master_blinding_key");
@@ -1500,6 +1532,31 @@ mod tests {
             "loan-mismatch",
             "installment 2",
         );
+    }
+
+    #[test]
+    fn loan_state_refuses_an_acceptance_of_another_creation() {
+        let f = Fixture::load();
+        let creation = tx_of(&f.creation).txid();
+        let other = tx_of(f.value["other_offer"]["creation_tx"].as_str().unwrap()).txid();
+        let borrower = open_creation_as_borrower_hex(&f.borrower, &f.creation).unwrap();
+        let lender = open_creation_as_lender_hex(&f.lender, &f.creation).unwrap();
+
+        // the acceptance, its outputs unchanged, spending at input 0 another offer's pending offer,
+        // or another output of this creation than its pending offer (output 3)
+        for spent in [OutPoint::new(other, 3), OutPoint::new(creation, 2)] {
+            let mut forged = tx_of(&f.acceptance);
+            forged.input[0].previous_output = spent;
+            for (opened, key) in [(&borrower, &f.borrower), (&lender, &f.lender)] {
+                assert_code(
+                    opened.loan_state(key, &tx_hex(&forged), Vec::new()),
+                    "loan-mismatch",
+                    "acceptance",
+                );
+            }
+        }
+        assert!(f.as_borrower(&[]).is_ok());
+        assert!(f.as_lender(&[]).is_ok());
     }
 
     #[test]

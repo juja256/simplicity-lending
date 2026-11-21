@@ -11,8 +11,10 @@ import {
 const X = 'c3'.repeat(32)
 const KEY = '5e'.repeat(32)
 
-// No parity vector covers these two branches: the bit is the low bit of the commitment's prefix,
-// true for 09 (y not a square) and false for 08.
+// The parity script checks these two branches' witness bytes against the contracts' Rust
+// (`checkWitnessVectors`), with a debt of each prefix bit across the two. These check the path for
+// either bit of each: the bit is the low bit of the commitment's prefix, true for 09 (y not a
+// square) and false for 08.
 describe('the private lending witness', () => {
   it("gives the installment the debt's prefix bit and x", () => {
     expect(privateLendingPath({ branch: 'Installment', debt: `08${X}` })).toBe(

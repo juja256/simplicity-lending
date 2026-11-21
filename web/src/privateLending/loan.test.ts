@@ -15,6 +15,7 @@ import {
   assertInstallmentReadsBack,
   buildPrivateInstallment,
   InstallmentAfterTermError,
+  installmentNonceMatches,
 } from './flows/installment'
 import { buildPrivateLiquidation, ExpiryNotReachedError } from './flows/liquidation'
 import { buildPrivateRepayment } from './flows/repayment'
@@ -302,6 +303,34 @@ describe('loadLoan', () => {
     ).toThrow()
   })
 
+  // The builder requires the blinded transaction's output 2 to carry the plan's nonce before the
+  // read-back, which rebuilds the borrower's key and never reads the nonce: without it the lender
+  // could not open the installment. The fixture's installment stands in for a built one, and the
+  // plan of the same installment on the loan before it gives the key, as the builder's plan does.
+  it("requires the installment's nonce to be the plan's ephemeral key", async () => {
+    const offer = await openOffer('borrower')
+    const before = await loadLoan(fakeChain().deps, offer, keys.borrower, `${acceptanceTxid}:0`)
+    const built = lwk.Transaction.fromString(installmentHex)
+    const firstWalletInput = built.inputs[2].outpoint()
+    const plan = before.state.planInstallment(
+      1n,
+      `${firstWalletInput.txid().toString()}:${firstWalletInput.vout()}`,
+      built.outputs[0].scriptPubkey().toString(),
+    )
+    const ephemeralPublicKey = plan.ephemeralPublicKey
+    plan.free()
+    expect(ephemeralPublicKey).toMatch(/^0[23][0-9a-f]{64}$/)
+    expect(installmentNonceMatches(built, ephemeralPublicKey)).toBe(true)
+
+    // the same installment with output 2's nonce replaced by another valid key: G
+    const generator = '0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'
+    const renonced = lwk.Transaction.fromString(
+      replaceOnce(installmentHex, ephemeralPublicKey, generator),
+    )
+    expect(installmentNonceMatches(renonced, ephemeralPublicKey)).toBe(false)
+    expect(installmentNonceMatches(renonced, generator)).toBe(true)
+  })
+
   it('reads a loan at its acceptance', async () => {
     const offer = await openOffer('borrower')
     const loan = await loadLoan(fakeChain().deps, offer, keys.borrower, `${acceptanceTxid}:0`)
@@ -329,8 +358,15 @@ describe('loadLoan', () => {
     const offer = await openOffer('borrower')
     const forgedTxid = txidOf(forgedAcceptance)
     const forged = forgedAcceptance
-    // its output 0 is still the active collateral, which is all the wasm checks of it
-    expect(offer.opened.loanState(keys.borrower, forged, []).installmentCount).toBe(0)
+    // its output 0 is still the active collateral, but the wasm requires input 0 to spend the
+    // pending offer
+    let refusal: unknown
+    try {
+      offer.opened.loanState(keys.borrower, forged, []).free()
+    } catch (error) {
+      refusal = error
+    }
+    expect(refusal).toMatch(/^loan-mismatch: .*acceptance/)
     // and an installment that spends it
     const installment = replaceOnce(installmentHex, reversed(acceptanceTxid), reversed(forgedTxid))
     const { deps } = fakeChain(forged, installment)
