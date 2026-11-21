@@ -2502,11 +2502,13 @@ migration adding `carry` to `private_utxo_type`; `crates/indexer/tests/private_o
 `CloseZeroDebtModal.tsx` and their tests; create `web/src/privateLending/searchWorker.ts`.
 
 - [ ] **Step 1: Write the failing tests** (Vitest): the creation's layout with the carry issuance
-  (output 4, `S` units); the installment's layout (inputs 0–3, outputs 0–4, the release, the first
-  installment's leftover burn); the carries verified on chain before they are spent (a carry the
+  (output 4, `S` units); the installment's layout (inputs 0 and 1, the principal coins from input
+  2, then the carries, then the fee coins; outputs 0–4, the release, the extra borrower output of
+  the proofs' R2, the first installment's leftover burn); the carries verified on chain before they are spent (a carry the
   indexer names that is not the previous installment's output 3 or 4 is refused); the bounds at
-  acceptance; step 1024 offers only the full repayment; the saved-build rule for a second build of
-  one loan state; the liquidation taking its opening from the search when an installment does not
+  acceptance; step 1024 offers only the full repayment; a rebuild of one loan state only with the
+  same amount and a first wallet input (input 2) no saved, discarded or failed build used, and the
+  proofs' O11 test (two same-amount builds derive different output-2 keys; no carry at input 2); the liquidation taking its opening from the search when an installment does not
   open.
 - [ ] **Step 2–4:** fail, implement, pass (`pnpm test`, `pnpm lint`, `VITE_DEBUG_MNEMONIC= pnpm
   build`, `pnpm parity`, tsc on the three configs).
