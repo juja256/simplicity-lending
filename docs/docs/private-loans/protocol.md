@@ -8,9 +8,10 @@ description: Private lending state transitions, local verification, role-token a
 Private lending uses `crates/contracts/simf/private_lending.simf`, with the helper programs
 [asset auth](../contracts/asset-auth.md) and [script auth](../contracts/script-auth.md). The
 contract takes installments of any amount, the full repayment of what is left, and a close for a
-loan that owes nothing; it charges no protocol fee. The app repays loans in full only. The UI uses
-the network's configured collateral/principal asset pair and displays explicit principal and
-repayment amounts.
+loan that owes nothing; it charges no protocol fee. The app pays installments and the full
+repayment of what is left, and closes a loan that owes nothing; it never pays an installment of the
+whole debt itself. The UI uses the network's configured collateral/principal asset pair and
+displays explicit principal and repayment amounts.
 
 For the browser workflow, see the [user guide](./guide.md).
 
