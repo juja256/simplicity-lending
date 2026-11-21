@@ -56,16 +56,19 @@ function ProposalMessage({
       <h3 id={headingId} className='text-foreground text-sm font-medium'>
         Message from the borrower
       </h3>
-      <MessageEntry
-        message={{
-          phase: 'creation',
-          from: 'borrower',
-          txid: item.txid,
-          state: 'verified',
-          text: message,
-        }}
-        sender={{ name: borrowerName, fingerprint: item.terms.borrowerFingerprint }}
-      />
+      {/* capped, so that a long message never pushes the terms and the action out of reach */}
+      <div className='max-h-[30vh] overflow-y-auto pr-1'>
+        <MessageEntry
+          message={{
+            phase: 'creation',
+            from: 'borrower',
+            txid: item.txid,
+            state: 'verified',
+            text: message,
+          }}
+          sender={{ name: borrowerName, fingerprint: item.terms.borrowerFingerprint }}
+        />
+      </div>
       <p className='text-muted text-xs'>{MESSAGE_NOTE}</p>
     </section>
   )
@@ -148,7 +151,7 @@ export default function AcceptPrivateOfferModal({
   const insufficientBalance =
     BigInt(confirmedBalances[principalAsset.id] ?? 0) < terms.principalAmount
   const needsTick = verdict.kind !== 'within' && !acceptOutside
-  const messageTooLong = messageError(messageText, 'signed') !== null
+  const messageRefused = messageError(messageText, 'signed') !== null
 
   // The acceptance sets no lock time and the covenant does not check the expiry: the tip, read
   // fresh, is checked before the build and again before any broadcast, a retry's included.
@@ -216,7 +219,7 @@ export default function AcceptPrivateOfferModal({
       label='Accept and lend'
       eyebrow='Accept proposal'
       summary={summary}
-      disabled={insufficientBalance || needsTick || messageTooLong}
+      disabled={insufficientBalance || needsTick || messageRefused}
       notice={
         <div className='flex flex-col gap-4'>
           <ProposalMessage item={props.item} borrowerName={props.counterpartyName} />

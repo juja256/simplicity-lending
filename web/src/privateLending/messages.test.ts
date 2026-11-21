@@ -9,6 +9,7 @@ import {
   messageBytes,
   messageError,
   messageToSend,
+  shownMessage,
 } from './messages'
 
 const borrower = wasm.LendingKey.fromMasterBlindingKey('01'.repeat(32))
@@ -59,6 +60,26 @@ describe('messageError', () => {
     expect(messageError(`${atLimit}a`, 'signed')).toBe(
       'The message is 3069 bytes; at most 3068 fit.',
     )
+  })
+})
+
+describe('messageError on text that is not well-formed', () => {
+  // A lone surrogate would reach the wasm as U+FFFD, so the text read back would not be the text
+  // sent (the installment's read-back, the creation's self-check).
+  it('refuses a lone surrogate on either channel, before counting bytes', () => {
+    const broken = 'The 😀 is cut: \uD83D'
+    for (const channel of ['creation', 'signed'] as const) {
+      expect(messageError(broken, channel)).toBe(
+        'The message has a broken character, such as half an emoji: delete it and type it again.',
+      )
+      expect(messageError('\uDE00 alone', channel)).not.toBeNull()
+      expect(messageError(`${'a'.repeat(4000)}\uD83D`, channel)).toContain('broken character')
+      expect(() => checkedMessage(broken, channel)).toThrow('broken character')
+    }
+  })
+
+  it('takes a whole emoji, Cyrillic and the like', () => {
+    expect(messageError('Привіт 😀 👍🏽 🇺🇦', 'signed')).toBeNull()
   })
 })
 
@@ -153,5 +174,18 @@ describe('displayMessage', () => {
     expect(displayMessage(text)).toBe(text)
     const [rlo, pdf] = [String.fromCodePoint(0x202e), String.fromCodePoint(0x202c)]
     expect(displayMessage(`pay ${rlo}ecnetnes${pdf} now\u0000`)).toBe('pay ecnetnes now')
+  })
+})
+
+describe('shownMessage', () => {
+  it('is the text as displayed', () => {
+    expect(shownMessage('pay\u0000 now\nplease')).toBe('pay now\nplease')
+  })
+
+  it('is undefined when nothing visible is left: blank, or only removed characters', () => {
+    const rlo = String.fromCodePoint(0x202e)
+    for (const text of ['\n'.repeat(500), ' \t ', `${rlo}\u0000\n\u007F`]) {
+      expect(shownMessage(text)).toBeUndefined()
+    }
   })
 })

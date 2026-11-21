@@ -26,12 +26,20 @@ export function messageBytes(text: string): number {
   return encoder.encode(text).length
 }
 
+// A lone surrogate: half of a pair, which is no character. (`String.prototype.isWellFormed` is
+// newer than the app's ES2022 library.)
+const LONE_SURROGATE = /\p{Surrogate}/u
+
 /**
  * Why `text` cannot be sent on `channel`, or null if it can. An empty or blank text is no message,
- * not an error.
+ * not an error. A text that is not well-formed UTF-16 (a lone surrogate, as from half an emoji) is
+ * refused: it would reach the wasm with U+FFFD in its place, and not read back as sent.
  */
 export function messageError(text: string, channel: MessageChannel): string | null {
   if (text.trim() === '') return null
+  if (LONE_SURROGATE.test(text)) {
+    return 'The message has a broken character, such as half an emoji: delete it and type it again.'
+  }
   const bytes = messageBytes(text)
   const limit = MESSAGE_LIMITS[channel]
   return bytes > limit ? `The message is ${bytes} bytes; at most ${limit} fit.` : null
@@ -84,4 +92,13 @@ export function displayMessage(text: string): string {
     if (!isRemoved(char.codePointAt(0)!)) shown += char
   }
   return shown
+}
+
+/**
+ * `text` as shown (`displayMessage`), or undefined when nothing visible is left of it: a blank text,
+ * or one of only removed characters, which shows a placeholder instead of an empty block.
+ */
+export function shownMessage(text: string): string | undefined {
+  const shown = displayMessage(text)
+  return shown.trim() === '' ? undefined : shown
 }

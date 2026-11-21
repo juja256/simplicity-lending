@@ -2,7 +2,7 @@ import { Chip } from '@heroui/react'
 
 import KeyFingerprint from '@/components/KeyFingerprint'
 import type { LoanMessage } from '@/privateLending/loanMessages'
-import { displayMessage, MESSAGE_NOTE } from '@/privateLending/messages'
+import { MESSAGE_NOTE, shownMessage } from '@/privateLending/messages'
 
 /** Who sent a message: a party's key fingerprint and its directory name, verified entries only. */
 export interface MessageSender {
@@ -29,10 +29,23 @@ function messagePhaseLabel(message: Pick<LoanMessage, 'phase' | 'installment'>):
   }
 }
 
+/** A message's text as plain text, or what stands in for it when nothing of it can show. */
+function MessageText({ text }: { text: string | undefined }) {
+  if (text === undefined) {
+    return <p className='text-muted text-sm italic'>This message could not be read.</p>
+  }
+  const shown = shownMessage(text)
+  if (shown === undefined) {
+    return <p className='text-muted text-sm italic'>This message has no visible text.</p>
+  }
+  return <p className='text-foreground text-sm whitespace-pre-wrap wrap-anywhere'>{shown}</p>
+}
+
 /**
  * One message: its step, its sender's name and key fingerprint, and its text as plain text
- * (`displayMessage`, `white-space: pre-wrap`, never a link), with an "Unverified" badge when its
- * sender did not sign it for this step. An unreadable one says so and shows nothing of it.
+ * (`shownMessage`, `white-space: pre-wrap`, never a link), with an "Unverified" badge when its
+ * sender did not sign it for this step. An unreadable one says so and shows nothing of it, and one
+ * with nothing visible left says that instead of showing an empty block.
  */
 export function MessageEntry({ message, sender }: { message: LoanMessage; sender: MessageSender }) {
   return (
@@ -47,13 +60,7 @@ export function MessageEntry({ message, sender }: { message: LoanMessage; sender
           </Chip>
         )}
       </header>
-      {message.text === undefined ? (
-        <p className='text-muted text-sm italic'>This message could not be read.</p>
-      ) : (
-        <p className='text-foreground text-sm whitespace-pre-wrap wrap-anywhere'>
-          {displayMessage(message.text)}
-        </p>
-      )}
+      <MessageText text={message.text} />
       {message.state === 'unverified' && (
         <p className='text-muted text-xs'>
           Its sender did not sign it for this step: the other party may have moved it here.

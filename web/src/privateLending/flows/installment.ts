@@ -17,11 +17,11 @@
 // script, and both layout checks require them, and the built transaction is read back with the
 // borrower's lending key before it is signed: it must give the loan the plan expects. That read
 // rebuilds the borrower's key and never reads output 2's nonce, which the lender opens it with, so
-// the built transaction's nonce must be the plan's ephemeral key too (`installmentNonceMatches`).
+// the blinded PSET's nonce must be the plan's ephemeral key too (`installmentNonceMatches`).
 // The borrower NFT is spent as a plain input, as in the full repayment. The builder pays no
 // installment before the principal is claimed (`principalClaimedBefore`), nor from the expiry
 // block on (`installmentTermOpen`).
-import type { Transaction, WalletTxOut } from 'lwk_wasm'
+import type { WalletTxOut } from 'lwk_wasm'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
@@ -31,11 +31,12 @@ import {
   NFT_AMOUNT,
 } from '@/simplicity/private-lending/layout'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
-import { bytesToHex, normalizeHex } from '@/utils/hex'
+import { normalizeHex } from '@/utils/hex'
 import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from '../deps'
 import { finalizePrivateOfferInput, pinnedAuthCovenant } from '../finalize'
+import { inspectPset } from '../inspectPset'
 import { borrowerLoanInputs, type Loan } from '../loan'
 import { checkedMessage } from '../messages'
 import { INSTALLMENT_AFTER_TERM_NOTE, installmentTermOpen } from '../repayPlan'
@@ -412,10 +413,10 @@ export async function buildPrivateInstallment(
     // checks nor the covenant look at output 2's range proof: if it did not open with the plan's
     // key, the installment would confirm and the borrower could no longer rebuild the debt, nor
     // the lender open it from its nonce.
-    if (!installmentNonceMatches(builtTx, ephemeralPublicKey)) {
+    if (!installmentNonceMatches(wasm, blindedBase64, ephemeralPublicKey)) {
       throw new Error(
-        "The installment's nonce is not the planned one: it was not signed. The lender could not " +
-          'open its amount',
+        "The installment's nonce is not the planned one, so the lender could not open its " +
+          'amount: it was not signed.',
       )
     }
     assertInstallmentReadsBack(offer, loan, params.lendingKey, builtTx.toString(), {
@@ -472,76 +473,30 @@ export async function buildPrivateInstallment(
 }
 
 /**
- * Whether output 2 of `tx`, the installment, carries the nonce `ephemeralPublicKey` (a 33-byte
- * compressed public key, hex): the plan's, with which the lender opens the installment. LWK's
- * `TxOut` does not expose the nonce, so this reads the transaction's consensus encoding.
+ * Whether output 2 of the blinded PSET `psetBase64`, the installment, carries the nonce
+ * `ephemeralPublicKey` (a 33-byte compressed public key, hex): the plan's, with which the lender
+ * opens the installment. It reads the output's ECDH key through the wasm's `inspectPset`: for an
+ * output with a blinding key and blinded fields, which the blinded layout check requires of output
+ * 2, rust-elements' `extract_tx` takes the transaction's nonce from that key. False, never a
+ * throw, for a PSET that does not parse, has no output 2, or whose output 2 is not blinded.
  */
-export function installmentNonceMatches(tx: Transaction, ephemeralPublicKey: string): boolean {
-  const nonce = outputNonce(tx.toBytes(), INSTALLMENT_OUTPUT.installment)
-  return nonce !== undefined && nonce === normalizeHex(ephemeralPublicKey)
-}
-
-/**
- * The nonce of output `vout` of the transaction `bytes`, in Elements' consensus encoding, as a
- * 33-byte compressed public key, hex. Undefined when the output has no such nonce, when the
- * transaction has fewer outputs, and for any encoding this does not read, an input with an
- * issuance or a peg-in among them: an installment has neither.
- */
-function outputNonce(bytes: Uint8Array, vout: number): string | undefined {
-  let at = 0
-  const take = (length: number): Uint8Array => {
-    if (at + length > bytes.length) throw new RangeError('The transaction ends early')
-    at += length
-    return bytes.subarray(at - length, at)
-  }
-  const u8 = () => take(1)[0]
-  const u32 = () => new DataView(take(4).slice().buffer).getUint32(0, true)
-  const varint = () => {
-    const first = u8()
-    if (first < 0xfd) return first
-    if (first === 0xfd) return new DataView(take(2).slice().buffer).getUint16(0, true)
-    if (first === 0xfe) return u32()
-    throw new RangeError('A length beyond 32 bits')
-  }
-  // A confidential asset, value or nonce: null (0), explicit (1, then `explicit` bytes) or a
-  // commitment (one of `commitments`, then x). Returns the prefix.
-  const confidential = (explicit: number, commitments: number[]): number => {
-    const prefix = u8()
-    if (prefix === 1) take(explicit)
-    else if (commitments.includes(prefix)) take(32)
-    else if (prefix !== 0) throw new RangeError(`An unknown prefix ${prefix}`)
-    return prefix
-  }
-
+export function installmentNonceMatches(
+  wasm: PrivateFlowDeps['wasm'],
+  psetBase64: string,
+  ephemeralPublicKey: string,
+): boolean {
+  let output
   try {
-    take(4) // the version
-    if (u8() > 1) return undefined // the witness flag
-    const inputs = varint()
-    for (let input = 0; input < inputs; input++) {
-      take(32) // the prevout's txid
-      const prevoutVout = u32()
-      take(varint()) // the script sig
-      take(4) // the sequence
-      // bit 31 marks an issuance, bit 30 a peg-in, except in the null prevout's 0xffffffff
-      if (prevoutVout !== 0xffffffff && prevoutVout >= 0x40000000) return undefined
-    }
-    const outputs = varint()
-    if (vout >= outputs) return undefined
-    for (let output = 0; output < vout; output++) {
-      confidential(32, [0x0a, 0x0b]) // the asset
-      confidential(8, [0x08, 0x09]) // the value
-      confidential(32, [0x02, 0x03]) // the nonce
-      take(varint()) // the script pubkey
-    }
-    confidential(32, [0x0a, 0x0b])
-    confidential(8, [0x08, 0x09])
-    const start = at
-    const prefix = confidential(32, [0x02, 0x03])
-    return prefix === 0x02 || prefix === 0x03 ? bytesToHex(bytes.subarray(start, at)) : undefined
-  } catch (error) {
-    if (error instanceof RangeError) return undefined
-    throw error
+    output = inspectPset(wasm, psetBase64).outputs[INSTALLMENT_OUTPUT.installment]
+  } catch {
+    return false
   }
+  return (
+    output !== undefined &&
+    output.blindingKey !== null &&
+    output.ecdhPubkey !== null &&
+    output.ecdhPubkey === normalizeHex(ephemeralPublicKey)
+  )
 }
 
 /**
@@ -585,12 +540,8 @@ export function assertInstallmentReadsBack(
     } finally {
       paid?.free()
     }
-    if (!messageReadsBack) {
-      throw new Error(
-        'The installment does not read back as built: it was not signed. Its message does not ' +
-          'read back as yours',
-      )
-    }
+    // The count and the amount first: when they fail, the message cannot read back either, and
+    // the amount is what matters.
     if (
       paidAmount !== expected.amount ||
       after.loanOutpoint !== expected.loanOutpoint ||
@@ -600,6 +551,12 @@ export function assertInstallmentReadsBack(
       throw new Error(
         'The installment does not read back as built: it was not signed. Its amount would not ' +
           'open with your key, and the loan could not be closed after it',
+      )
+    }
+    if (!messageReadsBack) {
+      throw new Error(
+        'The installment does not read back as built: it was not signed. Its message does not ' +
+          'read back as yours',
       )
     }
   } finally {

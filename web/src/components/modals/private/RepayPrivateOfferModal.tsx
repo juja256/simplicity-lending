@@ -10,6 +10,7 @@ import Notice from '@/components/Notice'
 import { UiTextField } from '@/components/ui/UiTextField'
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
+import { useReadError } from '@/hooks/useReadError'
 import type { AsyncUpdatedPset } from '@/lwk/updatedPset'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { asBorrowerError } from '@/privateLending/borrowerErrors'
@@ -75,13 +76,15 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
   const { formatCollateralDisplay, formatPrincipalAmount } = useFormatAmount()
   const loanQuery = useLoan(item)
   const loan = loanQuery.data
+  // kept through the retries every 30 seconds, which would otherwise show "Reading the loan…"
+  const loanError = useReadError(loanQuery)
   const owed = loan?.remaining
   const expiry = terms.loanExpirationTime
 
   // The amount typed, or null for the default: what the loan still owes.
   const [typed, setTyped] = useState<string | null>(null)
   const [messageText, setMessageText] = useState('')
-  const messageTooLong = messageError(messageText, 'signed') !== null
+  const messageRefused = messageError(messageText, 'signed') !== null
   const amountText =
     typed ?? (owed === undefined ? '' : unitsToDecimal(owed, principalAsset.decimals))
   const plan: RepayPlan | undefined =
@@ -303,9 +306,9 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
   const form = (
     <div className='flex flex-col gap-4'>
       {loan === undefined ? (
-        loanQuery.isError ? (
+        loanError !== undefined ? (
           <Notice role='alert'>
-            The loan could not be read: {ErrorHandler.describe(asBorrowerError(loanQuery.error))}
+            The loan could not be read: {ErrorHandler.describe(asBorrowerError(loanError))}
           </Notice>
         ) : (
           <p role='status' className='text-muted text-sm'>
@@ -346,8 +349,12 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
           <div className='flex flex-col gap-2'>
             <MessageField channel='signed' value={messageText} onChange={setMessageText} />
             <p className='text-muted text-xs'>
-              Only the lender can read it. It is not part of the loan&apos;s terms, and nothing
-              enforces it.
+              {plan?.kind === 'installment'
+                ? 'The lender reads it, and you can read it again from your wallet on any device.'
+                : plan?.kind === 'full'
+                  ? 'The lender reads it; you can read it again only in this browser.'
+                  : 'The lender reads it.'}{' '}
+              It is not part of the loan&apos;s terms, and nothing enforces it.
             </p>
           </div>
         </>
@@ -382,7 +389,7 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
       label={shownLabel}
       eyebrow={shownLabel}
       summary={summary}
-      disabled={pays === undefined || insufficientBalance || messageTooLong}
+      disabled={pays === undefined || insufficientBalance || messageRefused}
       notice={form}
       build={build}
       beforeBroadcast={beforeBroadcast}

@@ -7,6 +7,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useMemo } from 'react'
 
+import { useReadError } from '@/hooks/useReadError'
 import type { PrivateFlowDeps } from '@/privateLending/deps'
 import {
   type ChainMessage,
@@ -93,12 +94,15 @@ async function readSent(network: string, key: LendingKey, offerTxid: string) {
 }
 
 /**
- * The messages of `item`'s loan in chain order, for either party, and whether they are still being
- * read. An offer never accepted has at most the creation's.
+ * The messages of `item`'s loan in chain order, for either party, whether they are still being
+ * read, and why the loan could not be read, kept while it is read again (`useReadError`), when it
+ * could not: then only the creation's message shows. An offer never accepted has at most the
+ * creation's.
  */
 export function useLoanMessages(item: OpenedOfferItem): {
   messages: LoanMessage[]
   isLoading: boolean
+  error?: Error
 } {
   const { network } = useLwk()
   const { isReady, privateCapable, scriptPubkey, getLendingKey } = useWallet()
@@ -156,5 +160,10 @@ export function useLoanMessages(item: OpenedOfferItem): {
       }),
     [item, figures, beside.data],
   )
-  return { messages, isLoading: loan.isLoading || beside.isLoading }
+  const loanError = useReadError(loan)
+  const besideError = useReadError(beside)
+  // A read that failed is retried meanwhile: it is not "Reading…" again.
+  const isLoading =
+    (loan.isLoading && loanError === undefined) || (beside.isLoading && besideError === undefined)
+  return { messages, isLoading, error: loanError ?? besideError }
 }

@@ -3,6 +3,8 @@ import fs from 'node:fs'
 import type { Address, WalletTxOut } from 'lwk_wasm'
 import { describe, expect, it } from 'vitest'
 
+import { buildPset } from '@/lwk/psetBuilder'
+import { INSTALLMENT_OUTPUT } from '@/simplicity/private-lending/layout'
 import { lwk, sources } from '@/test/lwk'
 import { wasm } from '@/test/wasm'
 import type { LoanState } from '@/wasm/private-lending/private_lending_wasm'
@@ -20,6 +22,7 @@ import {
 import { buildPrivateLiquidation, ExpiryNotReachedError } from './flows/liquidation'
 import { buildPrivateRepayment } from './flows/repayment'
 import { buildZeroDebtClose } from './flows/zeroDebtClose'
+import { inspectPset } from './inspectPset'
 import { loadLoan, type Loan, principalClaimedBefore, PrincipalNotClaimedError } from './loan'
 import { openAndVerifyOffer, type VerifiedOffer } from './verify'
 
@@ -164,6 +167,54 @@ function replaceOnce(hex: string, from: string, to: string): string {
   return hex.slice(0, at) + to + hex.slice(at + from.length)
 }
 
+/**
+ * A PSET of three outputs and the change, all blinded to the lender's key by the private wasm's
+ * `blindPset` (base64), the same PSET unblinded, and the nonce drawn for its output 2.
+ */
+function blindedPset(): { unblinded: string; blinded: string; drawn: string } {
+  const network = lwk.Network.testnet()
+  const policyAsset = network.policyAsset()
+  const address = lwk.Address.parse(
+    wasm.confidentialAddress(
+      installmentLock,
+      wasm.liftLendingKey(keys.lender.xOnlyPublicKey()),
+      'liquidtestnet',
+    ),
+    network,
+  )
+  const { pset } = buildPset({
+    network,
+    inputs: [
+      {
+        outpoint: new lwk.OutPoint(`${'11'.repeat(32)}:0`),
+        prevout: lwk.TxOut.fromExplicit(address.scriptPubkey(), policyAsset, 100_000n),
+        asset: policyAsset,
+        amount: 100_000n,
+        maxWeightToSatisfy: 300,
+        walletCoin: true,
+      },
+    ],
+    outputs: [1_000n, 2_000n, 3_000n].map(amount => ({
+      script: address.scriptPubkey(),
+      amount,
+      asset: policyAsset,
+      blindingPubkey: address.blindingPubkey(),
+    })),
+    changeAddress: address,
+    feeRateSatPerKvb: 100,
+    blinding: 'none',
+  })
+  const unblinded = pset.toString()
+  const blinded = wasm.blindPset(
+    unblinded,
+    [wasm.InputSecret.explicit(0, policyAsset.toString(), 100_000n)],
+    [],
+  )
+  const drawn = inspectPset(wasm, blinded).outputs[INSTALLMENT_OUTPUT.installment].ecdhPubkey
+  if (drawn === null) throw new Error('blindPset left output 2 without a nonce')
+  return { unblinded, blinded, drawn }
+}
+
 describe('principalClaimedBefore', () => {
   /** The borrower NFT, explicit, at output 0 of the stand-ins that hold it. */
   async function nftOutput(): Promise<StandInOutput> {
@@ -302,17 +353,22 @@ describe('loadLoan', () => {
     // message sent must read back verified, as sent
     const message = fixture.messages.installment
     expect(readBack({ ...expected, message })).not.toThrow()
-    expect(readBack({ ...expected, message: `${message}.` })).toThrow(refused)
+    expect(readBack({ ...expected, message: `${message}.` })).toThrow(/its message does not/i)
+    // the amount is checked before the message: a wrong amount is never reported as the message
+    expect(readBack({ ...expected, amount: expected.amount + 1n, message: `${message}.` })).toThrow(
+      /Its amount would not open/,
+    )
     // the lender's key, not the one the loan was read with, is refused (`bad-input`)
     expect(() =>
       assertInstallmentReadsBack(offer, before, keys.lender, installmentHex, expected),
     ).toThrow()
   })
 
-  // The builder requires the blinded transaction's output 2 to carry the plan's nonce before the
+  // The builder requires the blinded PSET's output 2 to carry the plan's nonce before the
   // read-back, which rebuilds the borrower's key and never reads the nonce: without it the lender
-  // could not open the installment. The fixture's installment stands in for a built one, and the
-  // plan of the same installment on the loan before it gives the key, as the builder's plan does.
+  // could not open the installment. The plan of the fixture's installment on the loan before it
+  // gives the key, as the builder's plan does; a PSET blinded by the private wasm, as the builder's
+  // is, stands in for the built one, its output 2's drawn nonce replaced by the key under test.
   it("requires the installment's nonce to be the plan's ephemeral key", async () => {
     const offer = await openOffer('borrower')
     const before = await loadLoan(fakeChain().deps, offer, keys.borrower, `${acceptanceTxid}:0`)
@@ -326,15 +382,26 @@ describe('loadLoan', () => {
     const ephemeralPublicKey = plan.ephemeralPublicKey
     plan.free()
     expect(ephemeralPublicKey).toMatch(/^0[23][0-9a-f]{64}$/)
-    expect(installmentNonceMatches(built, ephemeralPublicKey)).toBe(true)
 
-    // the same installment with output 2's nonce replaced by another valid key: G
+    const { unblinded, blinded, drawn } = blindedPset()
+    const withNonce = (nonce: string) =>
+      Buffer.from(
+        replaceOnce(Buffer.from(blinded, 'base64').toString('hex'), drawn, nonce),
+        'hex',
+      ).toString('base64')
+    const nonceMatches = (pset: string, key: string) => installmentNonceMatches(wasm, pset, key)
+    expect(nonceMatches(withNonce(ephemeralPublicKey), ephemeralPublicKey)).toBe(true)
+    // uppercase hex is the same key
+    expect(nonceMatches(withNonce(ephemeralPublicKey), ephemeralPublicKey.toUpperCase())).toBe(true)
+
+    // the same PSET with output 2's nonce replaced by another valid key: G
     const generator = '0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'
-    const renonced = lwk.Transaction.fromString(
-      replaceOnce(installmentHex, ephemeralPublicKey, generator),
-    )
-    expect(installmentNonceMatches(renonced, ephemeralPublicKey)).toBe(false)
-    expect(installmentNonceMatches(renonced, generator)).toBe(true)
+    expect(nonceMatches(withNonce(generator), ephemeralPublicKey)).toBe(false)
+    expect(nonceMatches(withNonce(generator), generator)).toBe(true)
+    // not blinded yet: no nonce at all
+    expect(nonceMatches(unblinded, ephemeralPublicKey)).toBe(false)
+    // fail-closed on a PSET that does not parse
+    expect(nonceMatches('not a pset', ephemeralPublicKey)).toBe(false)
   })
 
   // The flows sign right before the call that takes the message, with the creation txid and the
