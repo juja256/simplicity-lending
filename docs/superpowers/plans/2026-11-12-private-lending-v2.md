@@ -1912,25 +1912,380 @@ The phase review follows (whole branch, Opus).
 
 ## Phase 6: Private messages (spec item 6)
 
-Branch `v2/phase-6-messages`.
+Branch `v2/phase-6-messages`, from `v2/main` after phase 5 was merged into it (`0f8dd34`).
 
-- Known fact: LWK's software signer at `7f8c8213` signs only the default sighash unless its
-  policy allows another, and nothing in `lwk_signer` handles `SIGHASH_RANGEPROOF`; so item 6's
-  message signatures are needed. Check the Jade's behaviour at phase start.
-- *(Proposed, confirm at phase start:)* senders do not reread their acceptance or repayment
-  messages on another device in v2; the browser caches them per lending key, and the creation
-  message stays rereadable through the deterministic ephemeral key.
-- Core: the message field (length-prefixed, versioned, a type byte, UTF-8 text first) in the
-  terms encoding at creation, under a new terms version, and in the range proofs of the
-  acceptance and repayment outputs (`blind.rs`'s `extra_data`); signatures over
-  `tagged_hash("simplicity-lending/private/v2/message", phase ‖ offer id ‖ message)`.
-- Web: the fields in phase 4's forms with a byte counter; the received messages as a timeline in
-  the console's loan view and the borrower's My loans, shown as plain text with control and
-  bidirectional characters removed and the note that a message is not part of the terms.
-- **Done when:** core tests cover the encoding round trip, the longest message that fits, a bad
-  or missing signature (shown as unverified) and outputs of equal size with and without a
-  message; `pnpm parity` and the e2e stages pass with messages at creation, acceptance and
-  repayment.
+Decided at phase start (2026-11-21):
+- **The Jade is not involved.** Messages are signed by the sender's lending key, which the browser
+  derives from the wallet descriptor's master blinding key for seed and Jade wallets alike. LWK's
+  software signer at `7f8c8213` cannot sign with `SIGHASH_RANGEPROOF`, so the signatures are
+  needed; a Jade that could would not remove them.
+- **Sender recovery** (the user, 2026-11-21: keep as proposed). The creation's and each
+  installment's range proofs open from the sender's seed (their nonces derive), so those messages
+  reread on any device. The acceptance's and the full repayment's nonces stay random: their
+  senders reread them only from this browser, where the app keeps every message it sends,
+  per lending key, in IndexedDB. A message sent from another browser shows as "Sent from another
+  browser".
+- **Channels** *(my call where the spec leaves a choice)*: creation, inside the terms (pending
+  collateral, output 3, borrower → lender); acceptance, the principal output only (output 1,
+  lender → borrower); installment, the installment output (output 2, borrower → lender); full
+  repayment, the repayment output (output 1, borrower → lender). The zero-debt close, claims,
+  cancellation and liquidation have none.
+- **Encoding.** The message field: version `1` (1) ‖ kind (1; `1` = UTF-8 text, the only kind) ‖
+  length (2, big-endian) ‖ the text's bytes. A missing message is the single byte `0` in the
+  terms, and no extra data at all (zeros) in the other range proofs. The text is non-empty valid
+  UTF-8; the reader refuses anything else as unreadable.
+- **Terms version 2.** `version 2 ‖ length ‖ the v1 fields ‖ borrower key ‖ message field ‖
+  signature`, the message field inside the signed prefix, so the terms' signature covers it. The
+  tag stays `simplicity-lending/private/v1/offer`. Only version 2 decodes (no migration).
+- **Signed messages** (acceptance, installment, full repayment): the range proof's extra data is
+  `message field ‖ BIP340 signature (64)` by the sender's lending key over
+  `tagged_hash("simplicity-lending/private/v2/message", phase ‖ offer id ‖ message field)`, the
+  offer id the creation txid in internal byte order. *(My call:)* the phase is `0x01`
+  (acceptance), `0x02 ‖ j_be32` (the `j`-th installment, from 1) or `0x03` (full repayment), so
+  the other party, who knows the blinders and can remake a proof, cannot move a signed message to
+  another installment unnoticed. A bad or missing signature shows the message as unverified.
+- **Limits**, from the 3136 bytes of extra data: 3068 text bytes for a signed message (3136 − 4 −
+  64), 2915 at creation (3136 − 221: the terms' 153 signed bytes, the field's 4 and the 64 of the
+  signature).
+- **Display.** Plain text, `white-space: pre-wrap`; C0 and C1 controls except the newline, and
+  the bidirectional controls U+061C, U+200E, U+200F, U+202A–U+202E and U+2066–U+2069, are removed;
+  no link is made clickable. Every message shows "A message is not part of the terms, and the
+  contract does not enforce it." with the sender's directory name (verified entries only) and key
+  fingerprint.
+- **Carried from phase 5's review:** tasks 1 and 2.
+
+### Phase 6 review focus
+
+1. A message crafted outside the app: over-long length field, invalid UTF-8, an unknown version
+   or kind, bidirectional overrides. Expected: it reads as unreadable or is shown cleaned, never
+   breaks the row or the timeline. Tasks 3 and 5 test it.
+2. A signed message moved by the counterparty to another installment, another phase or another
+   offer. Expected: shown as unverified. Task 3 tests it.
+3. Outputs with and without a message, and with the longest one: the same range-proof size, so
+   the chain does not tell them apart. Task 3 tests it.
+4. A text at the limit and one byte over, counted in UTF-8 bytes (an emoji is 4): the form refuses
+   the over-long one before building, with the byte counter; the limit one builds and reads back.
+   Tasks 5 and 6 test it.
+5. A sender on another browser: the acceptance or full repayment they sent shows as "Sent from
+   another browser", not as missing or as an error. Task 7 tests it.
+
+### Task 1: Carried from phase 5's review, in the web app
+
+**Files:** Modify `web/src/privateLending/hooks/useLoan.ts`, `web/src/privateLending/offerView.ts`,
+`web/src/areas/borrow/MyLoansPage.tsx`, `web/src/components/modals/private/{LiquidatePrivateOfferModal,RepayPrivateOfferModal,CloseZeroDebtModal}.tsx`,
+`web/src/privateLending/flows/installment.ts`, `web/src/privateLending/loan.ts`,
+`web/src/providers/pendingTransactions/PendingTransactionsProvider.tsx`,
+`web/src/privateLending/repayPlan.ts`; tests in `offerView.test.ts`, `repayPlan.test.ts`,
+`loan.test.ts`. Create `web/src/privateLending/borrowerErrors.ts` and its test.
+
+**Interfaces (produces):**
+- `borrowerErrorText(error: unknown): string` maps `PrincipalNotClaimedError` and wasm
+  `loan-mismatch:` messages to plain sentences without "NFT", "offer" or codes; other errors pass
+  through as their message.
+- `isPastExpiry` keeps its name; the borrower's term-ended note and the form share
+  `!installmentTermOpen(tip, expiry)` (`tip ≥ expiry`).
+- `buildPrivateInstallment` throws `InstallmentAfterTermError` when `params.tipHeight ≥ expiry`;
+  `InstallmentParams` gains `tipHeight: number`.
+- `staleInstallmentRecords(records, loanOutpointSpent: (outpoint: string) => boolean):
+  PrivateTxRecord[]` in `repayPlan.ts`: the discarded or failed installments whose loan output
+  is spent on chain, which the provider then removes.
+
+- [ ] **Step 1: Write the failing tests**:
+  - `borrowerErrors.test.ts`: a `PrincipalNotClaimedError` reads "Receive the loan first: …";
+    `loan-mismatch: …` reads "This payment does not belong to your loan. Refresh the page and try
+    again."; neither contains `NFT`, `offer` or a `code:` prefix.
+  - `offerView.test.ts`: at `tip = expiry` the borrower's note says the term has ended
+    (it said nothing before).
+  - `loan.test.ts`: `buildPrivateInstallment` at `tipHeight = expiry` throws
+    `InstallmentAfterTermError` before any fetch (the fake chain records no `fetchTx`).
+  - `repayPlan.test.ts`: `staleInstallmentRecords` keeps a failed record whose loan output is
+    unspent and returns one whose loan output is spent.
+- [ ] **Step 2: Run them to see them fail.** `cd web && pnpm test`. Expected: FAIL.
+- [ ] **Step 3: Implement**, and also:
+  - `useLoan`: while the query is in error, retry every 30 s (`refetchInterval` only in error;
+    `staleTime: Infinity` otherwise), so a transient esplora error does not hide Claim for good.
+  - `LiquidatePrivateOfferModal`: check `tip < expiry` and show the "not yet" message before
+    `loadLoan`.
+  - The repay and close modals show `borrowerErrorText(error)`.
+  - `RepayPrivateOfferModal` reads the saved records again from IndexedDB at build time for the
+    trace (`loadPrivateTxsForWallet`), and refuses an installment ("Saved payments could
+    not be read; reload the page") if that read fails, instead of trusting the tab's list.
+  - The provider drops `staleInstallmentRecords` once a day on the existing sweep, asking esplora
+    for the loan outpoint's spend.
+- [ ] **Step 4: Check.** `pnpm test && pnpm lint && VITE_DEBUG_MNEMONIC= pnpm build`. Expected:
+  pass.
+- [ ] **Step 5: Commit** `web: phase 5's review minors`
+
+### Task 2: Carried from phase 5's review: witness vectors, the wasm's own anchoring, the read-back's nonce
+
+**Files:** Modify `crates/contracts/tests/private_lending/parity_fixture.rs`,
+`web/scripts/fixtures/private-lending-parity.json` (regenerated),
+`web/scripts/check-private-lending-parity.ts`, `web/src/simplicity/private-lending/witness.test.ts`,
+`crates/private-lending-wasm/src/{loan,open}.rs`, `web/src/privateLending/flows/installment.ts`,
+`web/src/privateLending/loan.test.ts`.
+
+**Interfaces (produces):**
+- The fixture's `witness_vectors` gains `installment` (with `debt` as `(bool, u256)` hex) and
+  `zero_debt_close` (`debt`, `k`), built as `full_repayment` is.
+- `OpenedOffer` (wasm) keeps the creation txid; `loanState` refuses with `loan-mismatch` an
+  acceptance whose input 0 is not `<creation txid>:3`.
+- `InstallmentPlan.ephemeralPublicKey: string` (33-byte hex); the builder requires output 2's
+  `ecdhPubkey` in the blinded PSET to equal it, before the read-back.
+
+- [ ] **Step 1: Write the failing tests:** `checkWitnessVectors` checks `installment` and
+  `zero_debt_close` byte for byte against `buildPrivateLendingWitness`; in `loan.rs`,
+  `loan_state_refuses_an_acceptance_of_another_creation`; in `loan.test.ts`, a blinded PSET whose
+  output 2 nonce is replaced is refused with "does not read back as built".
+- [ ] **Step 2: Run them to see them fail.** `cargo test -p private-lending-wasm`; `cd web &&
+  pnpm parity && pnpm test`. Expected: FAIL.
+- [ ] **Step 3: Implement.** Regenerate the fixture: rename
+  `crates/contracts/tests/lending_security_audit.rs` aside, `cd crates/contracts && simplex build
+  && WRITE_PARITY_FIXTURE=1 simplex test write_private_lending_parity_fixture`, rename it back;
+  then `cd web && pnpm build:wasm`.
+- [ ] **Step 4: Check.** `simplex test parity_fixture_verifies_against_the_contract`;
+  `cargo test -p private-lending-wasm -p private-lending-core`; `cd web && pnpm parity && pnpm
+  test`. Expected: pass.
+- [ ] **Step 5: Commit** `contracts, wasm, web: the installment and zero-debt close vectors, and two
+  read-back checks`
+
+### Task 3: Messages in the core (**Review now**: a signature that does not bind the phase lets the counterparty move a message; a size that differs shows on chain who wrote one)
+
+**Files:** Create `crates/private-lending-core/src/message.rs`; modify
+`crates/private-lending-core/src/{terms,offer,creation,blind,lib}.rs`, and every
+`NewOffer::build` caller: `crates/contracts/tests/private_lending/{setup,offer_creation_flows}.rs`,
+`crates/indexer/tests/common/mod.rs`, `crates/private-lending-wasm/src/build.rs`.
+
+**Interfaces (produces):**
+- `pub const MESSAGE_ROOM: usize = 3136; pub const MAX_SIGNED_MESSAGE_BYTES: usize = 3068; pub
+  const MAX_CREATION_MESSAGE_BYTES: usize = 2915;`
+- `pub struct Message` (kind and text); `Message::text(text: &str) -> Result<Message,
+  MessageError>` (refuses empty); `Message::as_text(&self) -> &str`.
+- `pub enum MessagePhase { Acceptance, Installment(u32), FullRepayment }`.
+- `pub struct SignedMessage { pub message: Message, pub signature: schnorr::Signature }`;
+  `SignedMessage::sign(message: Message, sender: &LendingKey, phase: MessagePhase, offer_id:
+  &Txid) -> Result<SignedMessage, MessageError>` (`TooLong` past 3068 bytes); `verify(&self,
+  sender: &XOnlyPublicKey, phase: MessagePhase, offer_id: &Txid) -> Result<(), MessageError>`;
+  `encode(&self) -> Vec<u8>`; `SignedMessage::decode(extra_data: &[u8]) ->
+  Result<Option<SignedMessage>, MessageError>` (`None` when the first byte is 0).
+- `pub enum MessageError { Empty, TooLong { length: usize, max: usize }, UnknownVersion(u8),
+  UnknownKind(u8), BadLength, NotUtf8, BadSignature, Malformed }`, with `Display`.
+- `SignedTerms { terms, borrower, message: Option<Message>, signature }`; `TERMS_VERSION = 2`;
+  `SignedTerms::sign(terms, message: Option<Message>, borrower, lender, first_input)`.
+- `NewOffer::build(…, terms: OfferTerms, message: Option<Message>) -> Result<NewOffer,
+  OfferError>`; `OfferError::MessageTooLong`. Callers that have no message pass `None`.
+
+- [ ] **Step 1: Write the failing tests** in `message.rs` and `terms.rs`:
+  - `message_field_round_trip_with_zero_padding` (text with a newline, an emoji and Cyrillic).
+  - `signed_message_known_answer`: a frozen digest for a fixed key, offer id (bytes 0x00..=0x1f),
+    `Installment(2)` and text `"hello"`, so a change of tag, phase bytes or order fails.
+  - `signature_binds_phase_offer_and_installment`: the same signed message fails `verify` under
+    `Acceptance` vs `FullRepayment`, `Installment(1)` vs `Installment(2)`, and another offer id.
+  - `decode_refuses_crafted_fields`: an unknown version, an unknown kind, a length past the
+    buffer, invalid UTF-8 and an empty text each give their `MessageError`.
+  - `longest_messages_fit`: 3068 text bytes signed and 2915 at creation encode within 3136
+    bytes; one byte more is `TooLong`.
+  - `terms_v2_round_trip_with_and_without_a_message` and `terms_signature_covers_the_message`
+    (changing one text byte gives `BadSignature`); `version_1_terms_are_refused`. Update
+    `encoding_follows_the_v1_layout` into `encoding_follows_the_v2_layout` and the frozen
+    `signing_digest_known_answer`.
+  - In `blind.rs`: `range_proof_size_does_not_show_a_message`: the range proofs of the same
+    pinned output with no extra data, a short signed message and the longest one serialize to the
+    same length, and each rewinds to its message.
+- [ ] **Step 2: Run them to see them fail.** `cargo test -p private-lending-core`. Expected: FAIL.
+- [ ] **Step 3: Implement** in `message.rs`, the terms and `NewOffer::build`; pass `None` at every
+  other caller.
+- [ ] **Step 4: Check.** `cargo test -p private-lending-core -p private-lending-wasm -p
+  lending-indexer` (the indexer's sqlx tests on a scratch database); `cd crates/contracts &&
+  simplex build && simplex test` (audit file aside); `cargo clippy --workspace --all-targets
+  --all-features -- -D warnings`. Expected: pass.
+- [ ] **Step 5: Commit** `core: private messages, and the terms carry the creation's (version 2)`
+
+### Task 4: Messages in the wasm, the fixture and the parity check
+
+**Files:** Modify `crates/private-lending-wasm/src/{build,blind,open,loan,lib}.rs`, its README;
+`crates/contracts/tests/private_lending/{setup,parity_fixture}.rs` (the fixture's offer carries a
+creation message, its acceptance and installment carry signed ones);
+`web/scripts/fixtures/private-lending-parity.json` (regenerated);
+`web/scripts/check-private-lending-parity.ts`.
+
+**Interfaces (produces):**
+- `enum MessagePhase { Acceptance, Installment, FullRepayment }` (wasm enum).
+- `signMessage(sender: LendingKey, creationTxid: string, phase: MessagePhase, installment:
+  number, text: string): SignedMessage` (`installment` is ignored but for `Installment`, and must
+  be at least 1 there); `bad-input` for an empty or over-long text, with the byte count and the
+  limit in the message.
+- `NewOffer.build(…, terms, message?: string)`.
+- `OpenedOffer.message(): string | undefined`: the creation's text, covered by the terms'
+  signature already checked when opening.
+- `OpenedOffer.pinnedBlinding(role, outputIndex, message?: SignedMessage)`: a message only with
+  `Principal`, and it must be signed for `Acceptance` of this offer, else `bad-input`.
+- `LoanState.planInstallment(amount, firstWalletInput, receiverScript, message?: SignedMessage)`:
+  the message must be signed for `Installment(installmentCount + 1)` of this offer.
+  `LoanState.repaymentBlinding(outputIndex, message?: SignedMessage)`: signed for
+  `FullRepayment`.
+- `class ReadMessage { text: string; verified: boolean }`.
+- `InstallmentInfo.message: ReadMessage | undefined`, read in the same rewind that opens the
+  amount, for both parties, verified against the borrower's key.
+- `OpenedOffer.readMessage(key: LendingKey, creationTxid: string, txHex: string, outputIndex:
+  number, phase: MessagePhase): ReadMessage | undefined`: rewinds the output with `key` and its
+  nonce, and verifies against the counterparty's key (the lender's for `Acceptance`, the
+  borrower's otherwise). `undefined` when it does not rewind or carries no message; an unreadable
+  field throws `bad-input`.
+
+- [ ] **Step 1: Write the failing tests** in `loan.rs` and `open.rs`:
+  `acceptance_message_reads_for_the_borrower_only`, `installment_message_reads_for_both_parties`,
+  `repayment_message_reads_for_the_lender`, `a_message_for_another_installment_is_refused_at_plan`,
+  `a_moved_message_reads_as_unverified` (an installment whose extra data carries the signed message
+  of installment 1, built by hand with the core). In the parity script: the borrower and the
+  lender read the fixture's creation, acceptance and installment messages as the Rust test wrote
+  them, verified.
+- [ ] **Step 2: Run them to see them fail.** `cargo test -p private-lending-wasm`; `cd web &&
+  pnpm parity`. Expected: FAIL.
+- [ ] **Step 3: Implement.** Regenerate the fixture as in task 2, then `pnpm build:wasm`.
+- [ ] **Step 4: Check.** `cargo test -p private-lending-wasm`; `simplex test` (audit file aside);
+  `cd web && pnpm parity && pnpm test`. Expected: pass.
+- [ ] **Step 5: Commit** `wasm: sign, carry and read private messages`
+
+### Task 5: The web's message rules and the sent-message store
+
+**Files:** Create `web/src/privateLending/messages.ts`, `messages.test.ts`,
+`web/src/privateLending/sentMessages.ts`, `sentMessages.test.ts`.
+
+**Interfaces (produces):**
+- `MESSAGE_LIMITS = { creation: 2915, signed: 3068 } as const`; `type MessageChannel = keyof
+  typeof MESSAGE_LIMITS`.
+- `messageBytes(text: string): number` (UTF-8 length); `messageError(text: string, channel:
+  MessageChannel): string | null` ("The message is N bytes; at most M fit." or null; an empty or
+  blank text is no message, not an error).
+- `displayMessage(text: string): string` removes the characters listed under "Display" and keeps
+  newlines.
+- `MESSAGE_NOTE = 'A message is not part of the terms, and the contract does not enforce it.'`
+- `interface SentMessage { offerTxid: string; txid: string; phase: 'acceptance' | 'installment' |
+  'repayment'; installment?: number; text: string; savedAt: number }`;
+  `kvSentMessages(kv: ScanKv, scope: ScanScope, fingerprint: string): { save(message:
+  SentMessage): void; forOffer(offerTxid: string): SentMessage[] }`, stored under the key
+  `JSON.stringify(['sent', network, fingerprint])` in the scan database, zod-checked; a value
+  that does not decode reads as none.
+
+- [ ] **Step 1: Write the failing tests:** `messageBytes('€')` is 3 and an emoji is 4; at the
+  limits, 2915 bytes pass for `creation` and 2916 fail, 3068 and 3069 for `signed`;
+  `displayMessage` removes U+202E, U+2066, U+200F, NUL, ESC and U+0085 but keeps `\n` and
+  Cyrillic; `kvSentMessages` round-trips two messages of one offer and none of another, keeps
+  fingerprints apart, and reads a corrupt value as none (the `scanStore.test.ts` pattern).
+- [ ] **Step 2: Run them to see them fail.** `cd web && pnpm test`. Expected: FAIL.
+- [ ] **Step 3: Implement.** In a test, check `MESSAGE_LIMITS` against `wasm.signMessage`'s
+  refusal at limit + 1.
+- [ ] **Step 4: Check.** `pnpm test && pnpm lint`. Expected: pass.
+- [ ] **Step 5: Commit** `web: the message rules and the store of sent messages`
+
+### Task 6: Sending messages: the proposal, the acceptance, the installment and the full repayment
+
+**Files:** Modify `web/src/privateLending/flows/{creation,acceptance,installment,repayment}.ts`,
+`web/src/areas/borrow/ProposalPage.tsx`, `web/src/areas/borrow/proposalForm.ts`,
+`web/src/components/modals/private/{CreatePrivateOfferModal,AcceptPrivateOfferModal,RepayPrivateOfferModal}.tsx`;
+create `web/src/components/MessageField.tsx`. Tests in `proposalForm.test.ts`, `loan.test.ts`.
+
+**Interfaces:**
+- Consumes: tasks 4 and 5.
+- Produces: the four flows' params gain `message?: string`. The creation passes it to
+  `NewOffer.build`; the acceptance, the installment and the full repayment sign it with
+  `signMessage` and the sender's key, so the acceptance and the full repayment params gain
+  `lendingKey: LendingKey` as the installment's has. `MessageField({ channel, value, onChange
+  })`: a textarea labelled
+  "Private message (optional)", the counter "N / M bytes", and the error from `messageError`.
+- The modals save `SentMessage` with the transaction's txid when they save the transaction
+  record (before the first broadcast).
+
+- [ ] **Step 1: Write the failing tests:** `proposalForm` refuses a 2916-byte message with the
+  counter's error; in `loan.test.ts`, `buildPrivateInstallment` with a message signs it for
+  installment `installmentCount + 1` (spy on `wasm.signMessage`) and with an over-long one throws
+  before any fetch.
+- [ ] **Step 2: Run them to see them fail.** `cd web && pnpm test`. Expected: FAIL.
+- [ ] **Step 3: Implement.** The acceptance signs for `Acceptance` with the lender's key and
+  passes it to `pinnedBlinding(Principal, …)`; the full repayment signs for `FullRepayment`. The
+  read-back of task 2 also requires the installment's message to read back verified.
+- [ ] **Step 4: Check.** `pnpm test && pnpm lint && VITE_DEBUG_MNEMONIC= pnpm build && pnpm
+  parity`. Expected: pass.
+- [ ] **Step 5: Commit** `web: the forms send private messages`
+
+### Task 7: Reading messages: the proposal review and the loan's timeline
+
+**Files:** Create `web/src/privateLending/loanMessages.ts`, `loanMessages.test.ts`,
+`web/src/privateLending/hooks/useLoanMessages.ts`, `web/src/components/MessageTimeline.tsx`,
+`web/src/components/modals/private/LoanMessagesModal.tsx`; modify
+`web/src/components/modals/private/AcceptPrivateOfferModal.tsx`,
+`web/src/areas/lend/LoanBookPage.tsx`, `web/src/areas/borrow/MyLoansPage.tsx`.
+
+**Interfaces:**
+- `interface LoanMessage { phase: 'creation' | 'acceptance' | 'installment' | 'repayment';
+  installment?: number; from: 'borrower' | 'lender'; txid: string; state: 'verified' |
+  'unverified' | 'unreadable' | 'elsewhere'; text?: string }` (`elsewhere`: sent by this wallet
+  from another browser).
+- `collectLoanMessages(input: { role: 'lender' | 'borrower'; offerTxid: string; creation?:
+  string; acceptance?: { txid: string; read?: ReadMessage | 'unreadable' }; installments: { txid:
+  string; j: number; read?: ReadMessage | 'unreadable' }[]; repayment?: { txid: string; read?:
+  ReadMessage | 'unreadable' }; sent: SentMessage[] }): LoanMessage[]`, in chain order; for a
+  phase this wallet sent and cannot read from the chain, the text comes from `sent`, else
+  `elsewhere`.
+- `useLoanMessages(item: OpenedOfferItem): { messages: LoanMessage[]; isLoading: boolean }`,
+  reading the acceptance from `useLoan`'s hex, the installments from `LoanState.installment(j)
+  .message`, and the full repayment's transaction (from the candidate's repayment UTXO) with
+  `readMessage`.
+- `MessageTimeline({ messages, names })`: one entry per message with the sender's name and
+  `KeyFingerprint`, the phase ("Proposal", "Acceptance", "Installment 2", "Full repayment"), the
+  text through `displayMessage` in a `whitespace-pre-wrap` block, an "Unverified" badge, and
+  `MESSAGE_NOTE` once.
+
+- [ ] **Step 1: Write the failing tests** in `loanMessages.test.ts`: the lender's view orders
+  creation, acceptance (from `sent`), installment 1 (verified), full repayment; the borrower's
+  view reads the lender's acceptance from the chain and, with no `sent`, shows its own full
+  repayment as `elsewhere`; an unverified installment keeps its text with the
+  state `unverified`; a crafted unreadable field is `unreadable` without text.
+- [ ] **Step 2: Run them to see them fail.** `cd web && pnpm test`. Expected: FAIL.
+- [ ] **Step 3: Implement.** The proposal review shows the creation message above the terms with
+  the note. The loan book and My loans rows get a "Messages (n)" link (shown when n > 0) that
+  opens `LoanMessagesModal`. Directory names come from verified entries only (`lookup`).
+- [ ] **Step 4: Check.** `pnpm test && pnpm lint && VITE_DEBUG_MNEMONIC= pnpm build`. Expected:
+  pass.
+- [ ] **Step 5: Commit** `web: the proposal review and the loans show their messages`
+
+### Task 8: The e2e stages, the demo and the docs
+
+**Files:** Modify `web/scripts/e2e-private-lending.ts`, `web/scripts/demo/demo.spec.ts`,
+`web/README.md`, `docs/docs/private-loans/{guide,protocol}.md`,
+`crates/private-lending-wasm/README.md`.
+
+- [ ] **Step 1: E2E.** `create` sends a creation message with Cyrillic and an emoji, and the
+  lender's `openCreationAsLender` reads it back; `accept` sends one the borrower reads from the
+  chain (`readMessage`); `repay-partial` sends one per installment, which both parties read
+  verified from `loanState`; `repay` sends one the lender reads from the repayment transaction.
+  `create-dry` builds once with a 2915-byte message and once with none and checks the two output
+  3 range proofs have the same length.
+- [ ] **Step 2: Demo.** The borrower's proposal carries a message; the lender sees it in the
+  review and answers in the acceptance; the borrower's My loans timeline shows both. Screenshots
+  `lend-review-message`, `borrow-messages`.
+- [ ] **Step 3: Docs.** The guide: the message fields, who can read what, "Sent from another
+  browser", the note. `protocol.md`: the channels, the encoding, the signature and phase bytes,
+  terms version 2, the limits. The READMEs: the new stages' checks and the wasm API.
+- [ ] **Step 4: Check.** The e2e stages above on testnet from an empty state with a fresh indexer
+  database; `pnpm demo:testnet`; the docs build. Expected: pass.
+- [ ] **Step 5: Commit** `web, docs: messages in the e2e, the demo and the guide`
+
+### Task 9: Verify the phase
+
+- [ ] **Step 1:** `cargo test --workspace` without the regtest tests; `cd crates/contracts &&
+  simplex build && simplex test` (the audit file renamed aside); `cargo clippy --workspace
+  --all-targets --all-features -- -D warnings`; `cargo fmt --check`; `cargo sqlx prepare
+  --workspace --check -- --all-targets`.
+- [ ] **Step 2:** `cd web && pnpm test && VITE_DEBUG_MNEMONIC= pnpm build && pnpm lint && pnpm
+  parity && pnpm check:config`; every e2e stage from an empty state with a fresh local indexer
+  database.
+- [ ] **Step 3:** `pnpm demo:testnet` on the final tree; look at the screenshots of the review and
+  the timeline, at 375 px and 1280 px.
+- [ ] **Step 4:** `docker compose build` (still open from phase 5) where the disk allows; the docs
+  build. Commit `docs: v2 phase 6 verified` with the results.
+
+The phase review follows (whole branch, Opus).
 
 ## Phase 7: Proportional collateral release (spec item 3b) — postponed
 

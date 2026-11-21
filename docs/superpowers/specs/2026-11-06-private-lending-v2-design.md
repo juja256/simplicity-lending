@@ -592,8 +592,12 @@ Phase 5 also rewrites the header comment of `private_lending.simf`, removes the 
   key in the marker, OP_RETURN (check Elements' relay limits), or the indexer as a mailbox of
   ciphertexts.
 - Whether message senders must be able to reread their messages on another device (item 6).
+  Decided 2026-11-21: no new derivation. The creation's and each installment's messages reread
+  from the seed (their nonces derive since phase 5); the acceptance's and the full repayment's
+  only from the browser that sent them, which keeps them per lending key.
 - Whether LWK and Jade sign with `SIGHASH_RANGEPROOF`; if they do, item 6's signatures still
   name the sender but are no longer needed against malleation. Checked 2026-11-12 for LWK at
   `7f8c8213`: its software signer signs only the default sighash unless its policy allows another,
   and nothing in `lwk_signer` handles `SIGHASH_RANGEPROOF`, so item 6's signatures are needed.
-  The Jade is unchecked.
+  The Jade is unchecked, and need not be (2026-11-21): the messages are signed by the lending
+  key, which the browser derives from the descriptor for Jade wallets too.
