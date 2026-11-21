@@ -1018,7 +1018,13 @@ The borrower's app refuses to create an offer outside these bounds.
   point. Then only the link between the two builds is revealed (proofs, L1).
 - The app saves a build before its first broadcast and rebroadcasts it.
 - **A saved build that can no longer be broadcast** (a coin it spends was spent, or the fee must
-  rise) may be rebuilt only with the same amount `p`, and under phase 5's range-proof nonce rule.
+  rise) may be rebuilt only with the same amount `p`, and with a first wallet input (input 2) that
+  no saved, discarded or failed installment of the loan used.
+  - The fresh input keeps output 2's derived ephemeral key fresh. Phase 5 derives that key from the
+    lending key, the loan outpoint, the first wallet input and output 0's script, so a rebuild on
+    the same inputs would reuse it for a new commitment.
+  - Phase 6's `installmentTraceInputs` already keeps those inputs out of the loan's next build.
+  - With the same `p` and a fresh key, only the link between the two builds leaks (proofs, L1).
 - Otherwise the app never builds a second installment for the same loan state.
 
 **Rebuilding from the seed and the chain.** The borrower rebuilds:

@@ -12,14 +12,16 @@ and so on.
 the proofs, and every claim in the task's brief, is proved below under the assumptions of
 section 2. The findings, most important first:
 
-1. **The proofs need weaker assumptions than the brief states.** The task's brief asks for the
-   discrete logarithms of `A`, `A_c`, `A_w1`, `A_w2` and `J` to base `G` to be unknown "and
-   mutually"; the note asks only that they be unknown. Every step below compares two openings of
-   one point in a single pair of bases `(H, G)`. So it is enough that nobody can compute
+1. **The proofs need only pairwise assumptions.** The note asks that the discrete logarithms of
+   `A`, `A_c`, `A_w1`, `A_w2` and `J` to base `G` be unknown. A reader might expect mutual
+   independence of these points to be needed as well, but it is not. Every step below compares two
+   openings of one point in a single pair of bases `(H, G)`. So it is enough that nobody can compute
    `log_G H` for each `H` on its own (A1). The borrower may even choose a carry asset related to
    `A` or `A_c`, for instance the collateral asset itself, without breaking anything. Elements' own
    asset conservation needs distinct assets to be independent, and that is part of the consensus
-   assumption A3, not of these proofs.
+   assumption A3, not of these proofs. "Pairwise is enough" holds for the theorems' own
+   reductions. It does not hold for the algebraic-group-model justification of A2, which, like
+   A3, needs the asset generators to be jointly independent.
 2. **The caps' tightness is not soundness-critical, but the lender's check of `R` is.**
    - The integer argument (Theorem 2) holds for any `C, R < 2^64`: the coefficient of `A` in E7
      is then below `2^139 < n`. The tight caps `C ≤ 2^44` and `R ≤ 2^50 − 2` serve the lender's
@@ -152,7 +154,9 @@ of an adversary of the stated resources.
 - **A1, generators.** Let `𝓗` be the set of:
   - the point `J`;
   - every asset generator `Gen(a)`;
-  - every loan's `A` and `A_c`, which are `Gen(a)` plus a derived blinder times `G`;
+  - the `A` and `A_c` of every loan that the honest lender accepted, which are `Gen(a)` plus a
+    derived blinder times `G`. Other loans' points are covered only when they appear on chain, by
+    the next item and A2;
   - every asset commitment that appears in a valid transaction.
 
   No efficient adversary outputs `H ∈ 𝓗` and `(α, β) ≠ (0, 0)` with
@@ -253,8 +257,8 @@ Now suppose the adversary outputs `α·H + β·G = O` with `α ≠ 0`.
 - If `H = J = ±(X + β_J·G)`, then `±α·X + (±α·β_J + β)·G = O`, which gives `log_G X`.
 - Otherwise `H = Gen(a) + t·G` with a `t` known to `B`:
   - `t = 0` for a generator `Gen(a)`;
-  - for a loan's `A` or `A_c`, `t` is the derived `repayment-abf` or `a_c`, which `B` knows
-    because it plays the lender;
+  - for the `A` or `A_c` of a loan that the honest lender accepted, `t` is the derived
+    `repayment-abf` or `a_c`, which `B` knows because it plays that lender;
   - for an asset commitment in a transaction, A2 gives `a` and `t`.
 
   Then `H = X + (β_a + t)·G`, so `α·X + (α·(β_a + t) + β)·G = O`, and
@@ -935,9 +939,11 @@ nothing.
   which H3 no longer uses as derived values. This is the ideal world. The loss is again at most
   `Adv^prf-derive` plus `2048·2^−127`. ∎
 
-Two successors with different amounts at one step break the hop from H2 to H3, because `x_k`
-then blinds two different points. That is the leak L1. Two builds with the same amount give the
-same successor point, so they reveal only that they are linked (L1).
+Theorem 7 covers a chain with one public build per step. Two successors with different amounts
+at one step break the hop from H2 to H3, because `x_k` then blinds two different points: that is
+the leak L1. That two builds with the same amount reveal only their link is not part of
+Theorem 7. It follows from A3 and Theorem 5, under the conditions that L1 states. So does the
+claim that a build which never becomes public leaks nothing.
 
 **Theorem 7′ (what the lender learns).** The lender knows `x_k` and `y_k`.
 
@@ -1041,19 +1047,42 @@ The edges `e = 0` and `e = R − 1` give the carries `(1, R)` and `(R, 1)`. A re
     and no amount is revealed. What remains is the link between the two builds. They carry the
     same `V_s`, `Y_(k+1)`, leaf and path.
   - **Different payments with one successor amount.** Payments that round to the same `c'` also
-    give the same `V_s`. Then only phase 5's range-proof leak, if any, and the link remain.
+    give the same `V_s`. Then the installment output's range proof (below) and the link remain.
   - **The proofs add nothing** (Theorem 6): different statements have independent nonces, and the
     same statement has the same proof.
-  - **Phase 5's range-proof nonce reuse** is a separate leak of the same event, which phase 5's
-    rule governs.
+  - **The installment output's range-proof nonce.** Phase 5 derives output 2's ephemeral key, and
+    so its range proof's nonce, from the lending key, the loan outpoint, the first wallet input
+    (input 2) and output 0's script. A rebuild that kept the same inputs, for instance a fee bump,
+    would derive the same key again for a new commitment `V'`, with a fresh blinder.
+    - **From source.** In secp256k1-zkp 0.10.1, `rangeproof_genrand` seeds its RNG with the
+      nonce, the commitment, the generator and the proof's header (`rangeproof_impl.h`, lines
+      74–78). So a reused nonce under a new commitment does not repeat the proof's internal
+      randomness.
+    - A reused derived key still links the two builds, through the same ephemeral public key. Its
+      range proofs are then rewindable by the same key, and they have not been analysed as a pair.
+    - The rule below therefore keeps the key fresh, and does not rely on that seeding.
+  - **When only the link leaks.** Two builds with the same `p` reveal only that they are linked,
+    provided that:
+    - the successor is the same point, which holds because `c'` and `x_(k+1)` are the same;
+    - every range-proof nonce of the rebuild is fresh, or is used again only with the same
+      commitment and amount. The installment output gets a fresh nonce through a fresh first wallet
+      input (below). The carries get fresh random ephemeral keys and blinders.
+    - every other output has fresh blinders, so A3 covers it;
+    - the two Sigma statements are distinct (output 2's fresh blinder changes `D'`) and so use
+      independent nonces, or are equal and give the same proof (Theorem 6);
+    - and per-offer freshness holds (A6).
   - **The rule (the controller's ruling, 2026-11-21; note: "Never rebuild an index with another
     amount").**
     - The app saves a build before its first broadcast and rebroadcasts it.
     - A saved installment that became unbroadcastable (a coin it spends was spent, or the fee must
-      rise) may be rebuilt only with the same amount `p`, and under phase 5's range-proof nonce
-      rule.
+      rise) may be rebuilt only with the same amount `p`.
+    - The rebuild must also use a first wallet input (input 2) that no saved, discarded or failed
+      installment of that loan used. Then output 2's derived ephemeral key is fresh. The app
+      already enforces this: phase 6's `installmentTraceInputs` (`web/src/privateLending/
+      repayPlan.ts`) keeps every such installment's first wallet input out of the loan's next
+      build.
     - Then the successor is the same point, and only the link leaks.
-    - A build that never becomes public leaks nothing.
+    - A build that never becomes public leaks nothing (by A3 and Theorem 5, not Theorem 7).
   - The same holds for anyone who sends an output with asset commitment `A_c + j·G` to the loan's
     address and runs an installment on it. Only the borrower or the lender knows `a_c`, so such a
     party can only hurt its own privacy.
@@ -1157,9 +1186,10 @@ The proofs assume all of these:
   - The bound on `R` is soundness-critical, because no range proof bounds `R` (finding 2).
 
   The note's "Checks at acceptance" lists these checks.
-- **O10, the burns hide `R`.** The confidential `OP_RETURN` burns, `S_w − R − 1` at the first
-  installment and `R + 1` at the full repayment, use the same range-proof parameters as the other
-  confidential outputs, so that they do not reveal their amounts (and so `R`).
+- **O10, the burns hide `R`.** Every confidential `OP_RETURN` burn of carry units uses the same
+  range-proof parameters as the other confidential outputs, so that it does not reveal its amount
+  (and so `R`). That covers `S_w − R − 1` at the first installment, `R + 1` at the full
+  repayment, and any later sweep of the carries, for instance after a liquidation.
   - Elements treats the range proofs of unspendable outputs differently: a minimum of 0 is allowed
     for them.
   - The implementer confirms from Elements' source what such a proof's header reveals, and chooses
@@ -1184,10 +1214,10 @@ revision.
 | Zero knowledge | Thm 5 | 746–759, 812–821 | A7, A8 |
 | Nonce derivation | Thm 6 | 812–821 | A1, A7, A8 |
 | Hiding of `V_k` given `Y_k` | Lem 10.1, Thm 7 | 642–652, 956–957 | A3, A6, A7, A8 |
-| What the lender learns | Thm 7′ | 979–986, 1032–1037 | as Thm 5 |
-| The lender's search | Thm 8 | 979–986, 1032–1037 | as Thm 4 |
+| What the lender learns | Thm 7′ | 979–986, 1038–1043 | as Thm 5 |
+| The lender's search | Thm 8 | 979–986, 1038–1043 | as Thm 4 |
 | Completeness | Prop 9 | 937–961 | none |
-| The rebuild leak and its rule | L1 | 1013–1022 | A6 (freshness) |
+| The rebuild leak and its rule | L1 | 1013–1028 | A6 (freshness) |
 | The lender's checks at acceptance | O9 | 990–1003 | none |
 | The burns hide `R` | O10 | 953–954, 963–972 | A3 |
 
