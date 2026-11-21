@@ -1,13 +1,13 @@
 //! Cryptography of Simplicity Lending private offers: lending keys, per-offer secrets, signed
 //! terms, the marker, pinned outputs, building offers, and finding, opening and checking them in
 //! their creation transactions; a loan's debt as a curve point, with the installments that pay it;
-//! the release of collateral by installments, with the derived values of the liquidation repair;
-//! the private messages of a loan's parties; and the terms lenders publish in the directory, with
-//! the check of a proposal against them.
+//! the release of collateral by installments, with the derived values of the liquidation repair
+//! and the borrower's proof of each release; the private messages of a loan's parties; and the
+//! terms lenders publish in the directory, with the check of a proposal against them.
 //!
 //! The crate depends only on `elements`, `rand` and `k256` (whose field arithmetic tells whether a
-//! commitment's `y` is a square), so the contracts crate and the browser's wasm module run the same
-//! code.
+//! commitment's `y` is a square, and whose group arithmetic proves and verifies the releases), so
+//! the contracts crate and the browser's wasm module run the same code.
 //!
 //! Signing the terms ([`SignedTerms::sign`]) or a message ([`SignedMessage::sign`]) draws its
 //! auxiliary randomness from `rand`'s thread RNG, as does a caller that passes `rand::thread_rng()`
@@ -26,6 +26,7 @@ mod message;
 mod offer;
 mod pinned;
 mod release;
+mod release_proof;
 mod secrets;
 mod terms;
 
@@ -36,9 +37,9 @@ pub use creation::{
     CreationError, FoundOffer, find_offer, open_creation_as_borrower, open_creation_as_lender,
 };
 pub use debt::{
-    DebtError, DebtOpening, InstallmentError, asset_plus_generator, debt_after, debt_hash,
-    open_installment, open_installment_with_extra_data, sweep_opening, zero_debt_blinder,
-    zero_debt_key,
+    DebtError, DebtOpening, InstallmentError, asset_plus_generator, asset_point, debt_after,
+    debt_hash, open_installment, open_installment_with_extra_data, sweep_opening, value_point,
+    zero_debt_blinder, zero_debt_key,
 };
 pub use directory::{
     DIRECTORY_TAG, DirectoryAction, DirectorySignError, directory_message, sign_directory_action,
@@ -62,6 +63,7 @@ pub use release::{
     ReleaseError, carry_remainder, check_bounds, collateral_at, fold_path, fs_iv, release_j,
     release_of,
 };
+pub use release_proof::{ReleaseProof, ReleaseSecrets, ReleaseStatement, challenge, prove, verify};
 pub use secrets::{OfferSecrets, PinnedRole, expiry_hash};
 pub use terms::{OfferTerms, SignedTerms, TERMS_VERSION, TermsError};
 

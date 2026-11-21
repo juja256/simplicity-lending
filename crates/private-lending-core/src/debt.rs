@@ -307,8 +307,13 @@ pub fn open_installment_with_extra_data(
     Ok((opening, extra_data))
 }
 
-/// The curve point of a value commitment.
-fn value_point(value: &confidential::Value) -> Result<PublicKey, DebtError> {
+/// The curve point of a value commitment, by phase 5's square-ness rule: the point the covenant
+/// reads from the commitment.
+///
+/// # Errors
+/// Returns [`DebtError::NotConfidential`] if the value is explicit or null, and
+/// [`DebtError::NotOnCurve`] if its x-coordinate is not on the curve.
+pub fn value_point(value: &confidential::Value) -> Result<PublicKey, DebtError> {
     let commitment = value.commitment().ok_or(DebtError::NotConfidential)?;
 
     commitment_point(&commitment.serialize())
@@ -322,8 +327,13 @@ fn value_of_point(point: &PublicKey) -> confidential::Value {
     confidential::Value::Confidential(commitment)
 }
 
-/// The curve point of an asset commitment.
-fn asset_point(asset: &confidential::Asset) -> Result<PublicKey, DebtError> {
+/// The curve point of an asset commitment, by phase 5's square-ness rule: the point the covenant
+/// reads from the commitment.
+///
+/// # Errors
+/// Returns [`DebtError::NotConfidential`] if the asset is explicit or null, and
+/// [`DebtError::NotOnCurve`] if its x-coordinate is not on the curve.
+pub fn asset_point(asset: &confidential::Asset) -> Result<PublicKey, DebtError> {
     let generator = asset.commitment().ok_or(DebtError::NotConfidential)?;
 
     commitment_point(&generator.serialize())

@@ -810,15 +810,23 @@ lender recomputes it, as it recomputes every parameter.
 - **`x_j = scalar(derive("release-x/<j>"))`** and **`y_j = scalar(derive("release-y/<j>"))`**,
   where `<j>` is `j` in decimal ASCII (`release-x/1` … `release-x/1024`). Both parties derive them.
 - **The Sigma nonces** `k_C, k_ρ, k_c', k_x, k_y, k_e, k_w1, k_R, k_r₀, k_w2, k_τ` are
-  `scalar(tagged_hash("simplicity-lending/private/v1/release-nonce", borrower_sk ‖ h₇ ‖ m))`.
-  - `borrower_sk` is the borrower's lending key.
+  `scalar(tagged_hash("simplicity-lending/private/v1/release-nonce", borrower_sk ‖ h₇ ‖ W ‖ m))`,
+  with
+  `W = tagged_hash("simplicity-lending/private/v1/release-witness", C ‖ ρ ‖ c' ‖ x ‖ y ‖ e ‖ w1 ‖
+  R ‖ r₀ ‖ w2 ‖ τ)`.
+  - `borrower_sk` is the borrower's lending key, as 32 bytes.
   - `h₇` is the statement's digest.
+  - `W` binds the witness (proofs, R1, adopted in task 3). Each secret is 32 big-endian bytes,
+    reduced modulo `n`, in the responses' order.
   - `m` is the nonce's position, 0 to 10, as one byte.
   - They derive from the borrower's key, not from the shared secret, so the lender cannot compute
     them and recover the borrower's openings from the responses.
-  - The statement fixes every secret, because the commitments bind under the unknown discrete
-    logarithms. So two builds of one statement give the same proof, and two different statements
-    give independent nonces.
+  - Nobody can compute two witnesses of one statement, because the commitments bind under the
+    unknown discrete logarithms (proofs, Theorem 1(e)). So the honest borrower's two builds of one
+    statement have one witness and give the same proof, and two different statements give
+    independent nonces.
+  - With `W`, a bug that paired a statement with a wrong witness would get other nonces too, so
+    its two proofs would not publish `z − z' = c·(w − w')`.
 
 ### The program
 

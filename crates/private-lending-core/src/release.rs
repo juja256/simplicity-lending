@@ -327,7 +327,7 @@ pub(crate) fn scalar(bytes: &[u8; 32]) -> Scalar {
 }
 
 /// The affine coordinates of a point as two 32-byte big-endian words.
-fn point_xy(point: &PublicKey) -> ([u8; 32], [u8; 32]) {
+pub(crate) fn point_xy(point: &PublicKey) -> ([u8; 32], [u8; 32]) {
     let uncompressed = point.serialize_uncompressed();
     let x = uncompressed[1..33]
         .try_into()
