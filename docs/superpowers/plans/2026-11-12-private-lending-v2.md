@@ -1922,9 +1922,13 @@ Decided at phase start (2026-11-21):
 - **Sender recovery** (the user, 2026-11-21: keep as proposed). The creation's and each
   installment's range proofs open from the sender's seed (their nonces derive), so those messages
   reread on any device. The acceptance's and the full repayment's nonces stay random: their
-  senders reread them only from this browser, where the app keeps every message it sends,
-  per lending key, in IndexedDB. A message sent from another browser shows as "Sent from another
-  browser".
+  senders reread them only from this browser. *(My call:)* the app keeps a record of every
+  acceptance, installment and full repayment it sends, with the text or none, per lending key in
+  IndexedDB (the spec said "as the terms are now", which is memory only and would lose them on
+  reload). The plaintext then stays on the device after a disconnect, like the saved
+  transactions. A sender's message from another browser does not show (the app cannot tell it
+  from no message), and the timeline says once: "Messages you sent from another browser do not
+  show here." 
 - **Channels** *(my call where the spec leaves a choice)*: creation, inside the terms (pending
   collateral, output 3, borrower → lender); acceptance, the principal output only (output 1,
   lender → borrower); installment, the installment output (output 2, borrower → lender); full
@@ -1966,8 +1970,9 @@ Decided at phase start (2026-11-21):
 4. A text at the limit and one byte over, counted in UTF-8 bytes (an emoji is 4): the form refuses
    the over-long one before building, with the byte counter; the limit one builds and reads back.
    Tasks 5 and 6 test it.
-5. A sender on another browser: the acceptance or full repayment they sent shows as "Sent from
-   another browser", not as missing or as an error. Task 7 tests it.
+5. A sender on another browser, or a sent transaction that was discarded: no entry and no error
+   for a message the app has no record of, and a discarded draft's text never shows as sent (the
+   records match by txid). Task 7 tests it.
 
 ### Task 1: Carried from phase 5's review, in the web app
 
@@ -1975,8 +1980,8 @@ Decided at phase start (2026-11-21):
 `web/src/areas/borrow/MyLoansPage.tsx`, `web/src/components/modals/private/{LiquidatePrivateOfferModal,RepayPrivateOfferModal,CloseZeroDebtModal}.tsx`,
 `web/src/privateLending/flows/installment.ts`, `web/src/privateLending/loan.ts`,
 `web/src/providers/pendingTransactions/PendingTransactionsProvider.tsx`,
-`web/src/privateLending/repayPlan.ts`; tests in `offerView.test.ts`, `repayPlan.test.ts`,
-`loan.test.ts`. Create `web/src/privateLending/borrowerErrors.ts` and its test.
+`web/src/privateLending/repayPlan.ts`, `web/scripts/e2e-private-lending.ts` (the builder's new
+`tipHeight`); tests in `offerView.test.ts`, `repayPlan.test.ts`, `loan.test.ts`. Create `web/src/privateLending/borrowerErrors.ts` and its test.
 
 **Interfaces (produces):**
 - `borrowerErrorText(error: unknown): string` maps `PrincipalNotClaimedError` and wasm
@@ -1986,9 +1991,11 @@ Decided at phase start (2026-11-21):
   `!installmentTermOpen(tip, expiry)` (`tip ≥ expiry`).
 - `buildPrivateInstallment` throws `InstallmentAfterTermError` when `params.tipHeight ≥ expiry`;
   `InstallmentParams` gains `tipHeight: number`.
-- `staleInstallmentRecords(records, loanOutpointSpent: (outpoint: string) => boolean):
-  PrivateTxRecord[]` in `repayPlan.ts`: the discarded or failed installments whose loan output
-  is spent on chain, which the provider then removes.
+- `staleInstallmentRecords(records, loanSpendDepth: (outpoint: string) => number | null):
+  PrivateTxRecord[]` in `repayPlan.ts`: the discarded or failed installments whose loan output's
+  spend has at least the finalized depth of confirmations (`null`: unspent; 0: in the mempool),
+  which the provider then removes. A spend in the mempool can still drop, and with it the trace
+  would go while its coin can be reused.
 
 - [ ] **Step 1: Write the failing tests**:
   - `borrowerErrors.test.ts`: a `PrincipalNotClaimedError` reads "Receive the loan first: …";
@@ -1999,7 +2006,8 @@ Decided at phase start (2026-11-21):
   - `loan.test.ts`: `buildPrivateInstallment` at `tipHeight = expiry` throws
     `InstallmentAfterTermError` before any fetch (the fake chain records no `fetchTx`).
   - `repayPlan.test.ts`: `staleInstallmentRecords` keeps a failed record whose loan output is
-    unspent and returns one whose loan output is spent.
+    unspent, or spent in the mempool or one block short of the finalized depth, and returns one
+    whose spend reached it.
 - [ ] **Step 2: Run them to see them fail.** `cd web && pnpm test`. Expected: FAIL.
 - [ ] **Step 3: Implement**, and also:
   - `useLoan`: while the query is in error, retry every 30 s (`refetchInterval` only in error;
@@ -2012,8 +2020,9 @@ Decided at phase start (2026-11-21):
     not be read; reload the page") if that read fails, instead of trusting the tab's list.
   - The provider drops `staleInstallmentRecords` once a day on the existing sweep, asking esplora
     for the loan outpoint's spend.
-- [ ] **Step 4: Check.** `pnpm test && pnpm lint && VITE_DEBUG_MNEMONIC= pnpm build`. Expected:
-  pass.
+- [ ] **Step 4: Check.** `pnpm test && pnpm lint && VITE_DEBUG_MNEMONIC= pnpm build`, and `pnpm
+  exec tsc --noEmit -p` each of `tsconfig.app.json`, `tsconfig.node.json`, `tsconfig.test.json`
+  (the build does not typecheck the scripts). Expected: pass.
 - [ ] **Step 5: Commit** `web: phase 5's review minors`
 
 ### Task 2: Carried from phase 5's review: witness vectors, the wasm's own anchoring, the read-back's nonce
@@ -2029,13 +2038,16 @@ Decided at phase start (2026-11-21):
   `zero_debt_close` (`debt`, `k`), built as `full_repayment` is.
 - `OpenedOffer` (wasm) keeps the creation txid; `loanState` refuses with `loan-mismatch` an
   acceptance whose input 0 is not `<creation txid>:3`.
-- `InstallmentPlan.ephemeralPublicKey: string` (33-byte hex); the builder requires output 2's
-  `ecdhPubkey` in the blinded PSET to equal it, before the read-back.
+- `InstallmentPlan.ephemeralPublicKey: string` (33-byte hex); `installmentNonceMatches(tx:
+  Transaction, ephemeralPublicKey: string): boolean` in `flows/installment.ts`, exported, which
+  the builder requires of the blinded transaction before the read-back.
 
 - [ ] **Step 1: Write the failing tests:** `checkWitnessVectors` checks `installment` and
   `zero_debt_close` byte for byte against `buildPrivateLendingWitness`; in `loan.rs`,
-  `loan_state_refuses_an_acceptance_of_another_creation`; in `loan.test.ts`, a blinded PSET whose
-  output 2 nonce is replaced is refused with "does not read back as built".
+  `loan_state_refuses_an_acceptance_of_another_creation`; in `loan.test.ts`,
+  `installmentNonceMatches` is true for the fixture installment and its output 2 nonce, and false
+  once that nonce is replaced by another valid key (the builder tests stop before the PSET is
+  built, so the e2e covers the builder's call).
 - [ ] **Step 2: Run them to see them fail.** `cargo test -p private-lending-wasm`; `cd web &&
   pnpm parity && pnpm test`. Expected: FAIL.
 - [ ] **Step 3: Implement.** Regenerate the fixture: rename
@@ -2053,7 +2065,8 @@ Decided at phase start (2026-11-21):
 **Files:** Create `crates/private-lending-core/src/message.rs`; modify
 `crates/private-lending-core/src/{terms,offer,creation,blind,lib}.rs`, and every
 `NewOffer::build` caller: `crates/contracts/tests/private_lending/{setup,offer_creation_flows}.rs`,
-`crates/indexer/tests/common/mod.rs`, `crates/private-lending-wasm/src/build.rs`.
+`crates/indexer/tests/common/mod.rs`, `crates/private-lending-wasm/src/build.rs`;
+`web/scripts/fixtures/private-lending-parity.json` (regenerated).
 
 **Interfaces (produces):**
 - `pub const MESSAGE_ROOM: usize = 3136; pub const MAX_SIGNED_MESSAGE_BYTES: usize = 3068; pub
@@ -2093,11 +2106,12 @@ Decided at phase start (2026-11-21):
     same length, and each rewinds to its message.
 - [ ] **Step 2: Run them to see them fail.** `cargo test -p private-lending-core`. Expected: FAIL.
 - [ ] **Step 3: Implement** in `message.rs`, the terms and `NewOffer::build`; pass `None` at every
-  other caller.
+  other caller. Terms version 2 makes the committed fixture's creation undecodable: regenerate it
+  (as in task 2) and run `cd web && pnpm build:wasm`.
 - [ ] **Step 4: Check.** `cargo test -p private-lending-core -p private-lending-wasm -p
   lending-indexer` (the indexer's sqlx tests on a scratch database); `cd crates/contracts &&
   simplex build && simplex test` (audit file aside); `cargo clippy --workspace --all-targets
-  --all-features -- -D warnings`. Expected: pass.
+  --all-features -- -D warnings`; `cd web && pnpm parity && pnpm test`. Expected: pass.
 - [ ] **Step 5: Commit** `core: private messages, and the terms carry the creation's (version 2)`
 
 ### Task 4: Messages in the wasm, the fixture and the parity check
@@ -2161,7 +2175,8 @@ creation message, its acceptance and installment carry signed ones);
   newlines.
 - `MESSAGE_NOTE = 'A message is not part of the terms, and the contract does not enforce it.'`
 - `interface SentMessage { offerTxid: string; txid: string; phase: 'acceptance' | 'installment' |
-  'repayment'; installment?: number; text: string; savedAt: number }`;
+  'repayment'; installment?: number; text?: string; savedAt: number }` (`text` absent: sent
+  without a message);
   `kvSentMessages(kv: ScanKv, scope: ScanScope, fingerprint: string): { save(message:
   SentMessage): void; forOffer(offerTxid: string): SentMessage[] }`, stored under the key
   `JSON.stringify(['sent', network, fingerprint])` in the scan database, zod-checked; a value
@@ -2183,7 +2198,8 @@ creation message, its acceptance and installment carry signed ones);
 **Files:** Modify `web/src/privateLending/flows/{creation,acceptance,installment,repayment}.ts`,
 `web/src/areas/borrow/ProposalPage.tsx`, `web/src/areas/borrow/proposalForm.ts`,
 `web/src/components/modals/private/{CreatePrivateOfferModal,AcceptPrivateOfferModal,RepayPrivateOfferModal}.tsx`;
-create `web/src/components/MessageField.tsx`. Tests in `proposalForm.test.ts`, `loan.test.ts`.
+`web/scripts/e2e-private-lending.ts` (the builders' new params); create
+`web/src/components/MessageField.tsx`. Tests in `proposalForm.test.ts`, `loan.test.ts`.
 
 **Interfaces:**
 - Consumes: tasks 4 and 5.
@@ -2193,19 +2209,21 @@ create `web/src/components/MessageField.tsx`. Tests in `proposalForm.test.ts`, `
   `lendingKey: LendingKey` as the installment's has. `MessageField({ channel, value, onChange
   })`: a textarea labelled
   "Private message (optional)", the counter "N / M bytes", and the error from `messageError`.
-- The modals save `SentMessage` with the transaction's txid when they save the transaction
-  record (before the first broadcast).
+- The modals save a `SentMessage` for every acceptance, installment and full repayment, with or
+  without text, under the transaction's txid, when they save the transaction record (before the
+  first broadcast).
 
 - [ ] **Step 1: Write the failing tests:** `proposalForm` refuses a 2916-byte message with the
-  counter's error; in `loan.test.ts`, `buildPrivateInstallment` with a message signs it for
-  installment `installmentCount + 1` (spy on `wasm.signMessage`) and with an over-long one throws
-  before any fetch.
+  counter's error; in `loan.test.ts`, `buildPrivateInstallment` with a 3069-byte message throws
+  the limit's error before any fetch (the builder checks the message first, before the
+  principal-claim walk). That the installment's message is signed for `installmentCount + 1` is
+  checked by the wasm (task 4) and by the e2e (task 8), which reads it back verified.
 - [ ] **Step 2: Run them to see them fail.** `cd web && pnpm test`. Expected: FAIL.
 - [ ] **Step 3: Implement.** The acceptance signs for `Acceptance` with the lender's key and
   passes it to `pinnedBlinding(Principal, …)`; the full repayment signs for `FullRepayment`. The
   read-back of task 2 also requires the installment's message to read back verified.
 - [ ] **Step 4: Check.** `pnpm test && pnpm lint && VITE_DEBUG_MNEMONIC= pnpm build && pnpm
-  parity`. Expected: pass.
+  parity`, and `tsc --noEmit` on the three tsconfigs. Expected: pass.
 - [ ] **Step 5: Commit** `web: the forms send private messages`
 
 ### Task 7: Reading messages: the proposal review and the loan's timeline
@@ -2219,14 +2237,14 @@ create `web/src/components/MessageField.tsx`. Tests in `proposalForm.test.ts`, `
 **Interfaces:**
 - `interface LoanMessage { phase: 'creation' | 'acceptance' | 'installment' | 'repayment';
   installment?: number; from: 'borrower' | 'lender'; txid: string; state: 'verified' |
-  'unverified' | 'unreadable' | 'elsewhere'; text?: string }` (`elsewhere`: sent by this wallet
-  from another browser).
+  'unverified' | 'unreadable' | 'sent'; text?: string }` (`sent`: this wallet's own, from its
+  record).
 - `collectLoanMessages(input: { role: 'lender' | 'borrower'; offerTxid: string; creation?:
   string; acceptance?: { txid: string; read?: ReadMessage | 'unreadable' }; installments: { txid:
   string; j: number; read?: ReadMessage | 'unreadable' }[]; repayment?: { txid: string; read?:
-  ReadMessage | 'unreadable' }; sent: SentMessage[] }): LoanMessage[]`, in chain order; for a
-  phase this wallet sent and cannot read from the chain, the text comes from `sent`, else
-  `elsewhere`.
+  ReadMessage | 'unreadable' }; sent: SentMessage[] }): LoanMessage[]`, in chain order. A phase
+  this wallet sent and cannot read from the chain takes its text from the `sent` record with the
+  same txid; with no such record, or a record without text, it has no entry.
 - `useLoanMessages(item: OpenedOfferItem): { messages: LoanMessage[]; isLoading: boolean }`,
   reading the acceptance from `useLoan`'s hex, the installments from `LoanState.installment(j)
   .message`, and the full repayment's transaction (from the candidate's repayment UTXO) with
@@ -2234,12 +2252,13 @@ create `web/src/components/MessageField.tsx`. Tests in `proposalForm.test.ts`, `
 - `MessageTimeline({ messages, names })`: one entry per message with the sender's name and
   `KeyFingerprint`, the phase ("Proposal", "Acceptance", "Installment 2", "Full repayment"), the
   text through `displayMessage` in a `whitespace-pre-wrap` block, an "Unverified" badge, and
-  `MESSAGE_NOTE` once.
+  `MESSAGE_NOTE` and "Messages you sent from another browser do not show here." once.
 
 - [ ] **Step 1: Write the failing tests** in `loanMessages.test.ts`: the lender's view orders
   creation, acceptance (from `sent`), installment 1 (verified), full repayment; the borrower's
-  view reads the lender's acceptance from the chain and, with no `sent`, shows its own full
-  repayment as `elsewhere`; an unverified installment keeps its text with the
+  view reads the lender's acceptance from the chain, and with no `sent` record its own full
+  repayment has no entry; a `sent` record of another txid (a discarded draft) is not shown; an
+  unverified installment keeps its text with the
   state `unverified`; a crafted unreadable field is `unreadable` without text.
 - [ ] **Step 2: Run them to see them fail.** `cd web && pnpm test`. Expected: FAIL.
 - [ ] **Step 3: Implement.** The proposal review shows the creation message above the terms with
@@ -2264,8 +2283,8 @@ create `web/src/components/MessageField.tsx`. Tests in `proposalForm.test.ts`, `
 - [ ] **Step 2: Demo.** The borrower's proposal carries a message; the lender sees it in the
   review and answers in the acceptance; the borrower's My loans timeline shows both. Screenshots
   `lend-review-message`, `borrow-messages`.
-- [ ] **Step 3: Docs.** The guide: the message fields, who can read what, "Sent from another
-  browser", the note. `protocol.md`: the channels, the encoding, the signature and phase bytes,
+- [ ] **Step 3: Docs.** The guide: the message fields, who can read what (a sender rereads the
+  acceptance and the full repayment only in the browser that sent them), the note. `protocol.md`: the channels, the encoding, the signature and phase bytes,
   terms version 2, the limits. The READMEs: the new stages' checks and the wasm API.
 - [ ] **Step 4: Check.** The e2e stages above on testnet from an empty state with a fresh indexer
   database; `pnpm demo:testnet`; the docs build. Expected: pass.
