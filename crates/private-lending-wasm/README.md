@@ -83,7 +83,8 @@ Scanning:
 Opening:
 
 - `openCreationAsLender(key, creationTxHex)`, `openCreationAsBorrower(key, creationTxHex)`: open an
-  offer into an `OpenedOffer`.
+  offer into an `OpenedOffer`. Only terms of version 2, which carry the borrower's message, open;
+  any other version is `terms-invalid`.
 - `OpenedOffer` getters: `principalAsset`, `principalAmount`, `repaymentAmount`, `interestRateBps`,
   `loanExpirationTime`, `borrowerNft`, `lenderNft`, `borrowerPublicKey`, `lenderPublicKey`,
   `collateralAsset`, `collateralAmount`, `firstInput`.
@@ -94,13 +95,15 @@ Opening:
 
 Building and blinding:
 
-- `OfferTermsInput`, `NewOffer.build(...)`: validate terms and build an offer; `marker()`,
+- `OfferTermsInput`, `NewOffer.build(..., terms, message?)`: validate terms and build an offer,
+  with the borrower's message to the lender in the signed terms; `marker()`,
   `contractArguments()`, `pinned(role)`, `lenderPublicKey()`.
 - `NewOffer.collateralBlinding(outputIndex)`, `NewOffer.collateralBlindingKey()`: how and to which
   key to blind the creation's collateral output.
 - `issuedAssetId(outpoint, contractHash)`: the id of an asset before its issuing transaction exists.
-- `OpenedOffer.pinnedBlinding(role, outputIndex)`: how to blind a pinned output of acceptance or
-  repayment (`bad-input` for the pending collateral, which only creation blinds).
+- `OpenedOffer.pinnedBlinding(role, outputIndex, message?)`: how to blind a pinned output of
+  acceptance or repayment (`bad-input` for the pending collateral, which only creation blinds).
+  Only the principal takes a message, signed by the lender for `Acceptance` of this offer.
 - `OpenedOffer.inputSecret(role, inputIndex)`, `InputSecret` (`new`, `explicit`): the secrets of
   covenant and wallet inputs.
 - `blindPset(psetBase64, inputSecrets, blindings)`: blind a PSET.
@@ -116,20 +119,52 @@ Loans:
 
 - `OpenedOffer.loanState(key, acceptanceTxHex, installmentTxHexes)`: the `LoanState` after the
   acceptance and the installments, read with the lending key of the party that opened the offer.
-  Each installment must spend the previous loan output at input 1, hold the collateral after it
-  at output 1 and pay `A` at output 2. The scripts are the caller's to check, against
-  `activeOfferAt(state.debtHashAt(j))` in `web/src/simplicity/private-lending/scripts.ts`.
+  The acceptance must spend the creation's pending offer (output 3) at input 0 and hold the active
+  collateral at output 0. Each installment must spend the previous loan output at input 1, hold
+  the collateral after it at output 1 and pay `A` at output 2. The scripts are the caller's to
+  check, against `activeOfferAt(state.debtHashAt(j))` in
+  `web/src/simplicity/private-lending/scripts.ts`.
 - `LoanState` getters: `installmentCount`, `loanOutpoint`, `debtCommitment`, `debtHash`, `paid`
   (what opened for the party) and `remaining` (`undefined` unless every installment opened);
   `debtHashAt(j)` (0 the acceptance's loan output), `installment(j)` (from 1),
   `loanInputSecret(inputIndex)` and `collateral()`.
+- `installment(j)` is an `InstallmentInfo`: `outpoint`, `amount` and `message`, the borrower's
+  message read in the same rewind (`undefined` when it does not open or carries none,
+  `bad-input` when its field does not decode).
 - Borrower only, else `bad-input`: `planInstallment(amount, firstWalletInput,
-  nftReceiverScript)`, an `InstallmentPlan` (`debtWitness`, `successorDebtHash`, `installment`,
-  `successor`, `installmentBlinding(i)`, `successorBlinding(i)`) for an amount above 0 and below
-  the remaining debt; `repaymentBlinding(i)` while an amount is owed; `zeroDebtKey()` once none is.
+  nftReceiverScript, message?)`, an `InstallmentPlan` (`debtWitness`, `successorDebtHash`,
+  `ephemeralPublicKey`, the installment's nonce, `installment`, `successor`,
+  `installmentBlinding(i)`, `successorBlinding(i)`) for an amount above 0 and below the remaining
+  debt, the message signed for `Installment` of `installmentCount + 1`; `repaymentBlinding(i,
+  message?)` while an amount is owed, the message signed for `FullRepayment`; `zeroDebtKey()`
+  once none is.
 - Lender only, else `bad-input`: `sweep(closeTxHex, unspent)`, the `Sweep` (`outpoints()`,
   `amount`, `inputSecret(position, inputIndex)`) of the final claim after the full repayment or
   the zero-debt close, or of a liquidation when `closeTxHex` is `undefined`.
+
+Messages (the format and the limits are in the core's `message.rs`):
+
+- `signMessage(sender, creationTxid, phase, installment, text)`: a `SignedMessage` by the
+  sender's lending key for a `MessagePhase` (`Acceptance`, `Installment` with `installment` from
+  1, or `FullRepayment`) of the offer. `bad-input` for an empty text and for one over 3068 bytes
+  in UTF-8, naming both numbers; `NewOffer.build` allows 2915 at creation. The builders that take
+  a `SignedMessage` consume the handle and refuse one signed for another phase, another offer or
+  by the other party.
+- `OpenedOffer.message()`: the creation's text, covered by the terms' signature, `undefined` for
+  none. Terms whose message field does not decode do not open (`terms-invalid`).
+- `OpenedOffer.readMessage(key, creationTxid, txHex, outputIndex, phase)`: a `ReadMessage`
+  (`text`, `verified`) from an output that `key` rewinds with its nonce, checked against the
+  lender's key for `Acceptance` and the borrower's for `FullRepayment`; `undefined` when the
+  output does not rewind or carries none, `bad-input` when the field does not decode and for
+  `Installment`, which `LoanState.installment(j).message` reads.
+- A message that does not verify keeps its text: show it as unverified, since the other party
+  knows the output's blinders and can move a message between outputs.
+- `ReadMessage.text`, `OpenedOffer.message()` and `InstallmentInfo.message` give the text as it was
+  sent, control characters included: the caller removes them before showing it (`displayMessage`
+  in `web/src/privateLending/messages.ts`).
+- The testnet e2e (`web/README.md`) reads each message back the way the app does: the creation's
+  through `message()`, the acceptance's as the borrower and the full repayment's as the lender
+  through `readMessage`, and each installment's as both parties through `loanState`.
 
 LWK helpers:
 

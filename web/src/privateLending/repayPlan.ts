@@ -2,9 +2,13 @@
 // repayment, and what the app refuses. With the rule that keeps a rebuilt installment from reusing
 // the key of an earlier one that did not go through. Pure (no React, no app config), so tests
 // import it.
-import type { Lwk } from '@/lwk'
-import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
+import type { Transaction } from 'lwk_wasm'
+
+import { FINALIZED_THRESHOLD, type PrivateTxRecord } from '@/providers/pendingTransactions/types'
 import { INSTALLMENT_INPUT } from '@/simplicity/private-lending/layout'
+
+/** What the rules below need of LWK, which the app loads at run time (`getLwk`). */
+type LwkTransactions = { Transaction: typeof Transaction }
 
 /**
  * What the borrower's amount does: an installment below the remaining debt, the full repayment at
@@ -144,22 +148,73 @@ export function keepsDiscardTrace(record: Pick<PrivateTxRecord, 'kind'>): boolea
  * new build anyway, and a confirmed one spent the loan output, so neither costs a coin.
  */
 export function installmentTraceInputs(
-  lwk: Pick<Lwk, 'Transaction'>,
+  lwk: LwkTransactions,
   saved: readonly PrivateTxRecord[],
   loanOutpoint: string,
 ): Set<string> {
   const inputs = new Set<string>()
   for (const record of saved) {
     if (!keepsDiscardTrace(record)) continue
-    const tx = lwk.Transaction.fromString(record.txHex)
-    const outpointAt = (index: number) => {
-      const outpoint = tx.inputs[index]?.outpoint()
-      return outpoint && `${outpoint.txid().toString()}:${outpoint.vout()}`
-    }
-    const first = outpointAt(INSTALLMENT_INPUT.firstWalletCoin)
-    if (outpointAt(INSTALLMENT_INPUT.loan) === loanOutpoint && first !== undefined) {
-      inputs.add(first)
-    }
+    const { loan, firstWalletCoin } = installmentInputs(lwk, record)
+    if (loan === loanOutpoint && firstWalletCoin !== undefined) inputs.add(firstWalletCoin)
   }
   return inputs
+}
+
+/** The loan output (input 1) a saved installment spends, `"<txid>:<vout>"`. */
+export function installmentLoanOutpoint(
+  lwk: LwkTransactions,
+  record: Pick<PrivateTxRecord, 'txHex'>,
+): string | undefined {
+  return installmentInputs(lwk, record).loan
+}
+
+/** The loan output (input 1) and the first wallet input (input 2) a saved installment spends. */
+function installmentInputs(
+  lwk: LwkTransactions,
+  record: Pick<PrivateTxRecord, 'txHex'>,
+): { loan: string | undefined; firstWalletCoin: string | undefined } {
+  const tx = lwk.Transaction.fromString(record.txHex)
+  const outpointAt = (index: number) => {
+    const outpoint = tx.inputs[index]?.outpoint()
+    return outpoint && `${outpoint.txid().toString()}:${outpoint.vout()}`
+  }
+  return {
+    loan: outpointAt(INSTALLMENT_INPUT.loan),
+    firstWalletCoin: outpointAt(INSTALLMENT_INPUT.firstWalletCoin),
+  }
+}
+
+/**
+ * The installment traces that can go: the discarded or failed installments of `records` whose
+ * loan output was spent with at least `FINALIZED_THRESHOLD` confirmations, the depth at which the
+ * app forgets its own finalized transactions. `loanSpendDepth` gives the confirmations of the
+ * spend of a loan outpoint (`"<txid>:<vout>"`): `null` while it is unspent (or not known), 0 while
+ * the spend is in the mempool. A trace only keeps a rebuilt installment of the same loan output
+ * from its first wallet input, so it can go once no installment can spend that output any more. A
+ * spend in the mempool, or one less deep, can still drop, and the output be spent again.
+ */
+export function staleInstallmentRecords(
+  lwk: LwkTransactions,
+  records: readonly PrivateTxRecord[],
+  loanSpendDepth: (outpoint: string) => number | null,
+): PrivateTxRecord[] {
+  return records.filter(record => {
+    if (!isInstallmentTrace(record)) return false
+    const loan = installmentLoanOutpoint(lwk, record)
+    if (loan === undefined) return false
+    const depth = loanSpendDepth(loan)
+    return depth !== null && depth >= FINALIZED_THRESHOLD
+  })
+}
+
+/**
+ * Whether `record` is kept only as a trace: an installment discarded, or failed (its tracking
+ * timed out), which the pending-transactions sweep no longer tracks or forgets.
+ */
+export function isInstallmentTrace(record: PrivateTxRecord): boolean {
+  return (
+    keepsDiscardTrace(record) &&
+    (record.discardedAt !== undefined || record.confirmationStatus === 'failed')
+  )
 }

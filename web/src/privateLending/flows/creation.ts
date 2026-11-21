@@ -19,6 +19,7 @@ import { hexToBytes } from '@/utils/hex'
 import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from '../deps'
+import { checkedMessage } from '../messages'
 import { walletInputSecret } from '../secrets'
 import { openAndVerifyOffer, PrivateOfferError, type VerifiedOffer } from '../verify'
 import {
@@ -59,6 +60,11 @@ export interface CreationParams {
   loanExpirationTime: number
   /** Receives the borrower NFT, as an explicit output. */
   borrowerNftReceiver: Address
+  /**
+   * The borrower's private message to the lender, in the signed terms: at most
+   * `MESSAGE_LIMITS.creation` UTF-8 bytes. An empty or blank one is none.
+   */
+  message?: string
 }
 
 export interface CreationSummary {
@@ -106,6 +112,7 @@ export async function buildPrivateCreation(
   params: CreationParams,
 ): Promise<AsyncUpdatedPset<CreationSummary>> {
   const { lwk, wasm } = deps
+  const message = checkedMessage(params.message, 'creation')
   const coins = [params.firstInput, params.lenderNftCoin, ...params.collateralCoins]
   const outpoints = coins.map(outpointOf)
   const [firstInput, lenderNftInput] = outpoints
@@ -166,6 +173,7 @@ export async function buildPrivateCreation(
       deps.assets.collateral,
       params.collateralAmount,
       terms,
+      message,
     ),
   )
   // The offer holds the creation's ephemeral key. `finalize` needs nothing of it, so it is freed
@@ -333,6 +341,7 @@ export async function buildPrivateCreation(
           opened.principalAmount() !== params.principalAmount && 'principal',
           opened.repaymentAmount() !== params.repaymentAmount && 'repayment',
           opened.loanExpirationTime() !== params.loanExpirationTime && 'loan expiration',
+          opened.message() !== message && 'message',
         ].filter(Boolean)
       } finally {
         // The opened offer holds the offer's secrets, and nothing reads it after this check.

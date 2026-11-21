@@ -52,7 +52,7 @@ import { buildPrivateCancellation } from '@/privateLending/flows/cancellation'
 import { buildInstallmentClaim } from '@/privateLending/flows/claimInstallments'
 import { buildPrincipalClaim } from '@/privateLending/flows/claimPrincipal'
 import { buildFinalClaim, closedLoanOutpoint } from '@/privateLending/flows/claimRepayment'
-import { buildPrivateCreation } from '@/privateLending/flows/creation'
+import { buildPrivateCreation, type CreationParams } from '@/privateLending/flows/creation'
 import { buildPrivateInstallment } from '@/privateLending/flows/installment'
 import {
   buildPrivateLiquidation,
@@ -77,6 +77,7 @@ import {
   unitsToDecimal,
 } from '@/privateLending/lenderTerms'
 import { loadLoan, type Loan, PrincipalNotClaimedError } from '@/privateLending/loan'
+import { MESSAGE_LIMITS, messageBytes } from '@/privateLending/messages'
 import { checkAgainstTerms, proposalOfOffer } from '@/privateLending/proposalCheck'
 import { walletReceiver } from '@/privateLending/receiver'
 import {
@@ -352,6 +353,67 @@ async function resumeRecorded(ctx: Context, stage: string): Promise<boolean> {
 /** The days an e2e offer's borrower chose: its term by the term rule (`termBlocksOf`). */
 const OFFER_TERM_DAYS = 1
 
+// The private messages of the `create` loan, fixed so that a resumed run, which never builds a
+// recorded transaction again, still knows what each one must read back as. The other offers carry
+// none. The creation's is Cyrillic with an emoji, so its bytes are not its characters.
+const CREATION_MESSAGE = 'Привіт! Позика на один день 🙂\nThe e2e borrower'
+const ACCEPTANCE_MESSAGE = 'Accepted: the principal is yours to claim.\nThe e2e lender'
+const REPAYMENT_MESSAGE = 'The rest of the loan, repaid in full. Thank you!\nThe e2e borrower'
+
+/** The `create` loan's message with its `j`-th installment, from 1. */
+function installmentMessage(j: number): string {
+  return `Installment ${j}: a third of what the loan owes.\nThe e2e borrower`
+}
+
+/**
+ * A text of exactly `bytes` UTF-8 bytes: Cyrillic and an emoji repeated while they fit, then
+ * ASCII. An emoji is 4 bytes and a Cyrillic letter 2, so the text has fewer characters than bytes.
+ */
+function messageOfBytes(bytes: number): string {
+  const unit = 'Повідомлення 🙂 '
+  let text = unit.repeat(Math.floor(bytes / messageBytes(unit)))
+  text += '.'.repeat(bytes - messageBytes(text))
+  if (messageBytes(text) !== bytes) {
+    throw new Error(`a text of ${bytes} bytes has ${messageBytes(text)}`)
+  }
+  return text
+}
+
+/** A message as a stage prints it: quoted, newlines escaped, and cut after 60 characters. */
+function quoted(text: string | undefined): string {
+  if (text === undefined) return 'none'
+  const shown = JSON.stringify(text)
+  return shown.length > 62 ? `${shown.slice(0, 60)}…" (${messageBytes(text)} bytes)` : shown
+}
+
+/** What a message read from the chain must be: its text and whether its sender signed it. */
+type ReadBack = { text: string; verified: boolean } | undefined
+
+/** The text and the verdict of a `ReadMessage` from `read`, freed; undefined for none. */
+function readBack(read: () => wasm.ReadMessage | undefined): ReadBack {
+  const message = read()
+  try {
+    return message === undefined ? undefined : { text: message.text, verified: message.verified }
+  } finally {
+    message?.free()
+  }
+}
+
+/** Throws unless `actual` is `expected`, signed by its sender for its step when there is one. */
+function assertReadBack(what: string, actual: ReadBack, expected: string | undefined): void {
+  const wanted = expected === undefined ? 'no message' : `${quoted(expected)}, verified`
+  const ok =
+    expected === undefined ? actual === undefined : actual?.text === expected && actual.verified
+  if (!ok) {
+    const read =
+      actual === undefined
+        ? 'no message'
+        : `${quoted(actual.text)}${actual.verified ? '' : ', unverified'}`
+    throw new Error(`${what} reads ${read}, not ${wanted}`)
+  }
+  out(`  ok: ${what} reads ${wanted}`)
+}
+
 /** An e2e offer's loan expiration, from the tip it is built at, as the borrower's form sets it. */
 function offerExpiry(tip: number): number {
   return proposalExpiry(tip, OFFER_TERM_DAYS)
@@ -462,20 +524,130 @@ function assertDistinctOutputScripts(pset: lwk.Pset, what: string): void {
   }
 }
 
+/** A cursor over consensus-encoded bytes, which throws past their end. */
+class ByteReader {
+  private at = 0
+
+  constructor(private readonly bytes: Uint8Array) {}
+
+  get done(): boolean {
+    return this.at === this.bytes.length
+  }
+
+  take(length: number): Uint8Array {
+    if (this.at + length > this.bytes.length) throw new Error('the transaction ends early')
+    const taken = this.bytes.subarray(this.at, this.at + length)
+    this.at += length
+    return taken
+  }
+
+  u8(): number {
+    return this.take(1)[0]
+  }
+
+  u32(): number {
+    return new DataView(this.take(4).slice().buffer).getUint32(0, true)
+  }
+
+  /** A Bitcoin compact size. */
+  varInt(): number {
+    const first = this.u8()
+    if (first < 0xfd) return first
+    const view = new DataView(this.take(first === 0xfd ? 2 : first === 0xfe ? 4 : 8).slice().buffer)
+    if (first === 0xfd) return view.getUint16(0, true)
+    if (first === 0xfe) return view.getUint32(0, true)
+    return Number(view.getBigUint64(0, true))
+  }
+
+  /** A length-prefixed byte string. */
+  varBytes(): Uint8Array {
+    return this.take(this.varInt())
+  }
+
+  /** A confidential asset, value or nonce: its prefix and what follows, as rust-elements reads. */
+  confidential(
+    explicitLength: number,
+    committed: readonly number[],
+  ): 'null' | 'explicit' | 'committed' {
+    const prefix = this.u8()
+    if (prefix === 0) return 'null'
+    if (prefix === 1) {
+      this.take(explicitLength)
+      return 'explicit'
+    }
+    if (!committed.includes(prefix)) throw new Error(`a confidential prefix ${prefix}`)
+    this.take(32)
+    return 'committed'
+  }
+}
+
 /**
- * Builds a creation from the borrower to the lender twice from the same coins, and checks that
- * the rebuild is a fresh offer (Review Focus): new NFTs and a new output 3 nonce. Each build runs
- * the builder's layout asserts. Returns the second build; the first is never signed.
+ * The length of each output's range proof in `tx`, 0 for none, read from its consensus encoding
+ * (rust-elements' `Encodable for Transaction`), which LWK's JS API does not expose. Checks itself
+ * against `tx`: every byte read, the outputs' count and scripts, and no proof on an explicit
+ * output.
  */
-async function buildFreshCreation(
+function outputRangeProofLengths(tx: lwk.Transaction): number[] {
+  const reader = new ByteReader(tx.toBytes())
+  reader.u32() // version
+  const hasWitness = reader.u8() === 1
+  const inputs = reader.varInt()
+  for (let i = 0; i < inputs; i += 1) {
+    reader.take(32)
+    const vout = reader.u32()
+    reader.varBytes() // script sig
+    reader.u32() // sequence
+    // the issuance flag is the vout's top bit, except in a coinbase's all-ones vout
+    if (vout !== 0xffffffff && (vout & 0x80000000) !== 0) {
+      reader.take(64) // the blinding nonce and the entropy
+      reader.confidential(8, [0x08, 0x09]) // amount
+      reader.confidential(8, [0x08, 0x09]) // inflation keys
+    }
+  }
+  const scripts = tx.outputs.map(output => output.scriptPubkey().toString())
+  const count = reader.varInt()
+  if (count !== scripts.length) throw new Error(`the encoding has ${count} outputs`)
+  const explicit: boolean[] = []
+  for (let i = 0; i < count; i += 1) {
+    const asset = reader.confidential(32, [0x0a, 0x0b])
+    const value = reader.confidential(8, [0x08, 0x09])
+    reader.confidential(32, [0x02, 0x03]) // nonce
+    const script = Buffer.from(reader.varBytes()).toString('hex')
+    if (script !== scripts[i]) throw new Error(`output ${i}'s encoded script is not its script`)
+    explicit.push(asset === 'explicit' && value === 'explicit')
+  }
+  reader.u32() // lock time
+  const lengths = new Array<number>(count).fill(0)
+  if (hasWitness) {
+    for (let i = 0; i < inputs; i += 1) {
+      reader.varBytes() // amount range proof
+      reader.varBytes() // inflation keys range proof
+      // the script witness, then the peg-in witness
+      for (let part = 0; part < 2; part += 1) {
+        const items = reader.varInt()
+        for (let item = 0; item < items; item += 1) reader.varBytes()
+      }
+    }
+    for (let i = 0; i < count; i += 1) {
+      reader.varBytes() // surjection proof
+      lengths[i] = reader.varBytes().length
+      if (explicit[i] && lengths[i] !== 0) throw new Error(`explicit output ${i} has a range proof`)
+    }
+  }
+  if (!reader.done) throw new Error('the transaction has bytes after its witnesses')
+  return lengths
+}
+
+/** The parameters of a creation from the borrower to the lender, from the borrower's coins. */
+async function creationParams(
   ctx: Context,
   expiryAt: (tip: number) => number,
   borrowerNftReceiver: lwk.Address,
-): Promise<Awaited<ReturnType<typeof buildPrivateCreation>>> {
+  message: string | undefined,
+): Promise<CreationParams> {
   const { borrower, lender } = ctx.wallets
-  const deps = flowDeps(borrower, ctx.chain)
   const tip = await ctx.chain.tipHeight()
-  const params = {
+  return {
     borrower: borrower.lendingKey,
     lender: lender.lendingKey.xOnlyPublicKey(),
     ...creationCoins(borrower),
@@ -484,7 +656,24 @@ async function buildFreshCreation(
     repaymentAmount: REPAYMENT,
     loanExpirationTime: expiryAt(tip),
     borrowerNftReceiver,
+    ...(message === undefined ? {} : { message }),
   }
+}
+
+/**
+ * Builds a creation from the borrower to the lender, with `message` in its terms, twice from the
+ * same coins, and checks that the rebuild is a fresh offer (Review Focus): new NFTs and a new
+ * output 3 nonce. Each build runs the builder's layout asserts. Returns the second build; the first
+ * is never signed.
+ */
+async function buildFreshCreation(
+  ctx: Context,
+  expiryAt: (tip: number) => number,
+  borrowerNftReceiver: lwk.Address,
+  message: string | undefined,
+): Promise<Awaited<ReturnType<typeof buildPrivateCreation>>> {
+  const deps = flowDeps(ctx.wallets.borrower, ctx.chain)
+  const params = await creationParams(ctx, expiryAt, borrowerNftReceiver, message)
 
   const discarded = creationIdentity((await buildPrivateCreation(deps, params)).pset)
   const built = await buildPrivateCreation(deps, params)
@@ -499,6 +688,7 @@ async function buildFreshCreation(
   out(`  borrower NFT ${discarded.borrowerNft} | ${kept.borrowerNft}`)
   out(`  lender NFT   ${discarded.lenderNft} | ${kept.lenderNft}`)
   out(`  nonce        ${discarded.nonce} | ${kept.nonce}`)
+  out(`message ${quoted(message)}`)
   out('blinded creation PSET (second build):')
   describeOutputs(built.pset, kept)
   return built
@@ -526,7 +716,7 @@ function creationNftReceiver(ctx: Context, stage: CreationRecord): lwk.Address {
 
 /**
  * Builds (only without a record), saves and broadcasts a creation whose loan expires at
- * `expiryAt` of the tip; returns its txid.
+ * `expiryAt` of the tip, with the record's message (`CREATION_MESSAGES`); returns its txid.
  */
 async function submitCreation(
   ctx: Context,
@@ -537,7 +727,12 @@ async function submitCreation(
   let hex: string | undefined
   if (!getRecord(stage)) {
     requireStageNeed(ctx, need)
-    const built = await buildFreshCreation(ctx, expiryAt, creationNftReceiver(ctx, stage))
+    const built = await buildFreshCreation(
+      ctx,
+      expiryAt,
+      creationNftReceiver(ctx, stage),
+      CREATION_MESSAGES[stage],
+    )
     const { finalizedTx, summary } = await built.finalize(
       ctx.wallets.borrower.signer.sign(built.pset),
     )
@@ -557,8 +752,11 @@ async function submitCreation(
   return txid
 }
 
-/** The lender fetches the creation, verifies it through the gate and shows its terms. */
-async function lenderView(ctx: Context, txid: string): Promise<void> {
+/**
+ * The lender fetches the creation of the record `stage`, verifies it through the gate and shows its
+ * terms, with the record's message (`CREATION_MESSAGES`), which the terms' signature covers.
+ */
+async function lenderView(ctx: Context, stage: CreationRecord, txid: string): Promise<void> {
   const { borrower, lender } = ctx.wallets
   const creationTx = await ctx.chain.fetchTx(txid)
   const offer = await openAndVerifyOffer(
@@ -576,6 +774,7 @@ async function lenderView(ctx: Context, txid: string): Promise<void> {
     ['principal asset', opened.principalAsset(), TESTNET_ASSETS.principal],
     ['principal', opened.principalAmount(), PRINCIPAL],
     ['repayment', opened.repaymentAmount(), REPAYMENT],
+    ['message', opened.message(), CREATION_MESSAGES[stage]],
   ]
   for (const [label, actual, wanted] of expected) {
     if (actual !== wanted) throw new Error(`the lender sees ${label} ${actual}, not ${wanted}`)
@@ -591,11 +790,19 @@ async function lenderView(ctx: Context, txid: string): Promise<void> {
   out(`  offer        ${txid}:${CREATION_OUTPUT.pendingOffer}`)
   out(`  borrower NFT ${opened.borrowerNft()}`)
   out(`  lender NFT   ${opened.lenderNft()}`)
+  out(`  message      ${quoted(opened.message())} (${messageBytes(opened.message() ?? '')} bytes)`)
 }
 
 async function createStage(ctx: Context): Promise<void> {
   const txid = await submitCreation(ctx, 'create', 'create', offerExpiry)
-  await lenderView(ctx, txid)
+  await lenderView(ctx, 'create', txid)
+  // The creation's range proof opens from the borrower's seed too, so it rereads its message on
+  // any device.
+  const own = (await loadCreatedOffer(ctx, 'borrower')).opened.message()
+  if (own !== CREATION_MESSAGE) {
+    throw new Error(`the borrower reads its creation message as ${quoted(own)}`)
+  }
+  out(`the borrower reads its own message back from its seed: ${quoted(own)}`)
   await checkCreatedTerm(ctx, txid)
   out('\ncreate: ok')
 }
@@ -644,10 +851,66 @@ async function checkCreatedTerm(ctx: Context, txid: string): Promise<void> {
   out("the create proposal is within the e2e lender's terms")
 }
 
-/** A creation built twice and checked, but never signed, broadcast or saved. */
+/**
+ * The creation's range proof does not tell a message's length: built from the same coins with the
+ * longest message that fits, `MESSAGE_LIMITS.creation` bytes, and with none, the two output 3 range
+ * proofs have the same length, and the lender opens each with its message. One byte more is refused
+ * before anything is built. Nothing is signed.
+ */
+async function assertCreationHidesMessage(ctx: Context): Promise<void> {
+  const { borrower, lender } = ctx.wallets
+  const deps = flowDeps(borrower, ctx.chain)
+  const params = await creationParams(ctx, offerExpiry, walletReceiver(borrower), undefined)
+  const longest = messageOfBytes(MESSAGE_LIMITS.creation)
+  const over = `${longest}.`
+  const refusal = await buildPrivateCreation(deps, { ...params, message: over }).then(
+    () => new Error('the builder took a message one byte over the limit'),
+    (error: unknown) => error,
+  )
+  const overText = `${MESSAGE_LIMITS.creation + 1} bytes; at most ${MESSAGE_LIMITS.creation} fit`
+  if (!(refusal instanceof Error) || !refusal.message.includes(overText)) throw refusal
+  out(`a message of ${MESSAGE_LIMITS.creation + 1} bytes is refused: ${refusal.message}`)
+
+  const lengths: number[] = []
+  for (const message of [longest, undefined]) {
+    const built = await buildPrivateCreation(deps, { ...params, message })
+    const tx = built.pset.extractTx()
+    const length = outputRangeProofLengths(tx)[CREATION_OUTPUT.pendingOffer]
+    const opened = wasm.openCreationAsLender(lender.lendingKey, tx.toString())
+    try {
+      if (opened.message() !== message) {
+        throw new Error(`the lender opens ${quoted(opened.message())}, not ${quoted(message)}`)
+      }
+    } finally {
+      opened.free()
+    }
+    out(
+      `message of ${message === undefined ? 0 : messageBytes(message)} bytes ` +
+        `(${message === undefined ? 0 : [...message].length} characters): the lender opens it, ` +
+        `output 3's range proof is ${length} bytes`,
+    )
+    lengths.push(length)
+  }
+  // a range proof carries its 3136 bytes of extra data whatever the message
+  if (lengths[0] !== lengths[1] || lengths[0] <= 3136) {
+    throw new Error(`output 3's range proofs are ${lengths.join(' and ')} bytes long`)
+  }
+  out(`  ok: output 3's range proof is ${lengths[0]} bytes with the longest message and with none`)
+}
+
+/**
+ * A creation built twice with the `create` message and checked, then with the longest message and
+ * with none (`assertCreationHidesMessage`), but never signed, broadcast or saved.
+ */
 async function createDryStage(ctx: Context): Promise<void> {
   requireStageNeed(ctx, 'create')
-  await buildFreshCreation(ctx, offerExpiry, walletReceiver(ctx.wallets.borrower))
+  await buildFreshCreation(
+    ctx,
+    offerExpiry,
+    walletReceiver(ctx.wallets.borrower),
+    CREATION_MESSAGES.create,
+  )
+  await assertCreationHidesMessage(ctx)
   out('\ncreate-dry: ok (nothing signed, broadcast or saved)')
 }
 
@@ -660,6 +923,14 @@ const CREATION_STAGES = {
 } as const
 
 type CreationRecord = keyof typeof CREATION_STAGES
+
+/** The message of each creation: only the `create` offer carries one. */
+const CREATION_MESSAGES: Record<CreationRecord, string | undefined> = {
+  create: CREATION_MESSAGE,
+  'cancel-create': undefined,
+  'liquidate-create': undefined,
+  'short-proposal': undefined,
+}
 
 /**
  * The creations the `scan` stage finds: every one but `short-proposal`, which runs only when named
@@ -903,12 +1174,13 @@ const ACCEPTANCE_WEIGHTS: WeightedInput[] = [
 ]
 
 /**
- * The lender's acceptance of an offer: built, checked by the stage, signed and finalized (which
- * runs the covenants). The caller saves and broadcasts it, or not.
+ * The lender's acceptance of an offer, with `message` to the borrower: built, checked by the stage,
+ * signed and finalized (which runs the covenants). The caller saves and broadcasts it, or not.
  */
 async function buildSignedAcceptance(
   ctx: Context,
   offer: VerifiedOffer,
+  message: string | undefined,
 ): Promise<{ hex: string; txid: string }> {
   const { lender } = ctx.wallets
   const lenderNftReceiver = walletReceiver(lender)
@@ -921,7 +1193,10 @@ async function buildSignedAcceptance(
     principalCoins,
     feeCoins,
     lenderNftReceiver,
+    lendingKey: lender.lendingKey,
+    ...(message === undefined ? {} : { message }),
   })
+  out(`message ${quoted(message)}`)
   out('blinded acceptance PSET:')
   describeOutputs(built.pset, {
     borrowerNft: offer.opened.borrowerNft(),
@@ -941,20 +1216,27 @@ async function buildSignedAcceptance(
   return { hex: finalizedTx.toString(), txid: finalizedTx.txid().toString() }
 }
 
+/** The lender's message with each acceptance: only the `create` loan's carries one. */
+const ACCEPTANCE_MESSAGES = {
+  accept: ACCEPTANCE_MESSAGE,
+  'liquidate-accept': undefined,
+} as const satisfies Record<string, string | undefined>
+
 /**
- * The lender's acceptance of `offer` under the record `stage`: built only without a record, saved,
- * broadcast (then `afterBroadcast` runs) and confirmed, then checked on chain. Returns its txid.
+ * The lender's acceptance of `offer` under the record `stage`, with the record's message
+ * (`ACCEPTANCE_MESSAGES`): built only without a record, saved, broadcast (then `afterBroadcast`
+ * runs) and confirmed, then checked on chain. Returns its txid.
  */
 async function submitAcceptance(
   ctx: Context,
-  stage: 'accept' | 'liquidate-accept',
+  stage: keyof typeof ACCEPTANCE_MESSAGES,
   offer: VerifiedOffer,
   afterBroadcast?: (txid: string) => Promise<void>,
 ): Promise<string> {
   let hex: string | undefined
   if (!getRecord(stage)) {
     requireStageNeed(ctx, stage)
-    hex = (await buildSignedAcceptance(ctx, offer)).hex
+    hex = (await buildSignedAcceptance(ctx, offer, ACCEPTANCE_MESSAGES[stage])).hex
   }
   const txid = await submitStage(
     ctx.chain,
@@ -986,15 +1268,47 @@ async function submitAcceptance(
   return txid
 }
 
+/**
+ * The message of the confirmed acceptance `txid`, read from the chain: the borrower rewinds the
+ * principal (output 1) with its key and finds the lender's message, signed for this acceptance.
+ * The lender cannot read it back, as its nonce is random: it rereads its message only in the
+ * browser that sent it.
+ */
+async function checkAcceptanceMessage(ctx: Context, txid: string): Promise<void> {
+  const hex = (await ctx.chain.fetchTx(txid)).toString()
+  for (const role of NAMES) {
+    const { opened, creationTx } = await loadCreatedOffer(ctx, role)
+    const read = readBack(() =>
+      opened.readMessage(
+        ctx.wallets[role].lendingKey,
+        creationTx.txid().toString(),
+        hex,
+        ACCEPTANCE_OUTPUT.principal,
+        wasm.MessagePhase.Acceptance,
+      ),
+    )
+    assertReadBack(
+      `the ${role}'s read of the acceptance's output ${ACCEPTANCE_OUTPUT.principal}`,
+      read,
+      role === 'borrower' ? ACCEPTANCE_MESSAGES.accept : undefined,
+    )
+  }
+}
+
 async function acceptStage(ctx: Context): Promise<void> {
-  await submitAcceptance(ctx, 'accept', await loadCreatedOffer(ctx, 'lender'))
+  const txid = await submitAcceptance(ctx, 'accept', await loadCreatedOffer(ctx, 'lender'))
+  await checkAcceptanceMessage(ctx, txid)
   out('\naccept: ok')
 }
 
 /** An acceptance built, checked, signed and finalized, but never saved or broadcast. */
 async function acceptDryStage(ctx: Context): Promise<void> {
   requireStageNeed(ctx, 'accept')
-  const { txid } = await buildSignedAcceptance(ctx, await loadCreatedOffer(ctx, 'lender'))
+  const { txid } = await buildSignedAcceptance(
+    ctx,
+    await loadCreatedOffer(ctx, 'lender'),
+    ACCEPTANCE_MESSAGES.accept,
+  )
   out(`\naccept-dry: ok (${txid} finalized, not saved or broadcast)`)
 }
 
@@ -1345,13 +1659,24 @@ function assertInstallmentOutputs(
   }
 }
 
+/** The message of `state`'s `j`-th installment, as the loan's state reads it (`readBack`). */
+function installmentMessageOf(state: wasm.LoanState, j: number): ReadBack {
+  const info = state.installment(j)
+  try {
+    return readBack(() => info.message)
+  } finally {
+    info.free()
+  }
+}
+
 /**
  * Reads the loan again with the finalized installment `tx` after `loan`'s, as each party reads it
  * once it confirms: the borrower must rebuild its debt, rewinding the installment's range proof
  * with the key it derives, and the lender must open the installment's amount; the successor must
- * be at the loan's script of the debt left. Run before saving: the covenant does not check the
- * range proof's nonce, and an installment the borrower cannot rewind leaves a loan it can never
- * close.
+ * be at the loan's script of the debt left. Both must read the installment's message
+ * (`installmentMessage`), signed by the borrower for this installment. Run before saving: the
+ * covenant does not check the range proof's nonce, and an installment the borrower cannot rewind
+ * leaves a loan it can never close.
  */
 async function assertInstallmentReadsBack(
   ctx: Context,
@@ -1390,12 +1715,18 @@ async function assertInstallmentReadsBack(
       `  ok: the ${role} reads installment ${j} back from the chain: ${amount} paid, ` +
         `${state.remaining} owed, the loan at its debt's script`,
     )
+    assertReadBack(
+      `the ${role}'s read of installment ${j}`,
+      installmentMessageOf(state, j),
+      installmentMessage(j),
+    )
   }
 }
 
 /**
- * The borrower's installment of a third of what `loan` owes: built, checked by the stage, signed,
- * finalized (which runs the covenant) and read back by both parties.
+ * The borrower's installment of a third of what `loan` owes, with its message
+ * (`installmentMessage`): built, checked by the stage, signed, finalized (which runs the covenant)
+ * and read back by both parties.
  */
 async function buildSignedInstallment(
   ctx: Context,
@@ -1406,10 +1737,12 @@ async function buildSignedInstallment(
   const owed = loan.state.remaining
   if (owed === undefined) throw new Error('the borrower cannot read what the loan owes')
   const amount = owed / 3n
+  const message = installmentMessage(loan.state.installmentCount + 1)
   out(
     `the loan owes ${owed} of ${offer.opened.repaymentAmount()} after ` +
       `${loan.state.installmentCount} installments: paying ${amount}`,
   )
+  out(`message ${quoted(message)}`)
   const principalCoins = pickCoins(
     borrower,
     TESTNET_ASSETS.principal,
@@ -1426,6 +1759,8 @@ async function buildSignedInstallment(
     principalCoins,
     feeCoins,
     lendingKey: borrower.lendingKey,
+    tipHeight: await ctx.chain.tipHeight(),
+    message,
   })
   out('blinded installment PSET:')
   describeOutputs(built.pset, {
@@ -1447,7 +1782,8 @@ async function buildSignedInstallment(
 /**
  * Checks a confirmed installment, the `j`-th, on chain: the loan read from its output 1 has it as
  * its last installment, the borrower NFT is back at a borrower address and the borrower's TEST
- * balance fell by its amount (when `before` was read before building it).
+ * balance fell by its amount (when `before` was read before building it). Both parties read the
+ * message of each installment up to it from the chain.
  */
 async function checkConfirmedInstallment(
   ctx: Context,
@@ -1487,6 +1823,21 @@ async function checkConfirmedInstallment(
     out(`borrower TEST (confirmed): ${after}`)
   }
   await assertWitnessWeights(ctx, txid, INSTALLMENT_WEIGHTS)
+  for (const role of NAMES) {
+    const read = await loadE2eLoan(
+      ctx,
+      await loadCreatedOffer(ctx, role),
+      role,
+      `${txid}:${INSTALLMENT_OUTPUT.loan}`,
+    )
+    for (let i = 1; i <= j; i += 1) {
+      assertReadBack(
+        `the ${role}'s read of installment ${i} from the chain`,
+        installmentMessageOf(read.state, i),
+        installmentMessage(i),
+      )
+    }
+  }
 }
 
 /** The amount of the installment at `outpoint` (`"<txid>:2"`) as `loan` reads it, if it opened. */
@@ -1866,8 +2217,9 @@ const REPAYMENT_WEIGHTS: WeightedInput[] = [
 ]
 
 /**
- * The borrower's full repayment of what the `create` loan owes, its principal claimed: built,
- * checked by the stage, signed and finalized (which runs the covenant).
+ * The borrower's full repayment of what the `create` loan owes, its principal claimed, with its
+ * message (`REPAYMENT_MESSAGE`): built, checked by the stage, signed and finalized (which runs the
+ * covenant).
  */
 async function buildSignedRepayment(
   ctx: Context,
@@ -1888,7 +2240,10 @@ async function buildSignedRepayment(
     principalCoins,
     feeCoins,
     collateralReceiver,
+    lendingKey: borrower.lendingKey,
+    message: REPAYMENT_MESSAGE,
   })
+  out(`message ${quoted(REPAYMENT_MESSAGE)}`)
   out('blinded repayment PSET:')
   describeOutputs(built.pset, {
     borrowerNft: offer.opened.borrowerNft(),
@@ -1997,7 +2352,34 @@ async function repayStage(ctx: Context): Promise<void> {
     out(`borrower TEST (confirmed): ${after}`)
   }
   await assertWitnessWeights(ctx, txid, REPAYMENT_WEIGHTS)
+  await checkRepaymentMessage(ctx, repayTx)
   out('\nrepay: ok')
+}
+
+/**
+ * The message of the confirmed full repayment `repayTx`, read from the chain: the lender rewinds
+ * the repayment (output 1) with its key and finds the borrower's message, signed for the full
+ * repayment. The borrower cannot read it back, as its nonce is random: it rereads its message only
+ * in the browser that sent it.
+ */
+async function checkRepaymentMessage(ctx: Context, repayTx: lwk.Transaction): Promise<void> {
+  for (const role of NAMES) {
+    const { opened, creationTx } = await loadCreatedOffer(ctx, role)
+    const read = readBack(() =>
+      opened.readMessage(
+        ctx.wallets[role].lendingKey,
+        creationTx.txid().toString(),
+        repayTx.toString(),
+        REPAYMENT_OUTPUT.repayment,
+        wasm.MessagePhase.FullRepayment,
+      ),
+    )
+    assertReadBack(
+      `the ${role}'s read of the repayment's output ${REPAYMENT_OUTPUT.repayment}`,
+      read,
+      role === 'lender' ? REPAYMENT_MESSAGE : undefined,
+    )
+  }
 }
 
 /** A repayment built, checked, signed and finalized, but never saved or broadcast. */
@@ -2102,6 +2484,7 @@ async function repayHostileDryStage(ctx: Context): Promise<void> {
       principalCoins,
       feeCoins,
       collateralReceiver,
+      lendingKey: borrower.lendingKey,
     }).then(
       () => new Error('the builder returned a PSET despite stopAtBuild'),
       (error: unknown) => error,
@@ -2447,7 +2830,7 @@ async function buildSignedCancellation(
 async function cancelStage(ctx: Context): Promise<void> {
   const { borrower } = ctx.wallets
   const creationTxid = await submitCreation(ctx, 'cancel-create', 'cancel-create', offerExpiry)
-  await lenderView(ctx, creationTxid)
+  await lenderView(ctx, 'cancel-create', creationTxid)
   const offer = await loadOffer(ctx, 'cancel-create', 'borrower')
 
   let hex: string | undefined
@@ -2720,7 +3103,7 @@ async function liquidateStage(ctx: Context): Promise<void> {
     'liquidate-create',
     tip => tip + LIQUIDATION_EXPIRY_BLOCKS,
   )
-  await lenderView(ctx, creationTxid)
+  await lenderView(ctx, 'liquidate-create', creationTxid)
   const offer = await loadOffer(ctx, 'liquidate-create', 'lender')
   const expiry = offer.opened.loanExpirationTime()
 
@@ -2875,7 +3258,7 @@ async function shortProposalStage(ctx: Context): Promise<void> {
     'short-proposal',
     tip => tip + SHORT_PROPOSAL_BLOCKS,
   )
-  await lenderView(ctx, txid)
+  await lenderView(ctx, 'short-proposal', txid)
   const offer = await loadOffer(ctx, 'short-proposal', 'lender')
   const { blockHeight } = await ctx.chain.fetchTimelock(txid)
   if (blockHeight === null) throw new Error(`the creation ${txid} is not confirmed`)

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
+import { FINALIZED_THRESHOLD, type PrivateTxRecord } from '@/providers/pendingTransactions/types'
 import { lwk } from '@/test/lwk'
 
 import {
@@ -10,6 +10,7 @@ import {
   keepsDiscardTrace,
   repayBroadcast,
   repayPlan,
+  staleInstallmentRecords,
 } from './repayPlan'
 
 const EXPIRY = 3_000_000
@@ -184,5 +185,58 @@ describe('an earlier installment of the loan', () => {
       discardedAt: undefined,
     }
     expect(installmentTraceInputs(lwk, [failed], LOAN)).toEqual(new Set([firstCoin]))
+  })
+})
+
+describe('the traces a finalized spend of their loan output makes stale', () => {
+  const nft = `${'01'.repeat(32)}:0`
+  const coinOf = (n: number) => `${n.toString(16).padStart(2, '0').repeat(32)}:0`
+  const failed = (loan: string, n: number): PrivateTxRecord => ({
+    ...record('private_installment', [nft, loan, coinOf(n)]),
+    broadcastStatus: 'broadcast',
+    confirmationStatus: 'failed',
+    discardedAt: undefined,
+  })
+  const loans = {
+    unspent: `${'a1'.repeat(32)}:1`,
+    mempool: `${'a2'.repeat(32)}:1`,
+    short: `${'a3'.repeat(32)}:1`,
+    finalized: `${'a4'.repeat(32)}:1`,
+    deeper: `${'a5'.repeat(32)}:1`,
+  }
+  const depths = new Map<string, number | null>([
+    [loans.unspent, null],
+    [loans.mempool, 0],
+    [loans.short, FINALIZED_THRESHOLD - 1],
+    [loans.finalized, FINALIZED_THRESHOLD],
+    [loans.deeper, FINALIZED_THRESHOLD + 100],
+  ])
+  const depthOf = (outpoint: string) => depths.get(outpoint) ?? null
+
+  // A spend in the mempool, or one block short of the finalized depth, can still drop: the loan
+  // output could then be spent by a rebuilt installment, whose first input the trace keeps out.
+  it('keeps a failed installment until the spend of its loan output is finalized', () => {
+    const records = [
+      failed(loans.unspent, 1),
+      failed(loans.mempool, 2),
+      failed(loans.short, 3),
+      failed(loans.finalized, 4),
+    ]
+    expect(staleInstallmentRecords(lwk, records, depthOf)).toEqual([records[3]])
+  })
+
+  it('returns a discarded installment, and no installment still tracked or other kind', () => {
+    const discarded = record('private_installment', [nft, loans.deeper, coinOf(5)])
+    const tracked: PrivateTxRecord = {
+      ...record('private_installment', [nft, loans.deeper, coinOf(6)]),
+      discardedAt: undefined,
+    }
+    const repayment: PrivateTxRecord = {
+      ...record('private_repay_offer', [nft, loans.deeper, coinOf(7)]),
+      confirmationStatus: 'failed',
+    }
+    expect(staleInstallmentRecords(lwk, [discarded, tracked, repayment], depthOf)).toEqual([
+      discarded,
+    ])
   })
 })

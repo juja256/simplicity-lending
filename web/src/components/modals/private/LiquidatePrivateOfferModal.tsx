@@ -36,13 +36,18 @@ export default function LiquidatePrivateOfferModal(props: PrivateOfferActionModa
   const { data: tipHeight } = useBlockHeight()
   const { formatCollateralDisplay } = useFormatAmount()
   const isExpired = isPastExpiry(terms, tipHeight)
+  const notYet =
+    `The loan expires at block #${terms.loanExpirationTime}. It can be liquidated once the ` +
+    'chain is past it.'
 
   // `utxo` is the unspent loan output. The outpoints come from the indexer, read again now:
   // `loadLoan` walks the loan back on chain to this offer's acceptance, the lender NFT is found by
-  // walking forward from it, and the builder checks the rest on chain. It also refuses, before
-  // building, while the tip is below the expiry.
+  // walking forward from it, and the builder checks the rest on chain. A tip below the expiry is
+  // refused first, before the loan is read, so that a failed read cannot hide why; the builder
+  // refuses it too.
   const build = async ({ deps, offer, candidate, utxo }: FreshOffer) => {
     const currentTip = await fetchLatestBlockHeight()
+    if (currentTip < terms.loanExpirationTime) throw new Error(notYet)
     const loan = await loadLoan(deps, offer, await getLendingKey(), utxoOutpoint(utxo))
     const unspentInstallments = candidate.utxos
       .filter(installment => installment.utxo_type === 'installment')
@@ -87,14 +92,7 @@ export default function LiquidatePrivateOfferModal(props: PrivateOfferActionModa
       eyebrow='Liquidate private offer'
       summary={summary}
       disabled={!isExpired}
-      notice={
-        !isExpired && (
-          <Notice>
-            The loan expires at block #{terms.loanExpirationTime}. It can be liquidated once the
-            chain is past it.
-          </Notice>
-        )
-      }
+      notice={!isExpired && <Notice>{notYet}</Notice>}
       build={build}
     />
   )

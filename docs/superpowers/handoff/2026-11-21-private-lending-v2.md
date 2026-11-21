@@ -1,28 +1,108 @@
 # Private lending v2: session handoff (2026-11-21)
 
-Read this file first. It covers v2 phase 5, verified, reviewed and merged, and what comes after.
-It replaces `2026-11-16-private-lending-v2.md` for everything but the environment notes, which
-that file still holds (both machines) and this one only extends. The binding design is the spec,
+Read this file first. It covers v2 phases 5 and 6: both built, verified and reviewed; phase 5 is
+merged into `v2/main`, phase 6 waits for the user's go-ahead to merge. Every v2 phase is then
+done (phase 7 is postponed), and what remains is the user's final manual checks. This file
+replaces `2026-11-16-private-lending-v2.md` for everything but the environment notes, which that
+file still holds (both machines) and this one only extends. The binding design is the spec,
 `docs/superpowers/specs/2026-11-06-private-lending-v2-design.md`; the plan is
-`docs/superpowers/plans/2026-11-12-private-lending-v2.md` (phase 6 starts at "Phase 6: Private
-messages").
+`docs/superpowers/plans/2026-11-12-private-lending-v2.md`.
 
 ## Where things stand
 
-- **Branches.** `v2/main` has phases 1 to 5 merged: phase 5 came in with `git merge --no-ff
-  v2/phase-5-contract` on 2026-11-21, pushed to the user's fork. Phase 6 branches from there as
-  `v2/phase-6-messages`.
-- **Phase 5 is done: tasks 1 to 12, the phase review and its fix wave.** Tasks 1 to 12 ran on
-  the user's Linux machine (`d79f78d..8a185f2`); `docs: v2 phase 5 verified` records task 12's
-  checks. Phase 5's task ledger stayed on that machine: its rulings are in the plan's "Decided at
-  phase start" list and in the task commits, not in the Mac's `.superpowers/sdd` ledger.
-- **The phase review** (2026-11-21, on the Mac) ran as two Opus reviewers, as the diff was about
-  830 KB: one on the contract, the core and the wasm, one on the web, the e2e, the indexer and the
-  docs, each reading the other side's mirror of the contract. The contract half found nothing to
-  fix (four minors). The web half found three important issues, below, and eight minors.
-- **The fix wave** `3b11015..45cb93b` (four commits) took the three important issues; a scoped
-  Opus re-review found all three addressed and nothing new above minor.
+- **Branches.** `v2/main` has phases 1 to 5 merged (phase 5 with `0f8dd34`). Phase 6 is on
+  `v2/phase-6-messages`, pushed to the user's fork, ending with the review's fix wave
+  (`ae7d73b..26a8677`) and this handoff.
+- **Phase 6 is done: tasks 1 to 9, the whole-branch review and its fix wave**, run on the Mac
+  subagent-driven (one implementer and one reviewer per task; the ledger is the Mac's
+  `.superpowers/sdd/2026-11-12-private-lending-v2/progress.md`, from "## Phase 6"). `docs: v2
+  phase 6 verified` (`fb9bee2`) records task 9's checks; after the fix wave the web checks (214
+  tests, lint, build, parity, tsc on three configs), clippy and fmt were run again on the final
+  head and pass. The e2e and the demo were not run again after the fix wave (it touched only the
+  sent-message store, UI wording, the read-back's check order and the nonce check's source).
+- **Phase 5's open item is closed:** `docker compose build` (root: api, indexer, migrate; and the
+  deployment web image, which builds the wasm with `k256`) passed on the Mac on 2026-11-21, and
+  again in phase 6's task 9.
 - **Partial repayment:** item 3(a) is in. Phase 7 (item 3(b)) waits until the user brings it back.
+
+## Phase 6: private messages (spec item 6)
+
+**What it built.** Messages between borrower and lender ride in range proofs: the creation's
+inside the borrower-signed terms (terms version 2), the acceptance's in the principal output, each
+installment's in its installment output and the full repayment's in the repayment output. Signed
+messages are BIP340 signatures by the sender's lending key over
+`tagged_hash("simplicity-lending/private/v2/message", phase ‖ offer id ‖ field)`, the phase binding
+the installment's number. Limits: 2915 bytes at creation, 3068 signed. The web adds a message
+field with a UTF-8 byte counter to the proposal, acceptance and repay forms, an IndexedDB store of
+sent messages (its own database, `simplicity-lending:sent-messages`, written before the first
+broadcast within 3 s, never holding up a payment), the borrower's message in the proposal review,
+and a "Messages (n)" timeline per loan in the loan book and My loans. Tasks 1 and 2 took phase 5's
+review minors (borrower error wording, one term boundary, the installment's term guard, a
+stale-trace cleanup that waits for a finalized spend, the loan read retrying, the liquidation's
+expiry check first; witness vectors for the installment and the zero-debt close; the wasm anchoring
+the acceptance to the creation; the installment's nonce checked before signing).
+
+**Verification (task 9, `fb9bee2`).** Rust 263 tests and 61 regtest tests, clippy, fmt, the sqlx
+prepare check; web 201 tests (214 after the fix wave), parity 304 checks, check:config 48; all 20
+e2e stages from an empty state on testnet (blocks 2715260 to 2715273), every message read back by
+the party that should read it, the creation's range proof 4174 bytes with a 2915-byte message and
+without; the demo; both compose builds; the docs build.
+
+**The whole-branch review** (Opus) found nothing critical or important. Its fix wave took the two
+doc items it asked for before merge (the creation message's exception in the guide and
+`protocol.md`; phase 6's items 5 to 7 in the plan's "Final manual checks") and, since phase 6 is
+v2's last phase, the cheap minors: the sent-message store moved off the scan key-value store
+(which a second tab could overwrite) into its own awaited database; the proposal message capped in
+height, and a placeholder for a message with no visible text; the repay note worded per kind; a
+lone surrogate refused; the read-back checking the amount before the message; the hand-written
+transaction parser replaced by the wasm's `inspectPset`; the read error kept on screen across
+retries; three doc comments. Its re-review found one new important issue, an unbounded
+sent-message write that could hold up a payment, fixed in `26a8677` (a 3 s bound, and the
+database's blocked, blocking and terminated cases).
+
+**Rulings made for the user in phase 6.** Each: what was decided, and what it costs if wrong.
+
+- The Jade is not involved: messages are signed by the lending key, which the browser derives
+  from the descriptor for Jade wallets too. Cost: none.
+- The acceptance's message rides on the principal output only (the spec's table also named the
+  active collateral). Cost: the borrower reads it only while the principal's transaction can be
+  fetched, which is always.
+- The signed phase binds the installment's number, so the lender, who can remake a proof, cannot
+  move a borrower's message to another installment. Cost: none.
+- Sent messages are kept in IndexedDB, plaintext on the device after a disconnect, like the saved
+  transactions (the spec said "as the terms are now", memory only, which would lose them on
+  reload). A message the wallet sent from another browser does not show, and the timeline says so.
+  Cost: plaintext at rest in the browser profile.
+- A malformed creation message (only a borrower building outside the app can make one) fails the
+  whole proposal, which the lender then does not see; the borrower can cancel. Cost: such a
+  proposal is invisible rather than shown with an unreadable note.
+- The message display also removes DEL, tab and CR (only the newline is kept). Cost: tabs show as
+  nothing.
+- A refused or unreadable installment message never touches the debt: the wasm reads it after
+  computing the debt, and the web shows it as unreadable. `readMessage` refuses installments
+  (they are read through the loan's state, where the number is known).
+- The proposal message sits at the top of the review's notice, below the amounts, and is hidden
+  while a saved acceptance is shown. Cost: the lender's rebroadcast view omits it.
+- The fix wave took the "can wait" minors (above) rather than carrying them nowhere, and its
+  residual important issue was fixed in one more small round rather than left for the user.
+
+**Left for later** (each judged "can wait" by the review; none blocks v2):
+
+- Tests not written: the provider's daily stale-trace gate and `loanSpendDepths` (every fallback
+  keeps the trace, the safe direction); `readMessage`'s unreadable path; the debt compared in the
+  unreadable-installment test; the builders' lender-key check; a hook test of the lender reading
+  the full repayment's message (manual check 6); a `MessageTimeline` component test.
+- Stale-trace removals run one after another, and one failure leaves the rest for the next day.
+- Each loan row repeats the offer's verification for the repayment message, and mounts its closed
+  timeline's hooks.
+- `useReadError` keeps a shown error across a change of query key, and while a query is disabled
+  (cosmetic).
+- `MessageError::Malformed` cannot occur in `SignedMessage::decode` (documented).
+- The phase 6 task text in the plan still names the sent store's first API (`kvSentMessages`); the
+  code moved to its own database in the fix wave.
+
+The sections from "What phase 5 built" to "Declined by the reviewers" below are phase 5's, kept
+as history.
 
 ## Rules the user set
 
@@ -148,15 +228,9 @@ signature proves a put, not the key's latest.
 
 ## Next steps, in order (each on the user's go-ahead)
 
-1. **Phase 6** (private messages, spec item 6): branch `v2/phase-6-messages` from `v2/main`.
-   Two questions open it, before the plan's section is broken into tasks with the writing-plans
-   skill: how a Jade handles the sighash the message signatures rely on, and the "proposed,
-   confirm at phase start" rule that senders do not reread their acceptance or repayment
-   messages on another device. Phase 5 made the installment's key deterministic, so an
-   installment's message could be reread by its sender; the acceptance's still could not.
-   Task 1 takes the items carried above.
-2. **Final manual checks** by the user after phase 6 is merged into `v2/main`, and
-   `docker compose build`.
+1. **Merge phase 6** into `v2/main` (`git merge --no-ff v2/phase-6-messages`) and push.
+2. **Final manual checks** by the user, the plan's "Final manual checks" items 1 to 7, in `pnpm
+   dev` on testnet; then `v2` may be proposed for `main`.
 
 ## Environment (the user's Mac), additions to the 2026-11-16 handoff
 
@@ -167,5 +241,9 @@ signature proves a put, not the key's latest.
   so it finds `configuration/`. Something already listens on port 8000; the fix wave's indexer
   API used 8001 (`APPLICATION__PORT=8001`, and `VITE_API_URL=http://localhost:8001
   VITE_ESPLORA_BASE_URL=https://liquid.network/liquidtestnet` for the e2e).
-- Databases added: `lending-indexer-phase5-fix` (free to drop).
-- The e2e state from before phase 5 is `web/.e2e-private/state.pre-p5-mac.json`; keep it.
+- Databases added: `lending-indexer-phase5-fix`, `lending-indexer-p6t8`,
+  `lending-indexer-p6t8-demo{,2,3}`, `lending-indexer-p6t9` and `lending-indexer-p6t9-demo` (all
+  free to drop).
+- Old e2e states beside `web/.e2e-private/state.json`: `state.pre-p5-mac.json`,
+  `state.p5fix-mac.json`, `state.p6t8.json`; keep them. Demo outputs of phase 6's task 8 are in
+  `web/.e2e-private/demo-output.p6t8-run{1,2}` (run 2 is the stalled one).

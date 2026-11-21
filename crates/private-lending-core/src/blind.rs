@@ -337,7 +337,10 @@ mod tests {
     use rand::thread_rng;
 
     use super::*;
-    use crate::{LendingKey, OfferSecrets, lift_lending_key};
+    use crate::{
+        LendingKey, MAX_SIGNED_MESSAGE_BYTES, MESSAGE_ROOM, Message, MessagePhase, OfferSecrets,
+        SignedMessage, lift_lending_key,
+    };
 
     fn asset(byte: u8) -> AssetId {
         AssetId::from_slice(&[byte; 32]).unwrap()
@@ -613,6 +616,79 @@ mod tests {
 
         assert!(matches!(result, Err(BlindPsetError::DuplicateOutput(0))));
         assert_eq!(pset, unblinded);
+    }
+
+    /// The range proof of `pinned`, blinded to the lender with `extra_data`, and the data it
+    /// rewinds to.
+    fn pinned_range_proof(pinned: PinnedOutput, extra_data: Vec<u8>) -> (usize, Vec<u8>) {
+        let lender = lender();
+        let e = SecretKey::from_slice(&[3; 32]).unwrap();
+        let coin = explicit_coin(policy_asset(), 100_000);
+        let (mut pset, input_secrets) = pset(
+            std::slice::from_ref(&coin),
+            vec![
+                blinded_output(
+                    script(1),
+                    pinned.amount,
+                    pinned.asset_id,
+                    lift_lending_key(&lender.x_only_public_key()),
+                ),
+                blinded_output(script(2), 39_500, policy_asset(), change_blinding_key()),
+                fee_output(500),
+            ],
+        );
+        let blinding = PinnedBlinding {
+            output_index: 0,
+            pinned,
+            ephemeral_sk: Some(e),
+            extra_data,
+        };
+
+        blind_pset(&mut pset, &input_secrets, &[blinding], &mut thread_rng()).unwrap();
+        let tx = pset.extract_tx().unwrap();
+        let nonce = PublicKey::from_secret_key(SECP256K1, &e);
+        let shared_secret = OfferSecrets::for_lender(&lender, &nonce).shared_secret();
+        let (_, rewound) = rewind(&tx.output[0], shared_secret).unwrap();
+        let size = tx.output[0]
+            .witness
+            .rangeproof
+            .as_ref()
+            .unwrap()
+            .serialize()
+            .len();
+
+        (size, rewound)
+    }
+
+    #[test]
+    fn range_proof_size_does_not_show_a_message() {
+        let pinned = random_pinned(policy_asset(), 60_000);
+        let offer_id = Txid::from_byte_array([7; 32]);
+        let sign = |text: &str| {
+            let message = Message::text(text).unwrap();
+            SignedMessage::sign(message, &lender(), MessagePhase::Acceptance, &offer_id).unwrap()
+        };
+        let short = sign("hello");
+        // non-zero bytes to the last, so the extra data fills the whole room
+        let longest = sign(&"z".repeat(MAX_SIGNED_MESSAGE_BYTES));
+        assert_eq!(longest.encode().len(), MESSAGE_ROOM);
+
+        let (none_size, none_data) = pinned_range_proof(pinned, Vec::new());
+        let (short_size, short_data) = pinned_range_proof(pinned, short.encode());
+        let (longest_size, longest_data) = pinned_range_proof(pinned, longest.encode());
+
+        assert_eq!(short_size, none_size);
+        assert_eq!(longest_size, none_size);
+
+        // each rewinds to its message, padded with zeros to the end of the proof's buffer
+        assert!(none_data.len() >= MESSAGE_ROOM);
+        assert_eq!(short_data.len(), none_data.len());
+        assert_eq!(longest_data.len(), none_data.len());
+        assert!(none_data.iter().all(|byte| *byte == 0));
+        assert!(longest_data[MESSAGE_ROOM..].iter().all(|byte| *byte == 0));
+        assert_eq!(SignedMessage::decode(&none_data), Ok(None));
+        assert_eq!(SignedMessage::decode(&short_data), Ok(Some(short)));
+        assert_eq!(SignedMessage::decode(&longest_data), Ok(Some(longest)));
     }
 
     #[test]

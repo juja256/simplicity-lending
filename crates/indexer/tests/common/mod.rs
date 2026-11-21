@@ -131,6 +131,7 @@ pub fn private_creation(
             borrower_nft,
             lender_nft,
         },
+        None,
     )
     .expect("valid offer");
 

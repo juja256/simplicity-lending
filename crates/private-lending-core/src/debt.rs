@@ -275,7 +275,21 @@ pub fn open_installment(
     shared_secret: SecretKey,
     repayment: &PinnedOutput,
 ) -> Result<DebtOpening, InstallmentError> {
-    let (secrets, _) = rewind(txout, shared_secret).map_err(InstallmentError::Rewind)?;
+    open_installment_with_extra_data(txout, shared_secret, repayment).map(|(opening, _)| opening)
+}
+
+/// [`open_installment`], which also returns the extra data of the range proof's message, padded
+/// with zeros: the borrower's message, read in the same rewind that opens the amount (see
+/// [`SignedMessage::decode`](crate::SignedMessage::decode)).
+///
+/// # Errors
+/// As [`open_installment`].
+pub fn open_installment_with_extra_data(
+    txout: &TxOut,
+    shared_secret: SecretKey,
+    repayment: &PinnedOutput,
+) -> Result<(DebtOpening, Vec<u8>), InstallmentError> {
+    let (secrets, extra_data) = rewind(txout, shared_secret).map_err(InstallmentError::Rewind)?;
     if secrets.asset != repayment.asset_id || secrets.asset_bf != repayment.asset_blinding_factor {
         return Err(InstallmentError::OtherAsset);
     }
@@ -290,7 +304,7 @@ pub fn open_installment(
         return Err(InstallmentError::CommitmentMismatch);
     }
 
-    Ok(opening)
+    Ok((opening, extra_data))
 }
 
 /// The curve point of a value commitment.

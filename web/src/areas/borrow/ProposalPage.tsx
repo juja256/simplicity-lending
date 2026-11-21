@@ -3,6 +3,7 @@ import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 
 import { useBlockHeight } from '@/api/esplora/hooks'
 import KeyFingerprint from '@/components/KeyFingerprint'
+import MessageField from '@/components/MessageField'
 import CreatePrivateOfferModal, {
   type PrivateOfferDraft,
 } from '@/components/modals/private/CreatePrivateOfferModal'
@@ -130,8 +131,12 @@ function ProposalFormView({ lender, wasm }: ProposalFormViewProps) {
   const [openedAt] = useState(() => Date.now())
 
   const [state, setState] = useState(() => openProposalForm(wasm, lender.pair, PAIR))
+  const [message, setMessage] = useState('')
   const { form } = state
+  // The page shows what the fields make; the message field shows its own error, and a message
+  // that does not fit leaves nothing to send.
   const { proposal, errors } = proposalOfForm(wasm, lender.pair, PAIR, form)
+  const toSend = proposalOfForm(wasm, lender.pair, PAIR, form, message).proposal
   const hints = fieldHints(lender, wasm, form.principal)
 
   // Advisory only: the build syncs the wallet and picks the coins again.
@@ -146,25 +151,22 @@ function ProposalFormView({ lender, wasm }: ProposalFormViewProps) {
   )
 
   const canSend =
-    proposal !== null &&
-    tipHeight > 0 &&
-    !hasUnsentCreation &&
-    !coinsLoading &&
-    coinProblem === null
+    toSend !== null && tipHeight > 0 && !hasUnsentCreation && !coinsLoading && coinProblem === null
   // Why sending waits, when no other notice on the page says why.
   const loadingNote =
     tipHeight === 0 ? 'Loading the chain tip…' : coinsLoading ? 'Loading your coins…' : null
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
-    if (!canSend || proposal === null) return
+    if (!canSend || toSend === null) return
     open({
       lender: { pubkey: lender.pubkey, fingerprint: lender.fingerprint, name: lender.name },
-      collateralAmount: proposal.collateral,
-      principalAmount: proposal.principal,
-      repaymentAmount: proposal.repayment,
-      termDays: proposal.days,
-      loanExpirationTime: proposalExpiry(tipHeight, proposal.days),
+      collateralAmount: toSend.collateral,
+      principalAmount: toSend.principal,
+      repaymentAmount: toSend.repayment,
+      termDays: toSend.days,
+      loanExpirationTime: proposalExpiry(tipHeight, toSend.days),
+      ...(toSend.message === undefined ? {} : { message: toSend.message }),
     })
   }
 
@@ -218,6 +220,17 @@ function ProposalFormView({ lender, wasm }: ProposalFormViewProps) {
           </dl>
           <p className='text-muted text-xs'>
             The principal with the interest at your APR over the term.
+          </p>
+        </section>
+
+        <section aria-labelledby='proposal-message' className='flex flex-col gap-2'>
+          <h2 id='proposal-message' className='text-foreground text-sm font-semibold'>
+            Message
+          </h2>
+          <MessageField channel='creation' value={message} onChange={setMessage} />
+          <p className='text-muted text-xs'>
+            Only you and <bdi>{lender.name}</bdi> can read it. It is not part of the loan&apos;s
+            terms, and nothing enforces it.
           </p>
         </section>
 

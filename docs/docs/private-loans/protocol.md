@@ -28,6 +28,7 @@ public candidates and transaction data, rather than plaintext loan terms.
 | State transitions, spends, and role-token movements | Publicly observable. |
 | Expiry height | Hidden until a liquidation: the contract holds only its salted hash, and the liquidation reveals the height in its witness and lock time. |
 | Installment amounts and the debt left | Confidential on-chain; the borrower and the lender open them. Each installment is a public transaction of the loan. |
+| Private messages | Confidential on-chain, in range proofs that only the two parties rewind; an output's range proof has the same length with a message of any length or none. |
 | Directory lending key and display name | Public when registered. |
 | Directory terms (minimum APR, maximum principal per collateral unit, term and principal ranges) and their publication time | Public when published. |
 
@@ -60,6 +61,85 @@ The tokens are bearer rights, not decorative collectibles. Transferring or losin
 who can exercise a loan's rights. The current app assumes its prescribed token locations and does
 not provide a secondary market for them. NFT ownership and correct wallet signing both matter;
 do not treat the lending-key directory as a substitute for transaction authorization.
+
+## Private messages
+
+A loan's parties can send each other a short text message with four of its transactions. A message
+is not part of the terms, and the contract does not enforce it: no covenant reads it.
+
+### Channels
+
+Each message travels in the extra data of a confidential output's range proof, which only the
+parties rewind.
+
+| Step | Output | From → to | Text, at most |
+| --- | --- | --- | --- |
+| Creation | Output 3, the pending collateral, inside the signed terms | Borrower → lender | 2915 bytes |
+| Acceptance | Output 1, the principal | Lender → borrower | 3068 bytes |
+| Installment `j` | Output 2, the installment | Borrower → lender | 3068 bytes |
+| Full repayment | Output 1, the repayment | Borrower → lender | 3068 bytes |
+
+The zero-debt close, the claims, the cancellation and the liquidation carry none. The creation's
+and each installment's range proofs are rewound with nonces that derive from the borrower's seed,
+so their messages read again on any device. The acceptance's and the full repayment's nonces are
+random: the receiver reads them, but their sender cannot rewind them, and the app keeps a record of
+what it sent instead (see [Client state](#client-state-and-implementation-map)).
+
+### Encoding
+
+The message field is version `1` (1 byte) ‖ kind (1 byte; `1` is UTF-8 text, the only kind) ‖
+length (2 bytes, big-endian) ‖ the text's bytes. The text is non-empty, valid UTF-8. A reader
+refuses an unknown version or kind, a length past the end of the data, an empty text or invalid
+UTF-8: the message is unreadable, and the rest of the loan still reads. The creation's message is
+the exception: it is part of the borrower-signed terms, so a malformed one makes the whole proposal
+fail to open (`terms-invalid`) and the lender never sees it; only the borrower who signed it can
+cause this, and they can cancel the proposal.
+
+A range proof carries 3136 bytes of extra data. In the terms, a missing message is the single byte
+`0`. In the other range proofs it is no extra data at all, which rewinds as zeros. A range proof's
+length does not depend on its extra data, so it does not show whether the output carries a message,
+or how long one is.
+
+### Terms version 2
+
+The terms that output 3 carries are version 2: version `2` (1) ‖ length (2) ‖ the version 1 fields
+(principal asset, principal amount, repayment amount, interest, expiration height, borrower NFT and
+lender NFT) ‖ borrower x-only key (32) ‖ message field ‖ signature (64). The fixed fields before the
+message field are 153 bytes. The message field is inside the signed prefix, so the terms' BIP340
+signature, under the tag `simplicity-lending/private/v1/offer`, covers it. Only version 2 decodes;
+the app reads no earlier offer.
+
+### Signed messages
+
+The acceptance's, an installment's and the full repayment's extra data is the message field ‖ a
+BIP340 signature (64 bytes) by the sender's lending key over
+
+```text
+tagged_hash("simplicity-lending/private/v2/message", phase ‖ offer id ‖ message field)
+```
+
+The offer id is the creation txid in internal byte order. The phase is `0x01` for the acceptance,
+`0x02 ‖ j` (big-endian, 4 bytes) for the `j`-th installment, counted from 1, and `0x03` for the full
+repayment. The other party knows the output's blinders and can make a new range proof for any
+output, so it could copy a message to another output of the loan. The phase and the offer id in the
+signature make such a moved message fail to verify, and the app shows it as unverified. A message
+with no signature, or a bad one, also shows as unverified. The lending key signs in the browser; a
+hardware wallet is not involved.
+
+### Limits
+
+The limits come from the 3136 bytes of extra data. A signed message has 3136 − 4 − 64 = 3068 bytes
+of text: the field's header and the signature take the rest. The creation's has 3136 − 221 = 2915:
+the terms' 153 signed bytes, the field's 4 and the signature's 64. The limits count UTF-8 bytes, not
+characters: a Cyrillic letter is 2 bytes and an emoji 4.
+
+### Display
+
+A message is shown as plain text, with `white-space: pre-wrap`, and no link in it is made
+clickable. Before it is shown, the C0 and C1 control characters except the newline, and the
+bidirectional controls U+061C, U+200E, U+200F, U+202A–U+202E and U+2066–U+2069, are removed. Every
+message shows "A message is not part of the terms, and the contract does not enforce it." with its
+sender's key fingerprint, and its directory name when the entry verifies.
 
 ## Verification before action
 
@@ -117,9 +197,16 @@ ends. Scan progress is persisted in IndexedDB. Finalized transactions awaiting b
 also persisted for recovery and scoped to the wallet/network; browser storage is sensitive and
 is not a substitute for backing up the wallet. Do not clear it during an unresolved broadcast.
 
+The app records every acceptance, installment and full repayment it sends, with the message's
+plaintext or the fact that it carried none, in IndexedDB, per network and lending key. The sender
+of an acceptance or a full repayment rereads its message only from this record. The plaintext stays
+on the device after a disconnect, like the saved transactions. The timeline matches a record to the
+loan's transactions by txid, so a discarded transaction's message never shows as sent, and a message
+sent from another browser does not show.
+
 | Repository path | Responsibility |
 | --- | --- |
-| `crates/private-lending-core/` | Terms, key derivation, commitments and creation verification. |
+| `crates/private-lending-core/` | Terms, key derivation, commitments, creation verification and the message format (`message.rs`). |
 | `crates/private-lending-wasm/` | Browser-facing Rust operations and transaction inspection. |
 | `crates/contracts/simf/private_lending.simf` | Private loan state transitions and covenant checks. |
 | `crates/indexer/` | Public candidate discovery, state indexing, directory and events. |
@@ -127,6 +214,7 @@ is not a substitute for backing up the wallet. Do not clear it during an unresol
 | `web/src/privateLending/flows/` | Creation, acceptance, claims, cancellation, repayment and liquidation builders. |
 | `web/src/privateLending/hooks/usePrivateOffers.ts` | Wallet-scoped queries, scan serialization and term caching. |
 | `web/src/privateLending/offerView.ts` | Display and action eligibility rules; not contract enforcement. |
+| `web/src/privateLending/messages.ts`, `loanMessages.ts`, `sentMessages.ts` | Message limits and display, a loan's message timeline, and the record of sent messages. |
 | `web/src/providers/pendingTransactions/` | Saved transactions and broadcast/confirmation state. |
 
 ## Expiry and review status

@@ -3,14 +3,19 @@ import { useId, useMemo, useState } from 'react'
 
 import { useBlockHeight } from '@/api/esplora/hooks'
 import { fetchLatestBlockHeight } from '@/api/esplora/methods'
+import MessageField from '@/components/MessageField'
+import { MessageEntry } from '@/components/MessageTimeline'
 import Notice from '@/components/Notice'
 import { OfferStatusChip } from '@/components/OfferStatusChip'
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { buildPrivateAcceptance } from '@/privateLending/flows/acceptance'
+import { MESSAGE_NOTE, messageError, messageToSend } from '@/privateLending/messages'
 import { canStillAccept, checkStillAcceptable, TERM_PASSED_NOTE } from '@/privateLending/offerView'
 import type { TermsVerdict } from '@/privateLending/proposalCheck'
+import { recordingSent, sentMessagesOf } from '@/privateLending/sentMessages'
 import { selectAssetCoins, selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
+import { useLwk } from '@/providers/lwk/useLwk'
 import { useWallet } from '@/providers/wallet/useWallet'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
 import { SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/script-auth/witness'
@@ -30,6 +35,43 @@ function verdictReasons(verdict: Exclude<TermsVerdict, { kind: 'within' }>): str
   return verdict.reason === 'no-terms'
     ? ['you have no published terms to check it against']
     : ['your published terms do not verify, so it cannot be checked against them']
+}
+
+/**
+ * The borrower's message with the proposal, part of its signed terms: plain text, with its sender
+ * and the note that the contract does not enforce it.
+ */
+function ProposalMessage({
+  item,
+  borrowerName,
+}: {
+  item: PrivateOfferActionModalProps['item']
+  borrowerName: string | undefined
+}) {
+  const headingId = useId()
+  const { message } = item.terms
+  if (message === undefined) return null
+  return (
+    <section aria-labelledby={headingId} className='flex flex-col gap-2'>
+      <h3 id={headingId} className='text-foreground text-sm font-medium'>
+        Message from the borrower
+      </h3>
+      {/* capped, so that a long message never pushes the terms and the action out of reach */}
+      <div className='max-h-[30vh] overflow-y-auto pr-1'>
+        <MessageEntry
+          message={{
+            phase: 'creation',
+            from: 'borrower',
+            txid: item.txid,
+            state: 'verified',
+            text: message,
+          }}
+          sender={{ name: borrowerName, fingerprint: item.terms.borrowerFingerprint }}
+        />
+      </div>
+      <p className='text-muted text-xs'>{MESSAGE_NOTE}</p>
+    </section>
+  )
 }
 
 /**
@@ -89,7 +131,9 @@ interface AcceptPrivateOfferModalProps extends PrivateOfferActionModalProps {
  * The lender accepts a pending offer: it pays the principal, locked to the borrower NFT, and
  * receives the lender NFT at its wallet address. A proposal outside the lender's terms, or one
  * that could not be checked against them, lists why, and is accepted only once the lender ticks
- * "Accept outside my terms".
+ * "Accept outside my terms". The borrower's message, if any, shows above the terms. The lender
+ * may add a private message to the borrower, which the principal output carries; the acceptance
+ * is recorded with its text, or none, among the messages this browser sent.
  */
 export default function AcceptPrivateOfferModal({
   verdict,
@@ -97,14 +141,17 @@ export default function AcceptPrivateOfferModal({
 }: AcceptPrivateOfferModalProps) {
   const { terms } = props.item
   const [acceptOutside, setAcceptOutside] = useState(false)
+  const [messageText, setMessageText] = useState('')
   const { principalAsset } = NETWORK_CONFIG
-  const { confirmedBalances } = useWallet()
+  const { network } = useLwk()
+  const { confirmedBalances, getLendingKey } = useWallet()
   const { formatCollateralDisplay, formatPrincipalAmount } = useFormatAmount()
   const { data: tipHeight } = useBlockHeight()
 
   const insufficientBalance =
     BigInt(confirmedBalances[principalAsset.id] ?? 0) < terms.principalAmount
   const needsTick = verdict.kind !== 'within' && !acceptOutside
+  const messageRefused = messageError(messageText, 'signed') !== null
 
   // The acceptance sets no lock time and the covenant does not check the expiry: the tip, read
   // fresh, is checked before the build and again before any broadcast, a retry's included.
@@ -134,10 +181,20 @@ export default function AcceptPrivateOfferModal({
       deps.feeRate,
       principalCoins,
     )
-    return buildPrivateAcceptance(deps, offer, {
+    const lendingKey = await getLendingKey()
+    const message = messageToSend(messageText)
+    const sent = sentMessagesOf(network, lendingKey.fingerprint())
+    const built = await buildPrivateAcceptance(deps, offer, {
       principalCoins,
       feeCoins,
       lenderNftReceiver: walletReceiver(deps),
+      lendingKey,
+      message,
+    })
+    return recordingSent(built, sent, {
+      offerTxid: offer.creationTx.txid().toString(),
+      phase: 'acceptance',
+      ...(message === undefined ? {} : { text: message }),
     })
   }
 
@@ -162,9 +219,10 @@ export default function AcceptPrivateOfferModal({
       label='Accept and lend'
       eyebrow='Accept proposal'
       summary={summary}
-      disabled={insufficientBalance || needsTick}
+      disabled={insufficientBalance || needsTick || messageRefused}
       notice={
         <div className='flex flex-col gap-4'>
+          <ProposalMessage item={props.item} borrowerName={props.counterpartyName} />
           <TermsSection
             verdict={verdict}
             acceptOutside={acceptOutside}
@@ -175,6 +233,13 @@ export default function AcceptPrivateOfferModal({
               Your confirmed {principalAsset.symbol} balance is too low to lend this principal.
             </Notice>
           )}
+          <div className='flex flex-col gap-2'>
+            <MessageField channel='signed' value={messageText} onChange={setMessageText} />
+            <p className='text-muted text-xs'>
+              Only the borrower can read it; you can read it again only in this browser. It is not
+              part of the terms, and the contract does not enforce it.
+            </p>
+          </div>
         </div>
       }
       build={build}

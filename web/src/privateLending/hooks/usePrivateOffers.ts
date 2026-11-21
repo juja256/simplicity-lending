@@ -48,6 +48,8 @@ export interface PrivateOfferTerms {
   loanExpirationTime: number
   borrowerNft: string
   lenderNft: string
+  /** The borrower's message to the lender, part of the signed terms; undefined for none. */
+  message?: string
 }
 
 export interface PrivateOfferItem {
@@ -146,6 +148,7 @@ async function openTerms(
     const lenderPublicKey = opened.lenderPublicKey()
     const principalAmount = opened.principalAmount()
     const repaymentAmount = opened.repaymentAmount()
+    const message = opened.message()
     return {
       borrowerPublicKey,
       borrowerFingerprint: deps.wasm.keyFingerprint(borrowerPublicKey),
@@ -160,6 +163,7 @@ async function openTerms(
       loanExpirationTime: opened.loanExpirationTime(),
       borrowerNft: opened.borrowerNft(),
       lenderNft: opened.lenderNft(),
+      ...(message === undefined ? {} : { message }),
     }
   } finally {
     // Only the plain values above are kept; the opened offer holds the offer's secrets.

@@ -7,18 +7,20 @@
 //! to both whatever opens. Each installment is also opened for the party: the borrower rebuilds
 //! the installment's derived key from its lending key and the transaction, and the lender uses
 //! the installment's nonce. The debt's opening, which the borrower needs to close the loan, is
-//! known when every installment opened.
+//! known when every installment opened. The same rewind reads the borrower's message on the
+//! installment, if any.
 
 use std::collections::HashSet;
 
 use elements::confidential::{self, ValueBlindingFactor};
 use elements::encode::serialize;
-use elements::secp256k1_zkp::{SecretKey, XOnlyPublicKey};
-use elements::{OutPoint, Script, Transaction, TxOut, TxOutSecrets};
+use elements::secp256k1_zkp::{SECP256K1, SecretKey, XOnlyPublicKey};
+use elements::{OutPoint, Script, Transaction, TxOut, TxOutSecrets, Txid};
 use private_lending_core::{
-    DebtOpening, LendingKey as CoreLendingKey, OfferPinned, OfferSecrets,
-    OpenedOffer as CoreOpenedOffer, PinnedBlinding as CorePinnedBlinding, PinnedOutput, debt_after,
-    debt_hash, installment_ephemeral_key, open_installment, sweep_opening, zero_debt_blinder,
+    DebtOpening, LendingKey as CoreLendingKey, MessageError, MessagePhase as CoreMessagePhase,
+    OfferPinned, OfferSecrets, OpenedOffer as CoreOpenedOffer,
+    PinnedBlinding as CorePinnedBlinding, PinnedOutput, debt_after, debt_hash,
+    installment_ephemeral_key, open_installment_with_extra_data, sweep_opening, zero_debt_blinder,
     zero_debt_key,
 };
 use rand::thread_rng;
@@ -27,9 +29,16 @@ use wasm_bindgen::prelude::*;
 use crate::blind::{InputSecret, PinnedBlinding};
 use crate::error::{bad_input, decode_hex, encode_hex, loan_mismatch};
 use crate::keys::LendingKey;
-use crate::open::{OpenedOffer, Party, PinnedOutputInfo, outpoint_string, parse_tx};
+use crate::open::{
+    OpenedOffer, Party, PinnedOutputInfo, ReadMessage, SignedMessage, carried_message,
+    outpoint_string, parse_tx, unreadable,
+};
 use crate::scan::parse;
 
+/// The creation's output that holds the pending offer, which the acceptance spends.
+const CREATION_PENDING_OFFER_OUTPUT: u32 = 3;
+/// The acceptance's input that spends the pending offer.
+const ACCEPTANCE_OFFER_INPUT: usize = 0;
 /// The acceptance's output that holds the loan.
 const ACCEPTANCE_LOAN_OUTPUT: u32 = 0;
 /// The input of an installment or a close that spends the loan.
@@ -51,6 +60,9 @@ struct Installment {
     outpoint: OutPoint,
     /// What the party opened of it: `None` when it does not open for the party.
     opening: Option<DebtOpening>,
+    /// The borrower's message on it, checked for this installment: `None` when it carries none
+    /// or does not open, an error when its field does not decode.
+    message: Result<Option<ReadMessage>, MessageError>,
 }
 
 /// A loan's state after its acceptance and its installments, read from their transactions for
@@ -59,6 +71,10 @@ struct Installment {
 pub struct LoanState {
     party: Party,
     key: CoreLendingKey,
+    /// The creation's txid, which the loan's messages are signed for, and the borrower's key,
+    /// which signs the installments' and the full repayment's.
+    offer_id: Txid,
+    borrower: XOnlyPublicKey,
     pinned: OfferPinned,
     /// The loan's outputs, the acceptance's output 0 and then output 1 of each installment, and
     /// the debt each holds: `D₀`, then the debt each installment leaves.
@@ -76,11 +92,12 @@ impl OpenedOffer {
     /// the offer (`bad-input` for another key).
     ///
     /// A transaction that is not the loan's is `loan-mismatch`, naming the acceptance or the
-    /// installment (from 1): the acceptance's output 0 must be the active collateral, and each
-    /// installment must spend the previous loan output at its input 1, put the collateral after
-    /// it at output 1 (`collateral_after(j)` of the `j`-th installment) and pay the repayment
-    /// asset `A` at output 2. These do not check the scripts: the caller requires each loan
-    /// output's script to be the active offer at its debt hash (`debtHashAt`).
+    /// installment (from 1): the acceptance's output 0 must be the active collateral and its input
+    /// 0 must spend the creation's pending offer (output 3), and each installment must spend the
+    /// previous loan output at its input 1, put the collateral after it at output 1
+    /// (`collateral_after(j)` of the `j`-th installment) and pay the repayment asset `A` at output
+    /// 2. These do not check the scripts: the caller requires each loan output's script to be the
+    /// active offer at its debt hash (`debtHashAt`).
     #[wasm_bindgen(js_name = loanState)]
     pub fn loan_state(
         &self,
@@ -110,6 +127,7 @@ impl OpenedOffer {
 
         LoanState::read(
             offer,
+            OutPoint::new(self.creation_txid(), CREATION_PENDING_OFFER_OUTPUT),
             self.party(),
             *key.inner(),
             &acceptance,
@@ -119,8 +137,10 @@ impl OpenedOffer {
 }
 
 impl LoanState {
+    /// The loan that `acceptance` starts, which must spend `pending_offer`, and `installments`.
     fn read(
         offer: &CoreOpenedOffer,
+        pending_offer: OutPoint,
         party: Party,
         key: CoreLendingKey,
         acceptance: &Transaction,
@@ -135,10 +155,24 @@ impl LoanState {
                 acceptance.txid()
             )));
         }
+        let spent = acceptance
+            .input
+            .get(ACCEPTANCE_OFFER_INPUT)
+            .map(|input| input.previous_output);
+        if spent != Some(pending_offer) {
+            return Err(loan_mismatch(format!(
+                "input {ACCEPTANCE_OFFER_INPUT} of the acceptance {} does not spend the offer's \
+                 pending offer {}",
+                acceptance.txid(),
+                outpoint_string(&pending_offer)
+            )));
+        }
 
         let mut state = LoanState {
             party,
             key,
+            offer_id: pending_offer.txid,
+            borrower: offer.signed_terms.borrower,
             pinned,
             loans: vec![OutPoint::new(acceptance.txid(), ACCEPTANCE_LOAN_OUTPUT)],
             debts: vec![pinned.repayment.value_commitment()],
@@ -186,7 +220,15 @@ impl LoanState {
         let debt = debt_after(self.debt(), &payment.value)
             .map_err(|e| mismatch(format!("leaves no debt: {e}")))?;
 
-        let opening = self.open(lender, tx, loan, payment);
+        let (opening, extra_data) = self.open(lender, tx, loan, payment).unzip();
+        let message = extra_data.map_or(Ok(None), |extra_data| {
+            ReadMessage::read(
+                &extra_data,
+                &self.borrower,
+                CoreMessagePhase::Installment(j),
+                &self.offer_id,
+            )
+        });
         self.opening = self
             .opening
             .zip(opening)
@@ -196,14 +238,15 @@ impl LoanState {
         self.installments.push(Installment {
             outpoint: OutPoint::new(tx.txid(), INSTALLMENT_OUTPUT),
             opening,
+            message,
         });
 
         Ok(())
     }
 
-    /// What the party opens of `payment`, output 2 of the installment `tx` that spends `loan`.
-    /// The borrower derives the installment's key from its lending key, the loan, input 2 and
-    /// output 0's script; the lender takes the output's nonce.
+    /// What the party opens of `payment`, output 2 of the installment `tx` that spends `loan`,
+    /// and the extra data of its range proof. The borrower derives the installment's key from its
+    /// lending key, the loan, input 2 and output 0's script; the lender takes the output's nonce.
     ///
     /// `None` whenever it does not open, whatever the reason: a borrower who builds their own
     /// installments can make one the party cannot open, and that must leave the loan's storage
@@ -214,7 +257,7 @@ impl LoanState {
         tx: &Transaction,
         loan: OutPoint,
         payment: &TxOut,
-    ) -> Option<DebtOpening> {
+    ) -> Option<(DebtOpening, Vec<u8>)> {
         let shared_secret = match self.party {
             Party::Borrower => {
                 let first_wallet_input = tx.input.get(FIRST_WALLET_INPUT)?.previous_output;
@@ -228,7 +271,7 @@ impl LoanState {
             }
         };
 
-        open_installment(payment, shared_secret, &self.pinned.repayment).ok()
+        open_installment_with_extra_data(payment, shared_secret, &self.pinned.repayment).ok()
     }
 
     /// The last loan output.
@@ -476,6 +519,7 @@ impl LoanState {
         Ok(InstallmentInfo {
             outpoint: outpoint_string(&installment.outpoint),
             amount: installment.opening.map(|opening| opening.amount),
+            message: installment.message.clone(),
         })
     }
 
@@ -501,13 +545,18 @@ impl LoanState {
     /// derives from them, so a transaction that differs leaves an installment the borrower cannot
     /// open, and a debt it can no longer close. Each plan draws a random value blinder.
     ///
-    /// `bad-input` for the lender, and when the amount still owed is unknown.
+    /// The installment carries the borrower's `message`, if any, which must be signed for this
+    /// installment of this offer, `Installment` with `installmentCount + 1`.
+    ///
+    /// `bad-input` for the lender, when the amount still owed is unknown, and for a message
+    /// signed for anything else.
     #[wasm_bindgen(js_name = planInstallment)]
     pub fn plan_installment(
         &self,
         amount: u64,
         first_wallet_input: &str,
         nft_receiver_script: &str,
+        message: Option<SignedMessage>,
     ) -> Result<InstallmentPlan, String> {
         let owed = self.owed()?;
         if amount == 0 || amount >= owed.amount {
@@ -523,6 +572,13 @@ impl LoanState {
             .installment_count()
             .checked_add(1)
             .ok_or_else(|| bad_input("too many installments"))?;
+        let extra_data = carried_message(
+            message,
+            &self.borrower,
+            CoreMessagePhase::Installment(installments),
+            &self.offer_id,
+            &format!("installment {installments}"),
+        )?;
 
         let payment = PinnedOutput {
             amount,
@@ -542,21 +598,34 @@ impl LoanState {
                 &nft_receiver,
             ),
             successor_collateral: self.pinned.collateral_after(installments),
+            extra_data,
         })
     }
 
     /// How to blind the full repayment, output `output_index`: the debt's opening under `A`, so
-    /// that its value commitment is the debt itself. The PSET output carries the lender's
-    /// blinding key. `bad-input` for the lender, when the amount owed is unknown, and when it is
-    /// 0, which the zero-debt close closes.
+    /// that its value commitment is the debt itself, and in the range proof the borrower's
+    /// `message`, if any, signed for `FullRepayment` of this offer. The PSET output carries the
+    /// lender's blinding key. `bad-input` for the lender, when the amount owed is unknown, when it
+    /// is 0, which the zero-debt close closes, and for a message signed for anything else.
     #[wasm_bindgen(js_name = repaymentBlinding)]
-    pub fn repayment_blinding(&self, output_index: u32) -> Result<PinnedBlinding, String> {
+    pub fn repayment_blinding(
+        &self,
+        output_index: u32,
+        message: Option<SignedMessage>,
+    ) -> Result<PinnedBlinding, String> {
         let owed = self.owed()?;
         if owed.amount == 0 {
             return Err(bad_input(
                 "no amount is owed: the zero-debt close closes the loan",
             ));
         }
+        let extra_data = carried_message(
+            message,
+            &self.borrower,
+            CoreMessagePhase::FullRepayment,
+            &self.offer_id,
+            "the full repayment",
+        )?;
 
         Ok(PinnedBlinding::from_core(CorePinnedBlinding {
             output_index: output_index as usize,
@@ -566,7 +635,7 @@ impl LoanState {
                 ..self.pinned.repayment
             },
             ephemeral_sk: None,
-            extra_data: Vec::new(),
+            extra_data,
         }))
     }
 
@@ -645,11 +714,13 @@ impl LoanState {
     }
 }
 
-/// An installment of a loan: its output, and its amount when it opened for the party.
+/// An installment of a loan: its output, and its amount and the borrower's message when it
+/// opened for the party.
 #[wasm_bindgen]
 pub struct InstallmentInfo {
     outpoint: String,
     amount: Option<u64>,
+    message: Result<Option<ReadMessage>, MessageError>,
 }
 
 #[wasm_bindgen]
@@ -665,6 +736,15 @@ impl InstallmentInfo {
     pub fn amount(&self) -> Option<u64> {
         self.amount
     }
+
+    /// The borrower's message, read in the same rewind as the amount and checked against the
+    /// borrower's key for this installment of this offer. `undefined` when the installment
+    /// carries none or does not open for the party; `bad-input` when its message field does not
+    /// decode, which leaves the amount and the loan readable.
+    #[wasm_bindgen(getter)]
+    pub fn message(&self) -> Result<Option<ReadMessage>, String> {
+        self.message.clone().map_err(unreadable)
+    }
 }
 
 /// The borrower's next installment: what the installment branch's witness takes, and how to
@@ -676,6 +756,8 @@ pub struct InstallmentPlan {
     payment: PinnedOutput,
     ephemeral_sk: SecretKey,
     successor_collateral: PinnedOutput,
+    /// The encoded signed message the installment's range proof carries, empty for none.
+    extra_data: Vec<u8>,
 }
 
 #[wasm_bindgen]
@@ -695,16 +777,23 @@ impl InstallmentPlan {
         encode_hex(&self.successor_debt_hash)
     }
 
-    /// How to blind the installment, output `output_index`: its nonce is the derived key's, and
-    /// the PSET output must carry the lender's blinding key (`lenderBlindingKey()`), so that both
-    /// parties rewind it from the chain.
+    /// The installment's nonce, the derived key's public key (33-byte compressed, hex): output 2
+    /// of the blinded transaction must carry it, or the lender could not open the installment.
+    #[wasm_bindgen(getter, js_name = ephemeralPublicKey)]
+    pub fn ephemeral_public_key(&self) -> String {
+        encode_hex(&self.ephemeral_sk.public_key(SECP256K1).serialize())
+    }
+
+    /// How to blind the installment, output `output_index`: its nonce is the derived key's, its
+    /// range proof carries the plan's message, and the PSET output must carry the lender's
+    /// blinding key (`lenderBlindingKey()`), so that both parties rewind it from the chain.
     #[wasm_bindgen(js_name = installmentBlinding)]
     pub fn installment_blinding(&self, output_index: u32) -> PinnedBlinding {
         PinnedBlinding::from_core(CorePinnedBlinding {
             output_index: output_index as usize,
             pinned: self.payment,
             ephemeral_sk: Some(self.ephemeral_sk),
-            extra_data: Vec::new(),
+            extra_data: self.extra_data.clone(),
         })
     }
 
@@ -782,7 +871,7 @@ mod tests {
     use elements::hashes::Hash;
     use elements::hex::ToHex;
     use elements::pset::{Input, Output, PartiallySignedTransaction};
-    use elements::secp256k1_zkp::{PublicKey, SECP256K1, SecretKey};
+    use elements::secp256k1_zkp::PublicKey;
     use elements::{
         AssetId, OutPoint, Script, Transaction, TxOut, Txid, VerificationError, bitcoin,
     };
@@ -791,8 +880,9 @@ mod tests {
     };
     use lending_contracts::programs::program::SimplexProgram;
     use private_lending_core::{
-        DebtOpening, PinnedBlinding as CorePinnedBlinding, PinnedOutput, installment_ephemeral_key,
-        lift_lending_key,
+        DebtOpening, Message, MessagePhase as CoreMessagePhase,
+        PinnedBlinding as CorePinnedBlinding, PinnedOutput, SignedMessage as CoreSignedMessage,
+        installment_ephemeral_key, lift_lending_key,
     };
     use rand::thread_rng;
     use simplex::provider::SimplicityNetwork;
@@ -802,7 +892,8 @@ mod tests {
     use crate::error::encode_hex;
     use crate::open::tests::{creation_hex, fixture, key_of, tx_of};
     use crate::open::{
-        open_creation_as_borrower_hex, open_creation_as_lender_hex, outpoint_string,
+        MessagePhase, PinnedRole, SignedMessage, open_creation_as_borrower_hex,
+        open_creation_as_lender_hex, outpoint_string, sign_message,
     };
 
     /// The fee of every test transaction, in the principal asset.
@@ -1029,11 +1120,17 @@ mod tests {
     impl Paying<'_> {
         /// The plan of an installment of `amount` from here.
         fn plan(&self, amount: u64) -> InstallmentPlan {
+            self.plan_with(amount, None)
+        }
+
+        /// The plan of an installment of `amount` from here that carries `message`.
+        fn plan_with(&self, amount: u64, message: Option<SignedMessage>) -> InstallmentPlan {
             self.state
                 .plan_installment(
                     amount,
                     &outpoint_string(&self.wallet),
                     &self.receiver.to_hex(),
+                    message,
                 )
                 .unwrap()
         }
@@ -1308,6 +1405,10 @@ mod tests {
             let first = state.installment(1).unwrap();
             assert_eq!(first.outpoint(), loan["installment_outpoint"]);
             assert_eq!(first.amount(), Some(f.first_amount()));
+            // the borrower's message, signed for the first installment
+            let message = first.message().unwrap().unwrap();
+            assert_eq!(message.text(), f.value["messages"]["installment"]);
+            assert!(message.verified());
             assert_code(state.installment(0), "bad-input", "0");
             assert_code(state.installment(2), "bad-input", "2");
             assert_eq!(state.paid(), u128::from(f.first_amount()));
@@ -1349,6 +1450,11 @@ mod tests {
         assert_eq!(plan.debt_witness(), state.debt_commitment());
         let tx = planned(&f, &from, &plan, f.lender_blinding_key());
         let expected = from.owed.after(opening_of(&plan.payment)).unwrap();
+        // the installment's nonce, which the lender opens it with, is the plan's ephemeral key
+        assert_eq!(
+            encode_hex(&serialize(&tx.output[2].nonce)),
+            plan.ephemeral_public_key()
+        );
 
         // on a new device, with nothing saved: the seed and the chain
         let key = key_of(&f.value, "borrower_master_blinding_key");
@@ -1408,7 +1514,7 @@ mod tests {
             &rebuilt,
             &tx,
             owed,
-            rebuilt.repayment_blinding(1).unwrap(),
+            rebuilt.repayment_blinding(1, None).unwrap(),
         );
         assert_eq!(repaid.output[1].asset, f.repayment().asset_commitment());
         assert_eq!(
@@ -1500,6 +1606,31 @@ mod tests {
             "loan-mismatch",
             "installment 2",
         );
+    }
+
+    #[test]
+    fn loan_state_refuses_an_acceptance_of_another_creation() {
+        let f = Fixture::load();
+        let creation = tx_of(&f.creation).txid();
+        let other = tx_of(f.value["other_offer"]["creation_tx"].as_str().unwrap()).txid();
+        let borrower = open_creation_as_borrower_hex(&f.borrower, &f.creation).unwrap();
+        let lender = open_creation_as_lender_hex(&f.lender, &f.creation).unwrap();
+
+        // the acceptance, its outputs unchanged, spending at input 0 another offer's pending offer,
+        // or another output of this creation than its pending offer (output 3)
+        for spent in [OutPoint::new(other, 3), OutPoint::new(creation, 2)] {
+            let mut forged = tx_of(&f.acceptance);
+            forged.input[0].previous_output = spent;
+            for (opened, key) in [(&borrower, &f.borrower), (&lender, &f.lender)] {
+                assert_code(
+                    opened.loan_state(key, &tx_hex(&forged), Vec::new()),
+                    "loan-mismatch",
+                    "acceptance",
+                );
+            }
+        }
+        assert!(f.as_borrower(&[]).is_ok());
+        assert!(f.as_lender(&[]).is_ok());
     }
 
     #[test]
@@ -1637,7 +1768,7 @@ mod tests {
         let state = f.as_borrower(&[&f.installment]).unwrap();
         let owed = state.remaining().unwrap();
         let (wallet, receiver) = (outpoint_string(&wallet(0xb0)), receiver(0xb1).to_hex());
-        let plan = |amount| state.plan_installment(amount, &wallet, &receiver);
+        let plan = |amount| state.plan_installment(amount, &wallet, &receiver, None);
 
         for amount in [0, owed, owed + 1, u64::MAX] {
             assert_code(plan(amount), "bad-input", "");
@@ -1645,17 +1776,25 @@ mod tests {
         for amount in [1, owed - 1] {
             assert_eq!(plan(amount).unwrap().installment().amount(), amount);
         }
-        assert_code(state.plan_installment(1, "zz", &receiver), "bad-input", "");
-        assert_code(state.plan_installment(1, &wallet, "zz"), "bad-input", "");
+        assert_code(
+            state.plan_installment(1, "zz", &receiver, None),
+            "bad-input",
+            "",
+        );
+        assert_code(
+            state.plan_installment(1, &wallet, "zz", None),
+            "bad-input",
+            "",
+        );
 
         // the lender plans nothing, and the borrower sweeps nothing
         let lender = f.as_lender(&[&f.installment]).unwrap();
         assert_code(
-            lender.plan_installment(1, &wallet, &receiver),
+            lender.plan_installment(1, &wallet, &receiver, None),
             "bad-input",
             "borrower",
         );
-        assert_code(lender.repayment_blinding(1), "bad-input", "borrower");
+        assert_code(lender.repayment_blinding(1, None), "bad-input", "borrower");
         assert_code(lender.zero_debt_key(), "bad-input", "borrower");
         assert_code(state.sweep(None, Vec::new()), "bad-input", "lender");
 
@@ -1804,9 +1943,18 @@ mod tests {
         assert_eq!(state.remaining(), Some(0));
         let key = state.zero_debt_key().unwrap();
         assert_eq!(key, encode_hex(zero.blinder.into_inner().as_ref()));
-        assert_code(state.repayment_blinding(1), "bad-input", "zero-debt close");
         assert_code(
-            state.plan_installment(1, &outpoint_string(&wallet(0xd2)), &receiver(0xd3).to_hex()),
+            state.repayment_blinding(1, None),
+            "bad-input",
+            "zero-debt close",
+        );
+        assert_code(
+            state.plan_installment(
+                1,
+                &outpoint_string(&wallet(0xd2)),
+                &receiver(0xd3).to_hex(),
+                None,
+            ),
             "bad-input",
             "",
         );
@@ -1852,14 +2000,368 @@ mod tests {
         });
         let (wallet, receiver) = (outpoint_string(&wallet(0xe0)), receiver(0xe1).to_hex());
 
-        assert_code(state.repayment_blinding(1), "bad-input", "");
+        assert_code(state.repayment_blinding(1, None), "bad-input", "");
         assert_code(state.zero_debt_key(), "bad-input", "");
         for amount in [0, 1] {
             assert_code(
-                state.plan_installment(amount, &wallet, &receiver),
+                state.plan_installment(amount, &wallet, &receiver, None),
                 "bad-input",
                 "",
             );
+        }
+    }
+
+    /// The creation's txid, display hex: the offer id the fixture's messages are signed for.
+    fn offer_id(f: &Fixture) -> String {
+        tx_of(&f.creation).txid().to_string()
+    }
+
+    /// The first installment's state as the borrower, and where a second installment comes from.
+    fn after_the_first(f: &Fixture) -> (LoanState, Transaction) {
+        (
+            f.as_borrower(&[&f.installment]).unwrap(),
+            tx_of(&f.installment),
+        )
+    }
+
+    /// An acceptance of the fixture's offer built as the web builds it, the principal carrying
+    /// `message`: inputs 0 the pending offer, 1 a principal coin; outputs 0 the active collateral
+    /// and 1 the principal, both blinded to the borrower, then the change and the fee.
+    fn acceptance_tx(f: &Fixture, message: Option<SignedMessage>) -> Transaction {
+        let offer = open_creation_as_lender_hex(&f.lender, &f.creation).unwrap();
+        let creation = tx_of(&f.creation);
+        let pinned = f.parameters.pinned;
+        let (collateral, principal) = (pinned.active_collateral, pinned.principal);
+
+        balanced(
+            vec![
+                (
+                    OutPoint::new(creation.txid(), CREATION_PENDING_OFFER_OUTPUT),
+                    creation.output[CREATION_PENDING_OFFER_OUTPUT as usize].clone(),
+                    offer.input_secret(PinnedRole::PendingCollateral, 0),
+                ),
+                coin(0x20, f.principal(), principal.amount + CHANGE + FEE),
+            ],
+            vec![
+                blinded_output(
+                    receiver(0x21),
+                    collateral.asset_id,
+                    collateral.amount,
+                    f.borrower_blinding_key(),
+                ),
+                blinded_output(
+                    receiver(0x22),
+                    principal.asset_id,
+                    principal.amount,
+                    f.borrower_blinding_key(),
+                ),
+                change_output(f.principal()),
+                fee_output(f.principal()),
+            ],
+            vec![
+                offer
+                    .pinned_blinding(PinnedRole::ActiveCollateral, 0, None)
+                    .unwrap(),
+                offer
+                    .pinned_blinding(PinnedRole::Principal, 1, message)
+                    .unwrap(),
+            ],
+        )
+    }
+
+    /// A second installment of 2 000 built by hand, whose range proof carries `extra_data`,
+    /// blinded to the lender with the derived key so that both parties open it.
+    fn installment_carrying(f: &Fixture, extra_data: Vec<u8>) -> Transaction {
+        let (state, first) = after_the_first(f);
+        let from = Paying {
+            state: &state,
+            previous: &first,
+            owed: state.opening.unwrap(),
+            wallet: wallet(0xf0),
+            receiver: receiver(0xf1),
+        };
+        let payment = PinnedOutput {
+            amount: 2_000,
+            value_blinding_factor: ValueBlindingFactor::new(&mut thread_rng()),
+            ..f.repayment()
+        };
+        let loan = state.loan_outpoint().parse().unwrap();
+        let ephemeral_sk =
+            installment_ephemeral_key(f.borrower.inner(), loan, from.wallet, &from.receiver);
+
+        installment_tx(
+            f,
+            &from,
+            &payment,
+            vec![
+                pinned(1, f.parameters.pinned.collateral_after(2), None),
+                PinnedBlinding::from_core(CorePinnedBlinding {
+                    output_index: 2,
+                    pinned: payment,
+                    ephemeral_sk: Some(ephemeral_sk),
+                    extra_data,
+                }),
+            ],
+            f.lender_blinding_key(),
+        )
+    }
+
+    #[test]
+    fn acceptance_message_reads_for_the_borrower_only() {
+        let f = Fixture::load();
+        let id = offer_id(&f);
+        let text = "Accepted.\nThe principal is yours 🙂";
+        let signed = sign_message(&f.lender, &id, MessagePhase::Acceptance, 0, text).unwrap();
+        let tx = tx_hex(&acceptance_tx(&f, Some(signed.clone())));
+        let as_borrower = open_creation_as_borrower_hex(&f.borrower, &f.creation).unwrap();
+        let as_lender = open_creation_as_lender_hex(&f.lender, &f.creation).unwrap();
+        let read = |offer: &OpenedOffer, key: &LendingKey, tx: &str, output: u32| {
+            offer
+                .read_message(key, &id, tx, output, MessagePhase::Acceptance)
+                .unwrap()
+        };
+
+        let message = read(&as_borrower, &f.borrower, &tx, 1).unwrap();
+        assert_eq!(message.text(), text);
+        assert!(message.verified());
+        // the principal is blinded to the borrower: the lender's key does not rewind it
+        assert!(read(&as_lender, &f.lender, &tx, 1).is_none());
+        // the active collateral carries none, and neither does an acceptance without a message
+        assert!(read(&as_borrower, &f.borrower, &tx, 0).is_none());
+        let without = tx_hex(&acceptance_tx(&f, None));
+        assert!(read(&as_borrower, &f.borrower, &without, 1).is_none());
+        // read as the full repayment's, the lender's signature does not verify
+        let as_repayment = as_borrower
+            .read_message(&f.borrower, &id, &tx, 1, MessagePhase::FullRepayment)
+            .unwrap()
+            .unwrap();
+        assert_eq!(as_repayment.text(), text);
+        assert!(!as_repayment.verified());
+
+        // the principal takes only the lender's acceptance message of this offer
+        assert_code(
+            as_lender.pinned_blinding(PinnedRole::ActiveCollateral, 0, Some(signed)),
+            "bad-input",
+            "principal",
+        );
+        let other_offer = tx_of(f.value["other_offer"]["creation_tx"].as_str().unwrap())
+            .txid()
+            .to_string();
+        for wrong in [
+            sign_message(&f.borrower, &id, MessagePhase::Acceptance, 0, text),
+            sign_message(&f.lender, &id, MessagePhase::FullRepayment, 0, text),
+            sign_message(&f.lender, &id, MessagePhase::Installment, 1, text),
+            sign_message(&f.lender, &other_offer, MessagePhase::Acceptance, 0, text),
+        ] {
+            assert_code(
+                as_lender.pinned_blinding(PinnedRole::Principal, 1, Some(wrong.unwrap())),
+                "bad-input",
+                "acceptance",
+            );
+        }
+
+        // the offer id must be this offer's, and an installment's output is read from the loan
+        assert_code(
+            as_borrower.read_message(&f.borrower, &other_offer, &tx, 1, MessagePhase::Acceptance),
+            "bad-input",
+            "offer",
+        );
+        assert_code(
+            as_borrower.read_message(&f.borrower, &id, &tx, 1, MessagePhase::Installment),
+            "bad-input",
+            "installment",
+        );
+        assert_code(
+            as_borrower.read_message(&f.borrower, &id, &tx, 9, MessagePhase::Acceptance),
+            "bad-input",
+            "9",
+        );
+    }
+
+    #[test]
+    fn installment_message_reads_for_both_parties() {
+        let f = Fixture::load();
+        let id = offer_id(&f);
+        let (state, first) = after_the_first(&f);
+        let from = Paying {
+            state: &state,
+            previous: &first,
+            owed: state.opening.unwrap(),
+            wallet: wallet(0xa0),
+            receiver: receiver(0xa1),
+        };
+        let text = "Second installment.\nThe rest next month.";
+        let signed = sign_message(&f.borrower, &id, MessagePhase::Installment, 2, text).unwrap();
+        let tx = planned(
+            &f,
+            &from,
+            &from.plan_with(2_000, Some(signed)),
+            f.lender_blinding_key(),
+        );
+        let plain = planned(&f, &from, &from.plan(2_000), f.lender_blinding_key());
+        // the range proof is as long with the message as without
+        assert_eq!(
+            tx.output[2]
+                .witness
+                .rangeproof
+                .as_ref()
+                .unwrap()
+                .serialize()
+                .len(),
+            plain.output[2]
+                .witness
+                .rangeproof
+                .as_ref()
+                .unwrap()
+                .serialize()
+                .len()
+        );
+
+        for (with, without) in [
+            (
+                f.as_borrower(&[&f.installment, &tx_hex(&tx)]).unwrap(),
+                f.as_borrower(&[&f.installment, &tx_hex(&plain)]).unwrap(),
+            ),
+            (
+                f.as_lender(&[&f.installment, &tx_hex(&tx)]).unwrap(),
+                f.as_lender(&[&f.installment, &tx_hex(&plain)]).unwrap(),
+            ),
+        ] {
+            let second = with.installment(2).unwrap();
+            assert_eq!(second.amount(), Some(2_000));
+            let message = second.message().unwrap().unwrap();
+            assert_eq!(message.text(), text);
+            assert!(message.verified());
+            assert!(without.installment(2).unwrap().message().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn repayment_message_reads_for_the_lender() {
+        let f = Fixture::load();
+        let id = offer_id(&f);
+        let (state, first) = after_the_first(&f);
+        let text = "Repaid in full. Thank you!";
+        let signed = sign_message(&f.borrower, &id, MessagePhase::FullRepayment, 0, text).unwrap();
+        let repaid = full_repayment_tx(
+            &f,
+            &state,
+            &first,
+            state.remaining().unwrap(),
+            state.repayment_blinding(1, Some(signed)).unwrap(),
+        );
+        let hex = tx_hex(&repaid);
+        let as_lender = open_creation_as_lender_hex(&f.lender, &f.creation).unwrap();
+        let as_borrower = open_creation_as_borrower_hex(&f.borrower, &f.creation).unwrap();
+
+        let message = as_lender
+            .read_message(&f.lender, &id, &hex, 1, MessagePhase::FullRepayment)
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.text(), text);
+        assert!(message.verified());
+        // the repayment is blinded to the lender: the borrower's key does not rewind it
+        assert!(
+            as_borrower
+                .read_message(&f.borrower, &id, &hex, 1, MessagePhase::FullRepayment)
+                .unwrap()
+                .is_none()
+        );
+
+        // the repayment takes only the borrower's full repayment message of this offer
+        for wrong in [
+            sign_message(&f.lender, &id, MessagePhase::FullRepayment, 0, text),
+            sign_message(&f.borrower, &id, MessagePhase::Acceptance, 0, text),
+            sign_message(&f.borrower, &id, MessagePhase::Installment, 2, text),
+        ] {
+            assert_code(
+                state.repayment_blinding(1, Some(wrong.unwrap())),
+                "bad-input",
+                "full repayment",
+            );
+        }
+    }
+
+    #[test]
+    fn a_message_for_another_installment_is_refused_at_plan() {
+        let f = Fixture::load();
+        let id = offer_id(&f);
+        let (state, _) = after_the_first(&f);
+        let (wallet, receiver) = (outpoint_string(&wallet(0xa2)), receiver(0xa3).to_hex());
+        let plan = |message: SignedMessage| {
+            state.plan_installment(2_000, &wallet, &receiver, Some(message))
+        };
+        let text = "hello";
+
+        // the next installment is the second
+        for (phase, j) in [
+            (MessagePhase::Installment, 1),
+            (MessagePhase::Installment, 3),
+            (MessagePhase::Acceptance, 0),
+            (MessagePhase::FullRepayment, 0),
+        ] {
+            let signed = sign_message(&f.borrower, &id, phase, j, text).unwrap();
+            assert_code(plan(signed), "bad-input", "installment 2");
+        }
+        // signed by the lender, or for another offer
+        let by_lender = sign_message(&f.lender, &id, MessagePhase::Installment, 2, text).unwrap();
+        assert_code(plan(by_lender), "bad-input", "installment 2");
+        let elsewhere = sign_message(
+            &f.borrower,
+            &"11".repeat(32),
+            MessagePhase::Installment,
+            2,
+            text,
+        )
+        .unwrap();
+        assert_code(plan(elsewhere), "bad-input", "installment 2");
+
+        let right = sign_message(&f.borrower, &id, MessagePhase::Installment, 2, text).unwrap();
+        assert!(plan(right).is_ok());
+    }
+
+    #[test]
+    fn a_moved_message_reads_as_unverified() {
+        let f = Fixture::load();
+        let text = "the first installment's message";
+        // the borrower's message for installment 1, as the lender, who could remake the range
+        // proof, might move it to installment 2
+        let first = CoreSignedMessage::sign(
+            Message::text(text).unwrap(),
+            f.borrower.inner(),
+            CoreMessagePhase::Installment(1),
+            &tx_of(&f.creation).txid(),
+        )
+        .unwrap();
+        let moved = tx_hex(&installment_carrying(&f, first.encode()));
+
+        for state in [
+            f.as_borrower(&[&f.installment, &moved]).unwrap(),
+            f.as_lender(&[&f.installment, &moved]).unwrap(),
+        ] {
+            let second = state.installment(2).unwrap();
+            assert_eq!(second.amount(), Some(2_000));
+            let message = second.message().unwrap().unwrap();
+            assert_eq!(message.text(), text);
+            assert!(!message.verified());
+        }
+    }
+
+    #[test]
+    fn an_unreadable_installment_message_leaves_the_loan_readable() {
+        let f = Fixture::load();
+        // version 2 of the message field, which no reader knows, and a text that is not UTF-8
+        for field in [vec![2, 1, 0, 1, b'a'], vec![1, 1, 0, 1, 0xff]] {
+            let crafted = tx_hex(&installment_carrying(&f, field));
+            for state in [
+                f.as_borrower(&[&f.installment, &crafted]).unwrap(),
+                f.as_lender(&[&f.installment, &crafted]).unwrap(),
+            ] {
+                let second = state.installment(2).unwrap();
+                assert_eq!(second.amount(), Some(2_000));
+                assert_code(second.message(), "bad-input", "message");
+                assert_eq!(state.installment_count(), 2);
+            }
         }
     }
 }

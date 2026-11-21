@@ -1,7 +1,7 @@
 // Query keys of the data read or opened with a session's lending key: the identity, the offers,
-// their terms and their loans. None of it may outlive the session, so the wallet provider drops it
-// all (`removePrivateSessionQueries`) when it frees the key. Free of React hooks, so the provider
-// can import it.
+// their terms, their loans and the loans' messages. None of it may outlive the session, so the
+// wallet provider drops it all (`removePrivateSessionQueries`) when it frees the key. Free of
+// React hooks, so the provider can import it.
 import type { QueryClient } from '@tanstack/react-query'
 
 import { privateQueryKeys } from '@/api/indexer/queryKeys'
@@ -9,6 +9,7 @@ import { privateQueryKeys } from '@/api/indexer/queryKeys'
 const LENDING_KEY_IDENTITY_ROOT = 'lending-key-identity'
 const PRIVATE_OFFER_TERMS_ROOT = 'private-offer-terms'
 const PRIVATE_LOAN_ROOT = 'private-loan'
+const PRIVATE_LOAN_MESSAGES_ROOT = 'private-loan-messages'
 const PRIVATE_LENDING_WASM_ROOT = 'private-lending-wasm'
 
 /** The private lending wasm module, loaded once. Not session data: it holds no key. */
@@ -46,10 +47,37 @@ export function privateLoanQueryKey(
   return [PRIVATE_LOAN_ROOT, network, apiBaseUrl, fingerprint, txid, role, loanOutpoint] as const
 }
 
+/**
+ * What `useLoanMessages` reads beside the loan: the full repayment's message and this wallet's
+ * records of the messages it sent. Keyed by the loan output and the full repayment, so a new
+ * installment or a close reads them again.
+ */
+export function privateLoanMessagesQueryKey(
+  network: string,
+  apiBaseUrl: string,
+  fingerprint: string,
+  txid: string,
+  role: string,
+  loanOutpoint: string,
+  repaymentTxid: string,
+) {
+  return [
+    PRIVATE_LOAN_MESSAGES_ROOT,
+    network,
+    apiBaseUrl,
+    fingerprint,
+    txid,
+    role,
+    loanOutpoint,
+    repaymentTxid,
+  ] as const
+}
+
 const SESSION_QUERY_ROOTS: readonly (readonly unknown[])[] = [
   privateQueryKeys.all(),
   [PRIVATE_OFFER_TERMS_ROOT],
   [PRIVATE_LOAN_ROOT],
+  [PRIVATE_LOAN_MESSAGES_ROOT],
   [LENDING_KEY_IDENTITY_ROOT],
 ]
 

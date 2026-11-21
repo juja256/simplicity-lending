@@ -15,9 +15,12 @@
 // An installment built otherwise would confirm, and the borrower could no longer rebuild its debt
 // from the seed and close the loan. So the plan is made from exactly input 2 and output 0's
 // script, and both layout checks require them, and the built transaction is read back with the
-// borrower's lending key before it is signed: it must give the loan the plan expects.
+// borrower's lending key before it is signed: it must give the loan the plan expects. That read
+// rebuilds the borrower's key and never reads output 2's nonce, which the lender opens it with, so
+// the blinded PSET's nonce must be the plan's ephemeral key too (`installmentNonceMatches`).
 // The borrower NFT is spent as a plain input, as in the full repayment. The builder pays no
-// installment before the principal is claimed (`principalClaimedBefore`).
+// installment before the principal is claimed (`principalClaimedBefore`), nor from the expiry
+// block on (`installmentTermOpen`).
 import type { WalletTxOut } from 'lwk_wasm'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
@@ -28,11 +31,15 @@ import {
   NFT_AMOUNT,
 } from '@/simplicity/private-lending/layout'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
+import { normalizeHex } from '@/utils/hex'
 import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from '../deps'
 import { finalizePrivateOfferInput, pinnedAuthCovenant } from '../finalize'
+import { inspectPset } from '../inspectPset'
 import { borrowerLoanInputs, type Loan } from '../loan'
+import { checkedMessage } from '../messages'
+import { INSTALLMENT_AFTER_TERM_NOTE, installmentTermOpen } from '../repayPlan'
 import { walletInputSecret } from '../secrets'
 import type { VerifiedOffer } from '../verify'
 import {
@@ -50,6 +57,23 @@ import {
   walletCoinInput,
   wasmStep,
 } from './shared'
+
+/**
+ * An installment refused before building: the tip has reached the loan expiry, from which the
+ * lender's liquidation can be mined in the same block, and keep the installment as well. The
+ * message is the borrower's (`INSTALLMENT_AFTER_TERM_NOTE`).
+ */
+export class InstallmentAfterTermError extends Error {
+  readonly code = 'installment-after-term'
+
+  constructor(
+    readonly loanExpirationTime: number,
+    readonly tipHeight: number,
+  ) {
+    super(INSTALLMENT_AFTER_TERM_NOTE)
+    this.name = 'InstallmentAfterTermError'
+  }
+}
 
 export interface InstallmentParams {
   /** What the installment pays: more than 0 and less than `loan.state.remaining`. */
@@ -72,6 +96,14 @@ export interface InstallmentParams {
    * with it before it is signed.
    */
   lendingKey: LendingKey
+  /** The chain tip's height, read just before the build: below the loan expiry. */
+  tipHeight: number
+  /**
+   * The borrower's private message to the lender, in the installment's range proof: at most
+   * `MESSAGE_LIMITS.signed` UTF-8 bytes. An empty or blank one is none. It is signed for this
+   * installment, the loan's `installmentCount + 1`-th.
+   */
+  message?: string
 }
 
 export interface InstallmentSummary {
@@ -90,9 +122,11 @@ export interface InstallmentSummary {
 
 /**
  * Builds the borrower's installment of `params.amount` on the loan at `loan.state.loanOutpoint`,
- * blinded and ready to sign. Throws `PrincipalNotClaimedError` before building unless the borrower
- * NFT comes from the principal claim. `finalize` finalizes the wallet inputs (the borrower NFT
- * among them), then the loan (Installment), running the covenant on the transaction.
+ * blinded and ready to sign. Throws first for a message that does not fit, then
+ * `InstallmentAfterTermError` once `params.tipHeight` has reached the loan expiry, and
+ * `PrincipalNotClaimedError` before building unless the borrower NFT comes from the principal
+ * claim. `finalize` finalizes the wallet inputs (the borrower NFT among them), then the loan
+ * (Installment), running the covenant on the transaction.
  */
 export async function buildPrivateInstallment(
   deps: PrivateFlowDeps,
@@ -102,7 +136,15 @@ export async function buildPrivateInstallment(
 ): Promise<UpdatedPset<InstallmentSummary>> {
   const { lwk, wasm } = deps
   if (offer.role !== 'borrower') throw new Error('Only the borrower pays an installment')
+  const message = checkedMessage(params.message, 'signed')
   const opened = offer.opened
+  const expiry = opened.loanExpirationTime()
+  if (!Number.isInteger(params.tipHeight) || params.tipHeight <= 0) {
+    throw new Error('The tip height must be a block height')
+  }
+  if (!installmentTermOpen(params.tipHeight, expiry)) {
+    throw new InstallmentAfterTermError(expiry, params.tipHeight)
+  }
   const { state } = loan
   const { amount } = params
   const borrowerNft = opened.borrowerNft()
@@ -171,15 +213,32 @@ export async function buildPrivateInstallment(
   )
 
   // 3. The plan, from exactly input 2 and output 0's script: the borrower NFT goes back explicit
-  // to the unconfidential form of a fresh receive address.
+  // to the unconfidential form of a fresh receive address. The message is signed for this
+  // installment just before the call that takes it (and consumes it).
   const nftReceiver = deps.addresses.nextReceive(deps.wollet).toUnconfidential()
   const nftReceiverScript = nftReceiver.scriptPubkey().toString()
+  const installmentIndex = state.installmentCount + 1
+  const creationTxid = offer.creationTx.txid().toString()
   const plan = wasmStep('Planning the installment', () =>
-    state.planInstallment(amount, firstWalletInput, nftReceiverScript),
+    state.planInstallment(
+      amount,
+      firstWalletInput,
+      nftReceiverScript,
+      message === undefined
+        ? undefined
+        : wasm.signMessage(
+            params.lendingKey,
+            creationTxid,
+            wasm.MessagePhase.Installment,
+            installmentIndex,
+            message,
+          ),
+    ),
   )
   try {
     const debtWitness = plan.debtWitness
     const successorDebtHash = plan.successorDebtHash
+    const ephemeralPublicKey = plan.ephemeralPublicKey
     const installment = plan.installment
     const successor = plan.successor
     // `A` and the collateral after one more step: the covenant's checks 3 and 6, checked here too
@@ -350,14 +409,22 @@ export async function buildPrivateInstallment(
     const builtTxid = builtTx.txid().toString()
     const remaining = owed - amount
 
-    // 9. The installment read back as the borrower will read it from the chain. Neither the layout
+    // 9. The installment read back as the parties will read it from the chain. Neither the layout
     // checks nor the covenant look at output 2's range proof: if it did not open with the plan's
-    // key, the installment would confirm and the borrower could no longer rebuild the debt.
+    // key, the installment would confirm and the borrower could no longer rebuild the debt, nor
+    // the lender open it from its nonce.
+    if (!installmentNonceMatches(wasm, blindedBase64, ephemeralPublicKey)) {
+      throw new Error(
+        "The installment's nonce is not the planned one, so the lender could not open its " +
+          'amount: it was not signed.',
+      )
+    }
     assertInstallmentReadsBack(offer, loan, params.lendingKey, builtTx.toString(), {
       loanOutpoint: `${builtTxid}:${INSTALLMENT_OUTPUT.loan}`,
       amount,
       remaining,
       successorDebtHash,
+      message,
     })
     const prevouts = () => [
       requireOutput(nftTx, nftRef.vout, 'The borrower NFT'),
@@ -406,16 +473,51 @@ export async function buildPrivateInstallment(
 }
 
 /**
+ * Whether output 2 of the blinded PSET `psetBase64`, the installment, carries the nonce
+ * `ephemeralPublicKey` (a 33-byte compressed public key, hex): the plan's, with which the lender
+ * opens the installment. It reads the output's ECDH key through the wasm's `inspectPset`: for an
+ * output with a blinding key and blinded fields, which the blinded layout check requires of output
+ * 2, rust-elements' `extract_tx` takes the transaction's nonce from that key. False, never a
+ * throw, for a PSET that does not parse, has no output 2, or whose output 2 is not blinded.
+ */
+export function installmentNonceMatches(
+  wasm: PrivateFlowDeps['wasm'],
+  psetBase64: string,
+  ephemeralPublicKey: string,
+): boolean {
+  let output
+  try {
+    output = inspectPset(wasm, psetBase64).outputs[INSTALLMENT_OUTPUT.installment]
+  } catch {
+    return false
+  }
+  return (
+    output !== undefined &&
+    output.blindingKey !== null &&
+    output.ecdhPubkey !== null &&
+    output.ecdhPubkey === normalizeHex(ephemeralPublicKey)
+  )
+}
+
+/**
  * Reads the loan again with the built installment `txHex` appended, with `key`, and requires what
  * the plan expects: one more installment, of `expected.amount`, the loan at its output 1 owing
- * `expected.remaining` under `expected.successorDebtHash`. Throws before anything is signed.
+ * `expected.remaining` under `expected.successorDebtHash`, and, when `expected.message` was sent,
+ * that message, verified: signed by `key` for this installment of this offer. Throws before
+ * anything is signed.
  */
 export function assertInstallmentReadsBack(
   offer: VerifiedOffer,
   loan: Loan,
   key: LendingKey,
   txHex: string,
-  expected: { loanOutpoint: string; amount: bigint; remaining: bigint; successorDebtHash: string },
+  expected: {
+    loanOutpoint: string
+    amount: bigint
+    remaining: bigint
+    successorDebtHash: string
+    message?: string
+  },
 ): void {
   const after = wasmStep('Reading the installment back', () =>
     offer.opened.loanState(key, loan.acceptanceHex, [...loan.installmentHexes, txHex]),
@@ -424,11 +526,22 @@ export function assertInstallmentReadsBack(
     const j = after.installmentCount
     const paid = j === loan.installmentHexes.length + 1 ? after.installment(j) : undefined
     let paidAmount: bigint | undefined
+    let messageReadsBack = expected.message === undefined
     try {
       paidAmount = paid?.amount
+      if (paid !== undefined && expected.message !== undefined) {
+        const read = paid.message
+        try {
+          messageReadsBack = read?.verified === true && read.text === expected.message
+        } finally {
+          read?.free()
+        }
+      }
     } finally {
       paid?.free()
     }
+    // The count and the amount first: when they fail, the message cannot read back either, and
+    // the amount is what matters.
     if (
       paidAmount !== expected.amount ||
       after.loanOutpoint !== expected.loanOutpoint ||
@@ -438,6 +551,12 @@ export function assertInstallmentReadsBack(
       throw new Error(
         'The installment does not read back as built: it was not signed. Its amount would not ' +
           'open with your key, and the loan could not be closed after it',
+      )
+    }
+    if (!messageReadsBack) {
+      throw new Error(
+        'The installment does not read back as built: it was not signed. Its message does not ' +
+          'read back as yours',
       )
     }
   } finally {

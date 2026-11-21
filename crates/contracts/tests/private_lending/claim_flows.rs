@@ -102,6 +102,7 @@ fn pay_unopenable_installment(
         installment,
         stranger,
         SecretKey::new(&mut rng),
+        None,
     );
     add_coin_and_change(&mut ctx, borrower, coin, installment.amount);
 

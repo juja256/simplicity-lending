@@ -80,8 +80,12 @@ interface Fixture {
   pending_offer_script_pubkey: string
   active_offer_script_pubkey: string
   lender_nft_script_pubkey: string
+  // `debt` is the 33-byte consensus encoding of a value commitment, hex, as the web's witness
+  // takes it; `debt_hash` is the debt hash of the loan each vector spends, `h(A, D)`.
   witness_vectors: {
+    installment: WitnessVector & { debt_hash: string; debt: string }
     full_repayment: WitnessVector & { debt_hash: string }
+    zero_debt_close: WitnessVector & { debt_hash: string; debt: string; k: string }
     liquidation: WitnessVector & { debt_hash: string; salt: string; expiry: number }
   }
   // The offer's loan on regtest, after its acceptance and one installment, which both parties
@@ -97,6 +101,14 @@ interface Fixture {
     debt_commitment: string
     debt_hashes: string[]
     loan_script_pubkeys: string[]
+  }
+  // The private messages the loan carries, as the Rust test wrote them: the borrower's in the
+  // creation's terms, the lender's on the acceptance's principal output and the borrower's on the
+  // installment's output, each signed for its phase.
+  messages: {
+    creation: string
+    acceptance: string
+    installment: string
   }
   // A second offer, whose `A` has the other prefix bit.
   other_offer: {
@@ -381,6 +393,7 @@ async function main(): Promise<void> {
 
   checkWitnessVectors(scripts, network)
   checkLoanState(scripts, { lender, asLender }, { borrower, asBorrower })
+  checkMessages({ lender, asLender }, { borrower, asBorrower })
   checkOtherPrefixBit(sources, network, lender, borrower)
 
   checkLenderTerms()
@@ -395,20 +408,49 @@ async function main(): Promise<void> {
 }
 
 /**
- * The web's witnesses of the branches it builds, run by LWK on the fixture's synthetic spends of the
- * active offer: each must give the bytes the contracts' Rust serializes for the same values, so a
- * wrong byte order of a 32-byte value cannot pass. A reversed debt hash or salt must fail to run.
+ * The web's witnesses of the branches of the active offer, run by LWK on the fixture's synthetic
+ * spends of the loan at each vector's debt hash: each must give the bytes the contracts' Rust
+ * serializes for the same values, so a wrong byte order of a 32-byte value, or a wrong prefix bit
+ * of a debt, cannot pass. A reversed debt x, debt hash, key or salt must fail to run.
  */
 function checkWitnessVectors(scripts: PrivateOfferScripts, network: lwk.Network): void {
-  const { full_repayment: repayment, liquidation } = fixture.witness_vectors
+  const {
+    installment,
+    full_repayment: repayment,
+    zero_debt_close: close,
+    liquidation,
+  } = fixture.witness_vectors
   const reversed = (value: string) => Buffer.from(value, 'hex').reverse().toString('hex')
-  const cases: [string, WitnessVector, (reverse: boolean) => PrivateLendingWitness][] = [
+  // the debt's prefix, then its x reversed
+  const reversedX = (debt: string) => debt.slice(0, 2) + reversed(debt.slice(2))
+  const cases: [
+    string,
+    WitnessVector & { debt_hash: string },
+    (reverse: boolean) => PrivateLendingWitness,
+  ][] = [
+    [
+      'installment',
+      installment,
+      reverse => ({
+        branch: 'Installment',
+        debt: reverse ? reversedX(installment.debt) : installment.debt,
+      }),
+    ],
     [
       'full repayment',
       repayment,
       reverse => ({
         branch: 'FullRepayment',
         debtHash: reverse ? reversed(repayment.debt_hash) : repayment.debt_hash,
+      }),
+    ],
+    [
+      'zero-debt close',
+      close,
+      reverse => ({
+        branch: 'ZeroDebtClose',
+        debt: close.debt,
+        key: reverse ? reversed(close.k) : close.k,
       }),
     ],
     [
@@ -426,7 +468,7 @@ function checkWitnessVectors(scripts: PrivateOfferScripts, network: lwk.Network)
     const run = (reverse: boolean) =>
       scripts.program.run(
         lwk.Transaction.fromString(vector.tx),
-        scripts.activeSpendInfo.controlBlock(scripts.program.cmr),
+        scripts.activeSpendInfoAt(vector.debt_hash).controlBlock(scripts.program.cmr),
         lwk.Transaction.fromString(vector.prevouts_tx).outputs,
         vector.input_index,
         buildPrivateLendingWitness(witness(reverse)),
@@ -559,6 +601,57 @@ function checkLoanState(
       ]),
     ),
   )
+}
+
+/**
+ * The fixture's messages, read by the party each is for as the Rust test wrote them, verified: the
+ * creation's from the terms both parties open, the acceptance's from the principal output that
+ * only the borrower rewinds, and the installment's from the loan state of either party.
+ */
+function checkMessages(
+  { lender, asLender }: { lender: wasm.LendingKey; asLender: wasm.OpenedOffer },
+  { borrower, asBorrower }: { borrower: wasm.LendingKey; asBorrower: wasm.OpenedOffer },
+): void {
+  const { messages, loan } = fixture
+  const offerTxid = lwk.Transaction.fromString(fixture.creation_tx).txid().toString()
+  for (const [who, opened] of [
+    ['lender', asLender],
+    ['borrower', asBorrower],
+  ] as const) {
+    const text = opened.message()
+    check(`creation message as the ${who}`, text === messages.creation, `${text}`)
+  }
+
+  const acceptance = asBorrower.readMessage(
+    borrower,
+    offerTxid,
+    loan.acceptance_tx,
+    1,
+    wasm.MessagePhase.Acceptance,
+  )
+  check(
+    'acceptance message as the borrower',
+    acceptance?.text === messages.acceptance && acceptance.verified,
+    `${acceptance?.text} (verified: ${acceptance?.verified})`,
+  )
+  check(
+    'acceptance message: the lender does not rewind the principal',
+    asLender.readMessage(lender, offerTxid, loan.acceptance_tx, 1, wasm.MessagePhase.Acceptance) ===
+      undefined,
+  )
+
+  for (const [who, opened, key] of [
+    ['lender', asLender, lender],
+    ['borrower', asBorrower, borrower],
+  ] as const) {
+    const state = opened.loanState(key, loan.acceptance_tx, loan.installment_txs)
+    const read = state.installment(1).message
+    check(
+      `installment message as the ${who}`,
+      read?.text === messages.installment && read.verified,
+      `${read?.text} (verified: ${read?.verified})`,
+    )
+  }
 }
 
 /**

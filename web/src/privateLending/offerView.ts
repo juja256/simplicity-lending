@@ -144,6 +144,16 @@ export function isPastExpiry(terms: PrivateOfferTerms, tipHeight: number): boole
 }
 
 /**
+ * Whether the borrower's term has ended at `tipHeight`: the tip known and at the expiry or past
+ * it, when the repay form no longer pays an installment (`installmentTermOpen`): from then on, the
+ * lender's liquidation can be mined in the same block as an installment. The lender's pages use
+ * `isPastExpiry`, a block later.
+ */
+export function borrowerTermEnded(terms: PrivateOfferTerms, tipHeight: number): boolean {
+  return tipHeight > 0 && !installmentTermOpen(tipHeight, terms.loanExpirationTime)
+}
+
+/**
  * Whether a pending offer can still be accepted at `tipHeight`: the tip known (not 0) and below
  * the expiry, so an acceptance mined in the next block is not past it. The acceptance sets no lock
  * time and the covenant does not check the expiry: this rule is the only guard.
@@ -538,7 +548,8 @@ export function borrowerView(
           note: 'Your installments paid the debt: close the loan to get your collateral back.',
         }
       }
-      return isPastExpiry(terms, tipHeight)
+      // From the expiry block on, as the repay form refuses an installment.
+      return borrowerTermEnded(terms, tipHeight)
         ? {
             action: 'repay',
             note: 'The term has ended: the lender may take your collateral at any time.',

@@ -6,6 +6,7 @@ import KeyFingerprint from '@/components/KeyFingerprint'
 import ClaimInstallmentsModal from '@/components/modals/private/ClaimInstallmentsModal'
 import ClaimRepaymentModal from '@/components/modals/private/ClaimRepaymentModal'
 import LiquidatePrivateOfferModal from '@/components/modals/private/LiquidatePrivateOfferModal'
+import { MessagesLink } from '@/components/modals/private/LoanMessagesModal'
 import { OfferStatusChip } from '@/components/OfferStatusChip'
 import { ScanNote } from '@/components/ScanNote'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
@@ -108,7 +109,10 @@ function LoanRow({ item, borrowerName, tipHeight, loan, figures, state, onOpen }
   return (
     <tr className='hover:bg-[var(--table-row-hover)]'>
       <Cell>
-        <KeyFingerprint fingerprint={terms.borrowerFingerprint} name={borrowerName} />
+        <div className='flex flex-col items-start gap-0.5'>
+          <KeyFingerprint fingerprint={terms.borrowerFingerprint} name={borrowerName} />
+          <MessagesLink item={item} />
+        </div>
       </Cell>
       <Cell align='right'>{formatPrincipalAmount(terms.principalAmount)}</Cell>
       <Cell align='right'>{formatCollateralDisplay(terms.collateralAmount)}</Cell>
@@ -196,7 +200,7 @@ interface ModalRequest {
  * The lender's loan book: the accepted offers addressed to the wallet's lending key, active,
  * repaid and closed, with what each repaid, still owes and has to claim, as read on chain. Claim
  * takes the installments that open, Claim repayment sweeps a closed loan, and Liquidate takes an
- * overdue loan's collateral.
+ * overdue loan's collateral. A loan with private messages links to their timeline.
  */
 export default function LoanBookPage() {
   const offers = usePrivateOffers()

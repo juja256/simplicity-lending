@@ -1,9 +1,9 @@
 // The scripted testnet demo of both areas (`pnpm demo:testnet`, see `web/README.md`): the lender
 // console and the borrower app, each in its own browser context with one of the e2e's seed
-// wallets, through a whole loan on Liquid testnet, repaid in an installment and the rest, and a
-// short one that the lender liquidates. It broadcasts real testnet transactions and waits for
-// their blocks, so one run takes about 20 minutes. Screenshots of every page of both areas go to
-// `.demo-output/` (git-ignored).
+// wallets, through a whole loan on Liquid testnet, with a private message each way, repaid in an
+// installment and the rest, and a short one that the lender liquidates. It broadcasts real testnet
+// transactions and waits for their blocks, so one run takes about 20 minutes. Screenshots of every
+// page of both areas go to `.demo-output/` (git-ignored).
 /// <reference lib="dom" />
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
@@ -13,6 +13,7 @@ import { expect, type Locator, type Page, test } from '@playwright/test'
 
 import { amountText } from '@/areas/borrow/proposalForm'
 import { PERCENT_DECIMALS, unitsFromDecimal, unitsToDecimal } from '@/privateLending/lenderTerms'
+import { MESSAGE_LIMITS, MESSAGE_NOTE, messageBytes } from '@/privateLending/messages'
 
 import { loadEnv, TESTNET_PAIR, webRoot } from '../e2e/env'
 import { getRecord, removeRecord } from '../e2e/state'
@@ -44,6 +45,11 @@ function termOf(label: string): string {
   if (value === undefined) throw new Error(`no term ${label}`)
   return value
 }
+
+/** The borrower's message with its proposal, which the lender reads in the review. */
+const PROPOSAL_MESSAGE = 'Hello from the demo borrower: I will repay in two parts.'
+/** The lender's answer in its acceptance, which only the borrower reads. */
+const ACCEPTANCE_MESSAGE = 'Accepted. Two parts suit me: claim the principal when you are ready.'
 
 /** The short proposal's collateral in the app: the e2e amount (`scripts/e2e/env.ts`). */
 const SHORT_COLLATERAL = `${unitsToDecimal(20_000n, COLLATERAL.decimals)} ${COLLATERAL.symbol}`
@@ -85,8 +91,16 @@ function fingerprintsOf(walletsOutput: string): Record<Wallet, string> {
   return { borrower: found.borrower, lender: found.lender }
 }
 
+/**
+ * A full-page screenshot `name`, with animations finished first: a modal checked right after it
+ * opened may still be fading in, and would show half transparent over the page.
+ */
 async function shot(page: Page, name: string): Promise<void> {
-  await page.screenshot({ path: path.join(OUTPUT, `${name}.png`), fullPage: true })
+  await page.screenshot({
+    path: path.join(OUTPUT, `${name}.png`),
+    fullPage: true,
+    animations: 'disabled',
+  })
 }
 
 /**
@@ -323,6 +337,14 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     await expectWithinWidth(borrower, send, '"Lock collateral and send"')
     await shot(borrower, 'borrow-proposal-minimums')
 
+    // A private message to the lender, in the proposal's terms: the field counts its bytes.
+    const messageField = borrower.getByRole('textbox', { name: 'Private message (optional)' })
+    await messageField.fill(PROPOSAL_MESSAGE)
+    await expect(
+      borrower.getByText(`${messageBytes(PROPOSAL_MESSAGE)} / ${MESSAGE_LIMITS.creation} bytes`),
+    ).toBeVisible()
+    await expect(send).toBeEnabled()
+
     await send.click()
     await expect(borrower.getByRole('dialog')).toContainText('Send your proposal')
     await confirmTransaction(borrower, 'Lock collateral and send', { confirmed: false })
@@ -386,6 +408,18 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     await expect(dialog).toContainText('The proposal is within your published terms.')
     await expect(dialog.getByText('Accept outside my terms')).toHaveCount(0)
     await shot(lender, 'lend-accept-within-terms')
+
+    // The review shows the borrower's message, and the lender answers in the acceptance.
+    const proposalMessage = dialog.getByRole('region', { name: 'Message from the borrower' })
+    await expect(proposalMessage).toContainText(PROPOSAL_MESSAGE)
+    await expect(proposalMessage).toContainText(MESSAGE_NOTE)
+    await dialog
+      .getByRole('textbox', { name: 'Private message (optional)' })
+      .fill(ACCEPTANCE_MESSAGE)
+    await expect(
+      dialog.getByText(`${messageBytes(ACCEPTANCE_MESSAGE)} / ${MESSAGE_LIMITS.signed} bytes`),
+    ).toBeVisible()
+    await shot(lender, 'lend-review-message')
     await confirmTransaction(lender, 'Accept and lend')
 
     // The borrower receives the principal.
@@ -393,6 +427,27 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     await expect(ownLoan).toContainText('Accepted', { timeout: CHAIN_TIMEOUT })
     await expect(receive).toHaveText(`Receive ${termOf('Smallest principal')} ${PRINCIPAL.symbol}`)
     await shot(borrower, 'borrow-loans-accepted')
+
+    // My loans' timeline shows the borrower's message and the lender's answer, which the
+    // borrower reads from the acceptance on chain.
+    const messagesLink = ownLoan.getByRole('button', { name: 'Messages (2)', exact: true })
+    await expect(messagesLink).toBeVisible({ timeout: CHAIN_TIMEOUT })
+    await messagesLink.click()
+    const timeline = borrower.getByRole('dialog')
+    await expect(timeline).toContainText('Messages')
+    const entries = timeline.getByRole('listitem')
+    await expect(entries).toHaveCount(2)
+    await expect(entries.nth(0)).toContainText('Proposal')
+    await expect(entries.nth(0)).toContainText('(you)')
+    await expect(entries.nth(0)).toContainText(PROPOSAL_MESSAGE)
+    await expect(entries.nth(1)).toContainText('Acceptance')
+    await expect(entries.nth(1)).toContainText(LENDER_NAME)
+    await expect(entries.nth(1)).toContainText(ACCEPTANCE_MESSAGE)
+    await expect(timeline.getByText('Unverified')).toHaveCount(0)
+    await expect(timeline).toContainText(MESSAGE_NOTE)
+    await shot(borrower, 'borrow-messages')
+    await borrower.keyboard.press('Escape')
+    await expect(timeline).toBeHidden()
     await receive.click()
     await confirmTransaction(
       borrower,

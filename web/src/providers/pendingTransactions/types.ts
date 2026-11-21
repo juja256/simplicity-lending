@@ -1,5 +1,8 @@
 export type PendingTxConfirmationStatus = 'processing' | 'confirmed' | 'finalized' | 'failed'
 
+/** The confirmations from which a transaction counts as finalized (and is then forgotten). */
+export const FINALIZED_THRESHOLD = 2
+
 export type PrivateTxKind =
   | 'private_create_offer'
   | 'private_accept_offer'
