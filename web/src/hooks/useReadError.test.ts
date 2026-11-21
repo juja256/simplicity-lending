@@ -1,5 +1,5 @@
 import { QueryClient, QueryObserver, type QueryObserverResult } from '@tanstack/react-query'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { keptReadError } from './useReadError'
 
@@ -27,13 +27,15 @@ function watch<T>(observer: QueryObserver<T, Error>) {
 
 describe('keptReadError', () => {
   let client: QueryClient
+  beforeEach(() => {
+    client = new QueryClient()
+  })
   afterEach(() => client.clear())
 
   // React Query v5 puts an errored query without data back to `pending` while it fetches again,
   // its `error` and `failureReason` both null until that attempt fails: a notice that read them
   // would flip to "Reading…" every 30 seconds.
   it('keeps the error through a refetch, and drops it once the read succeeds', async () => {
-    client = new QueryClient()
     let fail = true
     let finish: (value: string) => void = () => {}
     const observer = new QueryObserver<string, Error>(client, {
