@@ -2322,7 +2322,13 @@ takes about 9 s in wasm for collateral below 2^40 units. Owed before building: t
 proofs listed in the note's section 7, and the user's choice between route C and BP++ from their
 fork (one measurement: two 64-bit reciprocal range proofs compiled by the fork).
 
-Branch `v2/phase-7-proportional-release` (when it comes back).
+**Resumed by the user on 2026-11-21**, after reading the spike's design: route C with the
+liquidation repair. Decided at resumption: the lender caps the collateral at 2^44 base units when it
+accepts; one carry token per loan, issued by the creation transaction; the zero-debt close branch
+is removed; the soundness proofs are written first, before any contract code. The final manual
+checks wait for this phase.
+
+Branch `v2/phase-7-proportional-release`, from `v2/main` (`dcc18a3`).
 
 - **Gate first: a throwaway research spike** (done 2026-11-21, above). Can a BP++ verifier check the
   release `floor((paid + p)·C/R) − floor(paid·C/R)` in Simplicity, within the transaction's cost
