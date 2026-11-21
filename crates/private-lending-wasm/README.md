@@ -94,13 +94,15 @@ Opening:
 
 Building and blinding:
 
-- `OfferTermsInput`, `NewOffer.build(...)`: validate terms and build an offer; `marker()`,
+- `OfferTermsInput`, `NewOffer.build(..., terms, message?)`: validate terms and build an offer,
+  with the borrower's message to the lender in the signed terms; `marker()`,
   `contractArguments()`, `pinned(role)`, `lenderPublicKey()`.
 - `NewOffer.collateralBlinding(outputIndex)`, `NewOffer.collateralBlindingKey()`: how and to which
   key to blind the creation's collateral output.
 - `issuedAssetId(outpoint, contractHash)`: the id of an asset before its issuing transaction exists.
-- `OpenedOffer.pinnedBlinding(role, outputIndex)`: how to blind a pinned output of acceptance or
-  repayment (`bad-input` for the pending collateral, which only creation blinds).
+- `OpenedOffer.pinnedBlinding(role, outputIndex, message?)`: how to blind a pinned output of
+  acceptance or repayment (`bad-input` for the pending collateral, which only creation blinds).
+  Only the principal takes a message, signed by the lender for `Acceptance` of this offer.
 - `OpenedOffer.inputSecret(role, inputIndex)`, `InputSecret` (`new`, `explicit`): the secrets of
   covenant and wallet inputs.
 - `blindPset(psetBase64, inputSecrets, blindings)`: blind a PSET.
@@ -125,14 +127,37 @@ Loans:
   (what opened for the party) and `remaining` (`undefined` unless every installment opened);
   `debtHashAt(j)` (0 the acceptance's loan output), `installment(j)` (from 1),
   `loanInputSecret(inputIndex)` and `collateral()`.
+- `installment(j)` is an `InstallmentInfo`: `outpoint`, `amount` and `message`, the borrower's
+  message read in the same rewind (`undefined` when it does not open or carries none,
+  `bad-input` when its field does not decode).
 - Borrower only, else `bad-input`: `planInstallment(amount, firstWalletInput,
-  nftReceiverScript)`, an `InstallmentPlan` (`debtWitness`, `successorDebtHash`,
+  nftReceiverScript, message?)`, an `InstallmentPlan` (`debtWitness`, `successorDebtHash`,
   `ephemeralPublicKey`, the installment's nonce, `installment`, `successor`,
   `installmentBlinding(i)`, `successorBlinding(i)`) for an amount above 0 and below the remaining
-  debt; `repaymentBlinding(i)` while an amount is owed; `zeroDebtKey()` once none is.
+  debt, the message signed for `Installment` of `installmentCount + 1`; `repaymentBlinding(i,
+  message?)` while an amount is owed, the message signed for `FullRepayment`; `zeroDebtKey()`
+  once none is.
 - Lender only, else `bad-input`: `sweep(closeTxHex, unspent)`, the `Sweep` (`outpoints()`,
   `amount`, `inputSecret(position, inputIndex)`) of the final claim after the full repayment or
   the zero-debt close, or of a liquidation when `closeTxHex` is `undefined`.
+
+Messages (the format and the limits are in the core's `message.rs`):
+
+- `signMessage(sender, creationTxid, phase, installment, text)`: a `SignedMessage` by the
+  sender's lending key for a `MessagePhase` (`Acceptance`, `Installment` with `installment` from
+  1, or `FullRepayment`) of the offer. `bad-input` for an empty text and for one over 3068 bytes
+  in UTF-8, naming both numbers; `NewOffer.build` allows 2915 at creation. The builders that take
+  a `SignedMessage` consume the handle and refuse one signed for another phase, another offer or
+  by the other party.
+- `OpenedOffer.message()`: the creation's text, covered by the terms' signature, `undefined` for
+  none. Terms whose message field does not decode do not open (`terms-invalid`).
+- `OpenedOffer.readMessage(key, creationTxid, txHex, outputIndex, phase)`: a `ReadMessage`
+  (`text`, `verified`) from an output that `key` rewinds with its nonce, checked against the
+  lender's key for `Acceptance` and the borrower's for `FullRepayment`; `undefined` when the
+  output does not rewind or carries none, `bad-input` when the field does not decode and for
+  `Installment`, which `LoanState.installment(j).message` reads.
+- A message that does not verify keeps its text: show it as unverified, since the other party
+  knows the output's blinders and can move a message between outputs.
 
 LWK helpers:
 

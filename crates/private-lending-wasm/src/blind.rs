@@ -5,11 +5,13 @@ use std::collections::HashMap;
 use elements::confidential::{AssetBlindingFactor, ValueBlindingFactor};
 use elements::pset::PartiallySignedTransaction;
 use elements::{AssetId, TxOutSecrets};
-use private_lending_core::PinnedBlinding as CorePinnedBlinding;
+use private_lending_core::{
+    MessagePhase as CoreMessagePhase, PinnedBlinding as CorePinnedBlinding,
+};
 use wasm_bindgen::prelude::*;
 
 use crate::error::bad_input;
-use crate::open::{OpenedOffer, PinnedRole, pinned_output};
+use crate::open::{OpenedOffer, PinnedRole, SignedMessage, carried_message, pinned_output};
 use crate::scan::parse;
 
 /// How to blind one pinned output of a PSET: an opaque handle from [`NewOffer`](crate::NewOffer)
@@ -70,26 +72,43 @@ impl InputSecret {
 #[wasm_bindgen]
 impl OpenedOffer {
     /// How to blind the output of `role` that a transaction at acceptance or repayment creates:
-    /// a random ephemeral key and no extra data. The PSET output must carry the matching blinding
-    /// key (`borrowerBlindingKey()` at acceptance). Only creation blinds the pending collateral,
-    /// with the borrower's ephemeral key (`NewOffer.collateralBlinding`), so that role is
-    /// `bad-input`.
+    /// a random ephemeral key, and in the range proof the lender's `message` to the borrower, if
+    /// any. The PSET output must carry the matching blinding key (`borrowerBlindingKey()` at
+    /// acceptance). Only creation blinds the pending collateral, with the borrower's ephemeral key
+    /// (`NewOffer.collateralBlinding`), so that role is `bad-input`.
+    ///
+    /// Only the principal carries a message, which the lender signed for `Acceptance` of this
+    /// offer: `bad-input` otherwise.
     #[wasm_bindgen(js_name = pinnedBlinding)]
     pub fn pinned_blinding(
         &self,
         role: PinnedRole,
         output_index: u32,
+        message: Option<SignedMessage>,
     ) -> Result<PinnedBlinding, String> {
         if role == PinnedRole::PendingCollateral {
             return Err(bad_input(
                 "the pending collateral is blinded only at creation, with NewOffer.collateralBlinding",
             ));
         }
+        if message.is_some() && role != PinnedRole::Principal {
+            return Err(bad_input(
+                "only the principal carries the acceptance's message",
+            ));
+        }
+        let extra_data = carried_message(
+            message,
+            &self.inner().lender,
+            CoreMessagePhase::Acceptance,
+            &self.creation_txid(),
+            "the acceptance",
+        )?;
+
         Ok(PinnedBlinding(CorePinnedBlinding {
             output_index: output_index as usize,
             pinned: *pinned_output(&self.inner().pinned, role),
             ephemeral_sk: None,
-            extra_data: Vec::new(),
+            extra_data,
         }))
     }
 
@@ -341,9 +360,11 @@ mod tests {
         ];
         let blindings = vec![
             opened
-                .pinned_blinding(PinnedRole::ActiveCollateral, 0)
+                .pinned_blinding(PinnedRole::ActiveCollateral, 0, None)
                 .unwrap(),
-            opened.pinned_blinding(PinnedRole::Principal, 1).unwrap(),
+            opened
+                .pinned_blinding(PinnedRole::Principal, 1, None)
+                .unwrap(),
         ];
 
         let blinded_pset = blind_pset(&pset.to_string(), secrets, blindings).unwrap();

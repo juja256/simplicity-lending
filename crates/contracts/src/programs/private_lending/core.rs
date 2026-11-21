@@ -1,5 +1,6 @@
 use private_lending_core::{
-    DebtOpening, NewOffer, OfferSecrets, debt_after, debt_hash, lift_lending_key, zero_debt_key,
+    DebtOpening, NewOffer, OfferSecrets, SignedMessage, debt_after, debt_hash, lift_lending_key,
+    zero_debt_key,
 };
 use simplex::{
     program::Program,
@@ -258,8 +259,10 @@ impl PrivateLendingOffer {
     }
 
     /// Spends the pending offer and the locked lender NFT (inputs 0 and 1) into the active offer
-    /// (output 0) and the pinned principal (output 1). The caller adds the lender NFT output
-    /// (output 2).
+    /// (output 0) and the pinned principal (output 1), whose range proof carries the lender's
+    /// `message` to the borrower, if any: signed by the lender's lending key for
+    /// [`MessagePhase::Acceptance`](private_lending_core::MessagePhase::Acceptance) of this offer,
+    /// which only the lender's key can check. The caller adds the lender NFT output (output 2).
     ///
     /// # Panics
     /// Panics if the transaction already has inputs or outputs.
@@ -269,6 +272,7 @@ impl PrivateLendingOffer {
         pending_offer_utxo: UTXO,
         lender_nft_utxo: UTXO,
         borrower_blinding_key: PublicKey,
+        message: Option<&SignedMessage>,
     ) {
         assert!(
             ctx.n_inputs() == 0 && ctx.n_outputs() == 0,
@@ -291,13 +295,22 @@ impl PrivateLendingOffer {
             borrower_blinding_key,
         );
 
-        ctx.add_pinned_output(
-            self.parameters
-                .get_principal_output_asset_auth()
-                .get_script_pubkey(),
-            self.parameters.pinned.principal,
-            borrower_blinding_key,
-        );
+        let principal_script = self
+            .parameters
+            .get_principal_output_asset_auth()
+            .get_script_pubkey();
+        let principal = self.parameters.pinned.principal;
+        match message {
+            None => ctx.add_pinned_output(principal_script, principal, borrower_blinding_key),
+            // the acceptance's nonce is random, with a message as without
+            Some(message) => ctx.add_pinned_output_with(
+                principal_script,
+                principal,
+                borrower_blinding_key,
+                SecretKey::new(&mut rand::thread_rng()),
+                message.encode(),
+            ),
+        }
     }
 
     /// Spends the pending offer and the locked lender NFT (inputs 0 and 1) and burns the lender
@@ -347,7 +360,11 @@ impl PrivateLendingOffer {
     /// `ephemeral_sk·G`, which the borrower derives with
     /// [`installment_ephemeral_key`](private_lending_core::installment_ephemeral_key), so that
     /// both parties can rewind it and rebuild the debt from the chain. The successor's range proof
-    /// is blinded to `lender_blinding_key` too: both parties derive its blinders anyway.
+    /// is blinded to `lender_blinding_key` too: both parties derive its blinders anyway. The
+    /// installment's range proof carries the borrower's `message`, if any, signed by the
+    /// borrower's lending key for
+    /// [`MessagePhase::Installment`](private_lending_core::MessagePhase::Installment) of this
+    /// installment, one more than [`Self::get_installments`].
     ///
     /// # Panics
     /// Panics if the offer is pending, the transaction already has inputs or outputs,
@@ -364,6 +381,7 @@ impl PrivateLendingOffer {
         payment: PinnedOutput,
         lender_blinding_key: PublicKey,
         ephemeral_sk: SecretKey,
+        message: Option<&SignedMessage>,
     ) -> PrivateLendingOffer {
         assert!(self.is_active, "Only an active offer takes installments");
         assert!(
@@ -408,7 +426,7 @@ impl PrivateLendingOffer {
             payment,
             lender_blinding_key,
             ephemeral_sk,
-            Vec::new(),
+            message.map(SignedMessage::encode).unwrap_or_default(),
         );
 
         successor

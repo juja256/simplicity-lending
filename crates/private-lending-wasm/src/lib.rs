@@ -29,8 +29,8 @@ pub use lender_terms::{
 };
 pub use loan::{InstallmentInfo, InstallmentPlan, LoanState, Sweep};
 pub use open::{
-    ContractArguments, OpenedOffer, PinnedOutputInfo, PinnedRole, open_creation_as_borrower_hex,
-    open_creation_as_lender_hex,
+    ContractArguments, MessagePhase, OpenedOffer, PinnedOutputInfo, PinnedRole, ReadMessage,
+    SignedMessage, open_creation_as_borrower_hex, open_creation_as_lender_hex, sign_message,
 };
 pub use scan::{is_own_candidate, private_lending_program_id, view_tag_matches};
 

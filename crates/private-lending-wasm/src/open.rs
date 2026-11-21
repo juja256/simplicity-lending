@@ -1,17 +1,21 @@
-//! Opening offers from their creation transactions.
+//! Opening offers from their creation transactions, and the private messages of their loans.
 
 use elements::encode::deserialize;
 use elements::hex::ToHex;
+use elements::secp256k1_zkp::XOnlyPublicKey;
 use elements::{OutPoint, Transaction, Txid, confidential};
 use private_lending_core::{
-    CreationError, OfferPinned, OfferSecrets, OfferTerms, OpenedOffer as CoreOpenedOffer,
-    PinnedOutput, PinnedRole as CorePinnedRole, expiry_hash, lift_lending_key,
-    open_creation_as_borrower, open_creation_as_lender,
+    CreationError, MAX_SIGNED_MESSAGE_BYTES, Message, MessageError,
+    MessagePhase as CoreMessagePhase, OfferPinned, OfferSecrets, OfferTerms,
+    OpenedOffer as CoreOpenedOffer, PinnedOutput, PinnedRole as CorePinnedRole,
+    SignedMessage as CoreSignedMessage, expiry_hash, lift_lending_key, open_creation_as_borrower,
+    open_creation_as_lender, rewind,
 };
 use wasm_bindgen::prelude::*;
 
 use crate::error::{bad_input, creation_error, decode_hex, encode_hex};
 use crate::keys::LendingKey;
+use crate::scan::parse;
 
 /// The outputs of the offer contract whose blinding factors derive from the shared secret.
 #[wasm_bindgen]
@@ -32,6 +36,137 @@ impl From<PinnedRole> for CorePinnedRole {
             PinnedRole::Repayment => CorePinnedRole::Repayment,
         }
     }
+}
+
+/// The step of a loan whose output carries a signed message: the lender's acceptance (on the
+/// principal), the borrower's installment (on the installment output) or the borrower's full
+/// repayment (on the repayment output).
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessagePhase {
+    Acceptance,
+    Installment,
+    FullRepayment,
+}
+
+/// A message signed by its sender's lending key for one phase of one offer, which the output of
+/// that phase carries: see `OpenedOffer.pinnedBlinding`, `LoanState.planInstallment` and
+/// `LoanState.repaymentBlinding`, which consume the handle, as `blindPset` consumes its
+/// arguments.
+#[wasm_bindgen]
+#[derive(Clone, Debug)]
+pub struct SignedMessage(CoreSignedMessage);
+
+/// The extra data of the output that carries `message`, empty for none: `bad-input`, naming
+/// `what`, the phase, unless `sender` signed it for `phase` of the offer `offer_id`.
+pub(crate) fn carried_message(
+    message: Option<SignedMessage>,
+    sender: &XOnlyPublicKey,
+    phase: CoreMessagePhase,
+    offer_id: &Txid,
+    what: &str,
+) -> Result<Vec<u8>, String> {
+    let Some(SignedMessage(message)) = message else {
+        return Ok(Vec::new());
+    };
+    message.verify(sender, phase, offer_id).map_err(|_| {
+        bad_input(format!(
+            "the message is not signed for {what} of this offer by its sender"
+        ))
+    })?;
+
+    Ok(message.encode())
+}
+
+/// Signs `text` with the sender's lending key for `phase` of the offer whose creation transaction
+/// is `creation_txid` (display hex): for its `installment`-th installment, from 1, when `phase` is
+/// `Installment`, the index being ignored for the other phases.
+///
+/// `bad-input` for an empty text, a text longer than 3068 bytes (UTF-8), naming its length and
+/// the limit, and an installment 0.
+#[wasm_bindgen(js_name = signMessage)]
+pub fn sign_message(
+    sender: &LendingKey,
+    creation_txid: &str,
+    phase: MessagePhase,
+    installment: u32,
+    text: &str,
+) -> Result<SignedMessage, String> {
+    let offer_id: Txid = parse("creation txid", creation_txid)?;
+    let phase = match phase {
+        MessagePhase::Acceptance => CoreMessagePhase::Acceptance,
+        MessagePhase::Installment if installment == 0 => {
+            return Err(bad_input("installments count from 1"));
+        }
+        MessagePhase::Installment => CoreMessagePhase::Installment(installment),
+        MessagePhase::FullRepayment => CoreMessagePhase::FullRepayment,
+    };
+    let message = message_text(text, MAX_SIGNED_MESSAGE_BYTES)?;
+
+    CoreSignedMessage::sign(message, sender.inner(), phase, &offer_id)
+        .map(SignedMessage)
+        .map_err(bad_input)
+}
+
+/// The message of `text`, at most `max` bytes in UTF-8: `bad-input` for an empty text, and for a
+/// longer one with its length and the limit.
+pub(crate) fn message_text(text: &str, max: usize) -> Result<Message, String> {
+    if text.len() > max {
+        return Err(bad_input(format!(
+            "the message is {} bytes; at most {max} fit",
+            text.len()
+        )));
+    }
+
+    Message::text(text).map_err(bad_input)
+}
+
+/// A message read from a loan's output: its text, and whether its sender signed it for the phase
+/// and the offer it was read for. An unverified message may have been moved there by the other
+/// party, who knows the output's blinders.
+#[wasm_bindgen]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadMessage {
+    text: String,
+    verified: bool,
+}
+
+impl ReadMessage {
+    /// The signed message at the start of `extra_data`, a rewound range proof's, checked against
+    /// `sender`, `phase` and `offer_id`: `None` when the output carries none, an error when its
+    /// field does not decode.
+    pub(crate) fn read(
+        extra_data: &[u8],
+        sender: &XOnlyPublicKey,
+        phase: CoreMessagePhase,
+        offer_id: &Txid,
+    ) -> Result<Option<ReadMessage>, MessageError> {
+        Ok(
+            CoreSignedMessage::decode(extra_data)?.map(|signed| ReadMessage {
+                verified: signed.verify(sender, phase, offer_id).is_ok(),
+                text: signed.message.as_text().to_owned(),
+            }),
+        )
+    }
+}
+
+#[wasm_bindgen]
+impl ReadMessage {
+    /// The text as it was sent: the caller removes the control characters before showing it.
+    #[wasm_bindgen(getter)]
+    pub fn text(&self) -> String {
+        self.text.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn verified(&self) -> bool {
+        self.verified
+    }
+}
+
+/// The error string of a message field that does not decode.
+pub(crate) fn unreadable(error: MessageError) -> String {
+    bad_input(format!("unreadable message: {error}"))
 }
 
 /// The party of an offer: its borrower or its lender.
@@ -230,6 +365,68 @@ impl OpenedOffer {
 
     pub fn pinned(&self, role: PinnedRole) -> PinnedOutputInfo {
         PinnedOutputInfo::new(pinned_output(&self.offer.pinned, role))
+    }
+
+    /// The borrower's message to the lender at creation, `undefined` for none. It is part of the
+    /// terms, whose signature opening the offer checked; terms whose message does not decode do
+    /// not open (`terms-invalid`).
+    pub fn message(&self) -> Option<String> {
+        self.offer
+            .signed_terms
+            .message
+            .as_ref()
+            .map(|message| message.as_text().to_owned())
+    }
+
+    /// The message that output `output_index` of the transaction `tx_hex` carries for `phase`,
+    /// rewound with `key` and the output's nonce, and checked against the lender's key for
+    /// `Acceptance`, the borrower's for `FullRepayment`. `creation_txid` (display hex) must be
+    /// this offer's.
+    ///
+    /// `undefined` when the output does not rewind with `key` or carries no message. `bad-input`
+    /// when its message field does not decode, and for `Installment`: the loan's state reads each
+    /// installment's message (`LoanState.installment(j).message`), knowing its index.
+    #[wasm_bindgen(js_name = readMessage)]
+    pub fn read_message(
+        &self,
+        key: &LendingKey,
+        creation_txid: &str,
+        tx_hex: &str,
+        output_index: u32,
+        phase: MessagePhase,
+    ) -> Result<Option<ReadMessage>, String> {
+        let offer_id: Txid = parse("creation txid", creation_txid)?;
+        if offer_id != self.creation_txid {
+            return Err(bad_input("the creation txid is not this offer's"));
+        }
+        let (sender, phase) = match phase {
+            MessagePhase::Acceptance => (self.offer.lender, CoreMessagePhase::Acceptance),
+            MessagePhase::FullRepayment => (
+                self.offer.signed_terms.borrower,
+                CoreMessagePhase::FullRepayment,
+            ),
+            MessagePhase::Installment => {
+                return Err(bad_input(
+                    "an installment's message is read from the loan state, which knows its index",
+                ));
+            }
+        };
+        let tx = parse_tx(tx_hex)?;
+        let output = tx
+            .output
+            .get(output_index as usize)
+            .ok_or_else(|| bad_input(format!("the transaction has no output {output_index}")))?;
+
+        let Some(nonce) = output.nonce.commitment() else {
+            return Ok(None);
+        };
+        // the shared secret of a key and a nonce, which the lender's opening of an offer uses too
+        let shared_secret = OfferSecrets::for_lender(key.inner(), &nonce).shared_secret();
+        let Ok((_, extra_data)) = rewind(output, shared_secret) else {
+            return Ok(None);
+        };
+
+        ReadMessage::read(&extra_data, &sender, phase, &offer_id).map_err(unreadable)
     }
 }
 
@@ -580,11 +777,15 @@ pub(crate) mod tests {
         let lender = key_of(&fixture, "lender_master_blinding_key");
         let offer = open_creation_as_lender_hex(&lender, &creation_hex(&fixture)).unwrap();
         let error = offer
-            .pinned_blinding(PinnedRole::PendingCollateral, 0)
+            .pinned_blinding(PinnedRole::PendingCollateral, 0, None)
             .err()
             .unwrap();
         assert!(error.starts_with("bad-input:"), "{error}");
-        assert!(offer.pinned_blinding(PinnedRole::Principal, 0).is_ok());
+        assert!(
+            offer
+                .pinned_blinding(PinnedRole::Principal, 0, None)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -630,6 +831,75 @@ pub(crate) mod tests {
             .err()
             .unwrap();
         assert!(error.starts_with("not-mine:"), "{error}");
+    }
+
+    #[test]
+    fn the_fixture_messages_read_verified() {
+        let fixture = fixture();
+        let hex = creation_hex(&fixture);
+        let id = tx_of(&hex).txid().to_string();
+        let lender = key_of(&fixture, "lender_master_blinding_key");
+        let borrower = key_of(&fixture, "borrower_master_blinding_key");
+        let messages = &fixture["messages"];
+        let as_lender = open_creation_as_lender_hex(&lender, &hex).unwrap();
+        let as_borrower = open_creation_as_borrower_hex(&borrower, &hex).unwrap();
+
+        // the creation's message, in the terms both parties opened
+        for offer in [&as_lender, &as_borrower] {
+            assert_eq!(offer.message().unwrap(), messages["creation"]);
+        }
+        // the lender's acceptance message, on the principal, which only the borrower rewinds
+        let acceptance = fixture["loan"]["acceptance_tx"].as_str().unwrap();
+        let read = as_borrower
+            .read_message(&borrower, &id, acceptance, 1, MessagePhase::Acceptance)
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.text(), messages["acceptance"]);
+        assert!(read.verified());
+        assert!(
+            as_lender
+                .read_message(&lender, &id, acceptance, 1, MessagePhase::Acceptance)
+                .unwrap()
+                .is_none()
+        );
+        // the other offer was created without one
+        let other = fixture["other_offer"]["creation_tx"].as_str().unwrap();
+        assert_eq!(
+            open_creation_as_lender_hex(&lender, other)
+                .unwrap()
+                .message(),
+            None
+        );
+    }
+
+    #[test]
+    fn sign_message_refuses_empty_long_and_zeroth_installment_texts() {
+        let fixture = fixture();
+        let lender = key_of(&fixture, "lender_master_blinding_key");
+        let id = tx_of(&creation_hex(&fixture)).txid().to_string();
+        let sign =
+            |phase, installment, text: &str| sign_message(&lender, &id, phase, installment, text);
+
+        let error = sign(MessagePhase::Acceptance, 0, "").err().unwrap();
+        assert!(error.starts_with("bad-input:"), "{error}");
+        // counted in UTF-8 bytes: 767 emojis are the 3068 bytes that fit, and one byte more does
+        // not
+        let longest = "🙂".repeat(767);
+        assert!(sign(MessagePhase::FullRepayment, 0, &longest).is_ok());
+        let error = sign(MessagePhase::FullRepayment, 0, &format!("{longest}a"))
+            .err()
+            .unwrap();
+        assert!(error.starts_with("bad-input:"), "{error}");
+        assert!(error.contains("3069") && error.contains("3068"), "{error}");
+        // installments count from 1; the index of another phase is ignored
+        let error = sign(MessagePhase::Installment, 0, "hi").err().unwrap();
+        assert!(error.starts_with("bad-input:"), "{error}");
+        assert!(sign(MessagePhase::Installment, 1, "hi").is_ok());
+        assert!(sign(MessagePhase::Acceptance, 7, "hi").is_ok());
+        let error = sign_message(&lender, "zz", MessagePhase::Acceptance, 0, "hi")
+            .err()
+            .unwrap();
+        assert!(error.starts_with("bad-input:"), "{error}");
     }
 
     #[test]

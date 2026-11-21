@@ -1,13 +1,13 @@
 //! Building a new offer.
 
 use elements::{AssetId, ContractHash, OutPoint};
-use private_lending_core::{NewOffer as CoreNewOffer, OfferTerms};
+use private_lending_core::{MAX_CREATION_MESSAGE_BYTES, NewOffer as CoreNewOffer, OfferTerms};
 use wasm_bindgen::prelude::*;
 
 use crate::blind::PinnedBlinding;
 use crate::error::{bad_input, encode_hex};
 use crate::keys::LendingKey;
-use crate::open::{ContractArguments, PinnedOutputInfo, PinnedRole, pinned_output};
+use crate::open::{ContractArguments, PinnedOutputInfo, PinnedRole, message_text, pinned_output};
 use crate::scan::parse;
 
 /// The terms of an offer to build; validated by [`NewOffer::build`].
@@ -47,7 +47,11 @@ pub struct NewOffer {
 #[wasm_bindgen]
 impl NewOffer {
     /// Builds the offer from `borrower` to the lender (x-only key, hex) whose creation
-    /// transaction spends `first_input` (`"<txid>:<vout>"`) as its input 0.
+    /// transaction spends `first_input` (`"<txid>:<vout>"`) as its input 0, with the borrower's
+    /// `message` to the lender in the signed terms.
+    ///
+    /// `bad-input` for an empty message, and for one longer than 2915 bytes (UTF-8), naming its
+    /// length and the limit.
     pub fn build(
         borrower: &LendingKey,
         lender_x_only: &str,
@@ -55,9 +59,13 @@ impl NewOffer {
         collateral_asset: &str,
         collateral_amount: u64,
         terms: &OfferTermsInput,
+        message: Option<String>,
     ) -> Result<NewOffer, String> {
         let lender = parse("lender key", lender_x_only)?;
         let first_input: OutPoint = parse("first input", first_input)?;
+        let message = message
+            .map(|text| message_text(&text, MAX_CREATION_MESSAGE_BYTES))
+            .transpose()?;
         let inner = CoreNewOffer::build(
             borrower.inner(),
             &lender,
@@ -66,7 +74,7 @@ impl NewOffer {
             parse::<AssetId>("collateral asset", collateral_asset)?,
             collateral_amount,
             terms.0,
-            None,
+            message,
         )
         .map_err(bad_input)?;
         Ok(Self { inner })
@@ -193,6 +201,10 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn build_offer(principal: u64) -> Result<NewOffer, String> {
+        build_offer_with(principal, None)
+    }
+
+    fn build_offer_with(principal: u64, message: Option<String>) -> Result<NewOffer, String> {
         NewOffer::build(
             &key(1),
             &key(2).x_only_public_key(),
@@ -200,6 +212,7 @@ pub(crate) mod tests {
             &asset(0xcc).to_string(),
             50_000,
             &terms_input(principal),
+            message,
         )
     }
 
@@ -310,6 +323,39 @@ pub(crate) mod tests {
         assert_eq!(a.loan_expiration_time(), b.loan_expiration_time());
         assert_eq!(a.expiry_hash(), b.expiry_hash());
         assert_eq!(opened.lender_public_key(), offer.lender_public_key());
+    }
+
+    #[test]
+    fn the_creation_message_reads_back_from_the_terms() {
+        let text = "Two lines,\nwith an emoji 🙂";
+        let offer = build_offer_with(10_000, Some(text.to_string())).unwrap();
+        let (pset, secrets) = creation_pset(&offer);
+        let blinded = blind_pset(
+            &pset.to_string(),
+            secrets,
+            vec![offer.collateral_blinding(3)],
+        )
+        .unwrap();
+        let tx = blinded
+            .parse::<PartiallySignedTransaction>()
+            .unwrap()
+            .extract_tx()
+            .unwrap();
+
+        let opened = open_creation_as_lender_hex(&key(2), &encode_hex(&serialize(&tx))).unwrap();
+        assert_eq!(opened.message().as_deref(), Some(text));
+        let plain = build_offer(10_000).unwrap();
+        assert_eq!(plain.inner.signed_terms.message, None);
+
+        // 2915 bytes fit in the terms, and one more does not
+        assert!(build_offer_with(10_000, Some("a".repeat(2915))).is_ok());
+        let error = build_offer_with(10_000, Some("a".repeat(2916)))
+            .err()
+            .unwrap();
+        assert!(error.starts_with("bad-input:"), "{error}");
+        assert!(error.contains("2916") && error.contains("2915"), "{error}");
+        let error = build_offer_with(10_000, Some(String::new())).err().unwrap();
+        assert!(error.starts_with("bad-input:"), "{error}");
     }
 
     fn hex_bytes(hex: &str) -> Vec<u8> {

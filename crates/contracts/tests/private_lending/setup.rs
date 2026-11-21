@@ -25,8 +25,8 @@ use lending_contracts::utils::confidential::{
     ConfidentialTransaction, ConfidentialTransactionError, PinnedOutput, PinnedOutputExt,
 };
 use private_lending_core::{
-    DebtOpening, LendingKey, NewOffer, OfferTerms, debt_after, installment_ephemeral_key,
-    lift_lending_key,
+    DebtOpening, LendingKey, Message, NewOffer, OfferTerms, SignedMessage, debt_after,
+    installment_ephemeral_key, lift_lending_key,
 };
 
 use lending_contracts::utils::confidential::wait_for_confirmation;
@@ -300,6 +300,15 @@ pub(super) fn setup_pending_private_offer(
     context: &simplex::TestContext,
     offer_parameters: OfferParameters,
 ) -> anyhow::Result<PrivateOfferSetup> {
+    setup_pending_private_offer_with(context, offer_parameters, None)
+}
+
+/// [`setup_pending_private_offer`] with the borrower's `message` to the lender in the terms.
+pub(super) fn setup_pending_private_offer_with(
+    context: &simplex::TestContext,
+    offer_parameters: OfferParameters,
+    message: Option<Message>,
+) -> anyhow::Result<PrivateOfferSetup> {
     let borrower = context.get_default_signer();
     let network = *context.get_network();
     let policy_asset = network.policy_asset();
@@ -343,7 +352,7 @@ pub(super) fn setup_pending_private_offer(
         policy_asset,
         offer_parameters.collateral_amount,
         terms,
-        None,
+        message,
     )?;
 
     let parameters =
@@ -373,13 +382,14 @@ pub(super) fn setup_pending_private_offer(
     })
 }
 
-/// The acceptance transaction, before finalization (the lender's view of the terms).
+/// The acceptance transaction, before finalization (the lender's view of the terms), its
+/// outputs blinded to `borrower_blinding_key` and its principal carrying the lender's `message`.
 pub(super) fn build_acceptance(
-    context: &simplex::TestContext,
     setup: &mut PrivateOfferSetup,
     lender: &Signer,
+    borrower_blinding_key: PublicKey,
+    message: Option<&SignedMessage>,
 ) -> anyhow::Result<ConfidentialTransaction> {
-    let borrower = context.get_default_signer();
     let parameters = setup.parameters;
 
     let pending_offer_utxo =
@@ -392,7 +402,8 @@ pub(super) fn build_acceptance(
         &mut ctx,
         pending_offer_utxo,
         lender_nft_utxo,
-        borrower.get_blinding_public_key(),
+        borrower_blinding_key,
+        message,
     );
 
     ctx.add_output(PartialOutput::new(
@@ -447,6 +458,20 @@ pub(super) fn accept_private_offer(
     setup: &mut PrivateOfferSetup,
     lender: &Signer,
 ) -> anyhow::Result<Transaction> {
+    let borrower_blinding_key = context.get_default_signer().get_blinding_public_key();
+
+    accept_private_offer_with(context, setup, lender, borrower_blinding_key, None)
+}
+
+/// [`accept_private_offer`] with the outputs blinded to `borrower_blinding_key` and the
+/// principal carrying the lender's `message`.
+pub(super) fn accept_private_offer_with(
+    context: &simplex::TestContext,
+    setup: &mut PrivateOfferSetup,
+    lender: &Signer,
+    borrower_blinding_key: PublicKey,
+    message: Option<&SignedMessage>,
+) -> anyhow::Result<Transaction> {
     fund_lender(
         context,
         lender,
@@ -454,7 +479,7 @@ pub(super) fn accept_private_offer(
         setup.parameters.pinned.principal.amount,
     )?;
 
-    let ctx = build_acceptance(context, setup, lender)?;
+    let ctx = build_acceptance(setup, lender, borrower_blinding_key, message)?;
 
     broadcast(&ctx, lender)
 }
@@ -529,6 +554,14 @@ pub(super) fn lender_blinding_key(setup: &PrivateOfferSetup) -> PublicKey {
     ))
 }
 
+/// The borrower's lifted lending key: the blinding key of the acceptance's outputs as the app
+/// blinds them, with which the borrower reads the lender's message on the principal.
+pub(super) fn borrower_blinding_key(setup: &PrivateOfferSetup) -> PublicKey {
+    PublicKey::new(lift_lending_key(
+        &setup.borrower_lending_key.x_only_public_key(),
+    ))
+}
+
 /// The output of the repayment asset `A` that carries `opening`: an installment, or the full
 /// repayment of a debt.
 pub(super) fn repayment_output(
@@ -599,12 +632,14 @@ pub(super) fn collateral_to(
 
 /// The installment of `payment` on `loan`, before finalization, built with `attach_installment`:
 /// the borrower NFT returns to the borrower's address, and a principal coin of the borrower pays,
-/// its change back to the borrower. Returns the transaction and the offer it leaves.
+/// its change back to the borrower. The installment carries the borrower's `message`. Returns the
+/// transaction and the offer it leaves.
 pub(super) fn build_installment(
     setup: &PrivateOfferSetup,
     loan: &Loan,
     borrower: &Signer,
     payment: DebtOpening,
+    message: Option<&SignedMessage>,
 ) -> anyhow::Result<(ConfidentialTransaction, PrivateLendingOffer)> {
     let parameters = loan.parameters();
     let installment = repayment_output(&parameters, payment);
@@ -627,6 +662,7 @@ pub(super) fn build_installment(
         installment,
         lender_blinding_key(setup),
         ephemeral_sk,
+        message,
     );
 
     add_coin_and_change(&mut ctx, borrower, coin, installment.amount);
@@ -642,7 +678,18 @@ pub(super) fn pay_installment(
     borrower: &Signer,
     payment: DebtOpening,
 ) -> anyhow::Result<(Transaction, Loan)> {
-    let (ctx, successor) = build_installment(setup, loan, borrower, payment)?;
+    pay_installment_with(setup, loan, borrower, payment, None)
+}
+
+/// [`pay_installment`] with the borrower's `message` on the installment.
+pub(super) fn pay_installment_with(
+    setup: &PrivateOfferSetup,
+    loan: &Loan,
+    borrower: &Signer,
+    payment: DebtOpening,
+    message: Option<&SignedMessage>,
+) -> anyhow::Result<(Transaction, Loan)> {
+    let (ctx, successor) = build_installment(setup, loan, borrower, payment, message)?;
     let tx = broadcast(&ctx, borrower)?;
     let next = loan.after_installment(&tx, successor, payment);
 

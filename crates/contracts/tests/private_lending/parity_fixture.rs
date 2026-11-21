@@ -2,8 +2,10 @@
 //! transaction from regtest, the keys that open it, the contract's expected arguments and scripts,
 //! and the serialized witnesses of the branches the web builds, from synthetic spends of the offer.
 //! The offer's loan, also from regtest, has its acceptance and one installment, with the debt and
-//! the loan's scripts the contract gives for them. A second offer's `A` has the other prefix bit,
-//! so that the web's conversion of the bit is checked both ways.
+//! the loan's scripts the contract gives for them. The offer carries the borrower's message in its
+//! terms, the acceptance the lender's on the principal, and the installment the borrower's, each
+//! signed for its phase. A second offer's `A` has the other prefix bit, so that the web's
+//! conversion of the bit is checked both ways.
 //! Regenerate it with `WRITE_PARITY_FIXTURE=1 simplex test write_private_lending_parity_fixture`.
 
 use serde_json::{Value, json};
@@ -25,14 +27,16 @@ use lending_contracts::programs::private_lending::{
 use lending_contracts::programs::program::SimplexProgram;
 use lending_contracts::programs::script_auth::ScriptAuth;
 use private_lending_core::{
-    DebtOpening, LendingKey, OfferSecrets, PinnedOutput, debt_after, debt_hash, open_installment,
+    DebtOpening, LendingKey, Message, MessagePhase, OfferSecrets, PinnedOutput, SignedMessage,
+    debt_after, debt_hash, open_installment, open_installment_with_extra_data, rewind,
     zero_debt_key,
 };
 
 use super::offer_installment_flows::{prefix_bit, random_payment};
 use super::setup::{
-    Loan, accept_private_offer, default_offer_parameters, pay_installment, repayment_output,
-    setup_pending_private_offer,
+    Loan, accept_private_offer_with, borrower_blinding_key, default_offer_parameters,
+    pay_installment_with, repayment_output, setup_pending_private_offer,
+    setup_pending_private_offer_with,
 };
 
 const FIXTURE: &str = include_str!("../../../../web/scripts/fixtures/private-lending-parity.json");
@@ -46,6 +50,14 @@ const LENDER_MASTER_BLINDING_KEY: [u8; 32] = [2; 32];
 
 /// The amount of the loan's installment, below the repayment of 11 000.
 const INSTALLMENT_AMOUNT: u64 = 3_000;
+
+/// The loan's messages: the borrower's in the terms, the lender's on the acceptance's principal
+/// and the borrower's on the installment. Each has a newline and two have characters beyond
+/// ASCII, so that the web reads them as UTF-8 text with their lines.
+const CREATION_MESSAGE: &str = "Collateral from my savings.\nI repay early when I can — 🙂";
+const ACCEPTANCE_MESSAGE: &str = "Accepted, thank you.\nПлатіть вчасно, будь ласка.";
+const INSTALLMENT_MESSAGE: &str = "The first installment.\nThe rest next month.";
+
 /// How many offers the writer creates, at most, to find one whose `A` has the other prefix bit:
 /// each has it with probability 1/2.
 const MAX_OTHER_OFFERS: usize = 16;
@@ -405,6 +417,11 @@ fn expected_fixture(
         "lender_nft_script_pubkey": hex::encode(lender_nft_lock.get_script_pubkey().as_bytes()),
         "witness_vectors": witness_vectors(parameters),
         "loan": loan_json(parameters, &txs.acceptance, &txs.installment)?,
+        "messages": {
+            "creation": CREATION_MESSAGE,
+            "acceptance": ACCEPTANCE_MESSAGE,
+            "installment": INSTALLMENT_MESSAGE,
+        },
         "other_offer": other_offer_json(other_parameters, &txs.other_creation),
     }))
 }
@@ -438,8 +455,13 @@ fn write_private_lending_parity_fixture(context: simplex::TestContext) -> anyhow
         return Ok(());
     }
 
-    let mut setup = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
+    let mut setup = setup_pending_private_offer_with(
+        &context,
+        default_offer_parameters(&context)?,
+        Some(Message::text(CREATION_MESSAGE)?),
+    )?;
     let parameters = setup.parameters;
+    let offer_id = setup.creation_tx.txid();
     let mut other = None;
     for _ in 0..MAX_OTHER_OFFERS {
         let candidate = setup_pending_private_offer(&context, default_offer_parameters(&context)?)?;
@@ -450,11 +472,33 @@ fn write_private_lending_parity_fixture(context: simplex::TestContext) -> anyhow
     }
     let other = other.ok_or_else(|| anyhow::anyhow!("no offer with the other prefix bit of A"))?;
 
+    // the acceptance is blinded to the borrower's lending key, as the app blinds it, so that the
+    // borrower reads the lender's message with it
     let lender = context.random_signer();
-    let acceptance = accept_private_offer(&context, &mut setup, &lender)?;
+    let accepted = SignedMessage::sign(
+        Message::text(ACCEPTANCE_MESSAGE)?,
+        &setup.lender_lending_key,
+        MessagePhase::Acceptance,
+        &offer_id,
+    )?;
+    let borrower_key = borrower_blinding_key(&setup);
+    let acceptance =
+        accept_private_offer_with(&context, &mut setup, &lender, borrower_key, Some(&accepted))?;
     let loan = Loan::accepted(parameters, &acceptance);
     let payment = installment_of_the_other_bit(&loan)?;
-    let (installment, _) = pay_installment(&setup, &loan, context.get_default_signer(), payment)?;
+    let paid = SignedMessage::sign(
+        Message::text(INSTALLMENT_MESSAGE)?,
+        &setup.borrower_lending_key,
+        MessagePhase::Installment(1),
+        &offer_id,
+    )?;
+    let (installment, _) = pay_installment_with(
+        &setup,
+        &loan,
+        context.get_default_signer(),
+        payment,
+        Some(&paid),
+    )?;
 
     let txs = FixtureTransactions {
         creation: setup.creation_tx,
@@ -496,10 +540,12 @@ fn parity_fixture_verifies_against_the_contract(
     let lender = LendingKey::from_master_blinding_key(&LENDER_MASTER_BLINDING_KEY);
     let borrower = LendingKey::from_master_blinding_key(&BORROWER_MASTER_BLINDING_KEY);
 
-    let (_, lender_parameters) = verify_offer_as_lender(&lender, &txs.creation, network)?;
-    let (_, borrower_parameters) = verify_offer_as_borrower(&borrower, &txs.creation, network)?;
+    let (as_lender, lender_parameters) = verify_offer_as_lender(&lender, &txs.creation, network)?;
+    let (as_borrower, borrower_parameters) =
+        verify_offer_as_borrower(&borrower, &txs.creation, network)?;
     assert_eq!(lender_parameters, borrower_parameters);
-    let (_, other_parameters) = verify_offer_as_lender(&lender, &txs.other_creation, network)?;
+    let (other_offer, other_parameters) =
+        verify_offer_as_lender(&lender, &txs.other_creation, network)?;
     let (_, other_as_borrower) = verify_offer_as_borrower(&borrower, &txs.other_creation, network)?;
     assert_eq!(other_parameters, other_as_borrower);
 
@@ -565,6 +611,40 @@ fn parity_fixture_verifies_against_the_contract(
             &debt
         )),
         loan["debt_hashes"][1]
+    );
+
+    // the messages on chain are the fixture's, each signed for its phase of this offer
+    let offer_id = txs.creation.txid();
+    for opened in [&as_lender, &as_borrower] {
+        let message = opened.signed_terms.message.as_ref().map(Message::as_text);
+        assert_eq!(message, Some(CREATION_MESSAGE));
+    }
+    assert_eq!(other_offer.signed_terms.message, None);
+    let read = |extra_data: &[u8], sender: &LendingKey, phase| -> anyhow::Result<String> {
+        let signed = SignedMessage::decode(extra_data)?
+            .ok_or_else(|| anyhow::anyhow!("the output carries no message"))?;
+        signed.verify(&sender.x_only_public_key(), phase, &offer_id)?;
+        Ok(signed.message.as_text().to_owned())
+    };
+    let shared_secret = |key: &LendingKey, output: &TxOut| {
+        let nonce = output.nonce.commitment().expect("a confidential output");
+        OfferSecrets::for_lender(key, &nonce).shared_secret()
+    };
+    let principal = &txs.acceptance.output[1];
+    let (_, accepted) = rewind(principal, shared_secret(&borrower, principal))?;
+    assert_eq!(
+        read(&accepted, &lender, MessagePhase::Acceptance)?,
+        ACCEPTANCE_MESSAGE
+    );
+    let paid = &txs.installment.output[INSTALLMENT_OUTPUT];
+    let (_, installment) = open_installment_with_extra_data(
+        paid,
+        shared_secret(&lender, paid),
+        &lender_parameters.pinned.repayment,
+    )?;
+    assert_eq!(
+        read(&installment, &borrower, MessagePhase::Installment(1))?,
+        INSTALLMENT_MESSAGE
     );
 
     Ok(())

@@ -102,6 +102,14 @@ interface Fixture {
     debt_hashes: string[]
     loan_script_pubkeys: string[]
   }
+  // The private messages the loan carries, as the Rust test wrote them: the borrower's in the
+  // creation's terms, the lender's on the acceptance's principal output and the borrower's on the
+  // installment's output, each signed for its phase.
+  messages: {
+    creation: string
+    acceptance: string
+    installment: string
+  }
   // A second offer, whose `A` has the other prefix bit.
   other_offer: {
     creation_tx: string
@@ -385,6 +393,7 @@ async function main(): Promise<void> {
 
   checkWitnessVectors(scripts, network)
   checkLoanState(scripts, { lender, asLender }, { borrower, asBorrower })
+  checkMessages({ lender, asLender }, { borrower, asBorrower })
   checkOtherPrefixBit(sources, network, lender, borrower)
 
   checkLenderTerms()
@@ -592,6 +601,57 @@ function checkLoanState(
       ]),
     ),
   )
+}
+
+/**
+ * The fixture's messages, read by the party each is for as the Rust test wrote them, verified: the
+ * creation's from the terms both parties open, the acceptance's from the principal output that
+ * only the borrower rewinds, and the installment's from the loan state of either party.
+ */
+function checkMessages(
+  { lender, asLender }: { lender: wasm.LendingKey; asLender: wasm.OpenedOffer },
+  { borrower, asBorrower }: { borrower: wasm.LendingKey; asBorrower: wasm.OpenedOffer },
+): void {
+  const { messages, loan } = fixture
+  const offerTxid = lwk.Transaction.fromString(fixture.creation_tx).txid().toString()
+  for (const [who, opened] of [
+    ['lender', asLender],
+    ['borrower', asBorrower],
+  ] as const) {
+    const text = opened.message()
+    check(`creation message as the ${who}`, text === messages.creation, `${text}`)
+  }
+
+  const acceptance = asBorrower.readMessage(
+    borrower,
+    offerTxid,
+    loan.acceptance_tx,
+    1,
+    wasm.MessagePhase.Acceptance,
+  )
+  check(
+    'acceptance message as the borrower',
+    acceptance?.text === messages.acceptance && acceptance.verified,
+    `${acceptance?.text} (verified: ${acceptance?.verified})`,
+  )
+  check(
+    'acceptance message: the lender does not rewind the principal',
+    asLender.readMessage(lender, offerTxid, loan.acceptance_tx, 1, wasm.MessagePhase.Acceptance) ===
+      undefined,
+  )
+
+  for (const [who, opened, key] of [
+    ['lender', asLender, lender],
+    ['borrower', asBorrower, borrower],
+  ] as const) {
+    const state = opened.loanState(key, loan.acceptance_tx, loan.installment_txs)
+    const read = state.installment(1).message
+    check(
+      `installment message as the ${who}`,
+      read?.text === messages.installment && read.verified,
+      `${read?.text} (verified: ${read?.verified})`,
+    )
+  }
 }
 
 /**
