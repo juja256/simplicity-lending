@@ -37,6 +37,7 @@ import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 import type { PrivateFlowDeps } from '../deps'
 import { finalizePrivateOfferInput, pinnedAuthCovenant } from '../finalize'
 import { borrowerLoanInputs, type Loan } from '../loan'
+import { checkedMessage } from '../messages'
 import { INSTALLMENT_AFTER_TERM_NOTE, installmentTermOpen } from '../repayPlan'
 import { walletInputSecret } from '../secrets'
 import type { VerifiedOffer } from '../verify'
@@ -96,6 +97,12 @@ export interface InstallmentParams {
   lendingKey: LendingKey
   /** The chain tip's height, read just before the build: below the loan expiry. */
   tipHeight: number
+  /**
+   * The borrower's private message to the lender, in the installment's range proof: at most
+   * `MESSAGE_LIMITS.signed` UTF-8 bytes. An empty or blank one is none. It is signed for this
+   * installment, the loan's `installmentCount + 1`-th.
+   */
+  message?: string
 }
 
 export interface InstallmentSummary {
@@ -114,11 +121,11 @@ export interface InstallmentSummary {
 
 /**
  * Builds the borrower's installment of `params.amount` on the loan at `loan.state.loanOutpoint`,
- * blinded and ready to sign. Throws `InstallmentAfterTermError` before anything else once
- * `params.tipHeight` has reached the loan expiry, and `PrincipalNotClaimedError` before building
- * unless the borrower NFT comes from the principal claim. `finalize` finalizes the wallet inputs
- * (the borrower NFT among them), then the loan (Installment), running the covenant on the
- * transaction.
+ * blinded and ready to sign. Throws first for a message that does not fit, then
+ * `InstallmentAfterTermError` once `params.tipHeight` has reached the loan expiry, and
+ * `PrincipalNotClaimedError` before building unless the borrower NFT comes from the principal
+ * claim. `finalize` finalizes the wallet inputs (the borrower NFT among them), then the loan
+ * (Installment), running the covenant on the transaction.
  */
 export async function buildPrivateInstallment(
   deps: PrivateFlowDeps,
@@ -128,6 +135,7 @@ export async function buildPrivateInstallment(
 ): Promise<UpdatedPset<InstallmentSummary>> {
   const { lwk, wasm } = deps
   if (offer.role !== 'borrower') throw new Error('Only the borrower pays an installment')
+  const message = checkedMessage(params.message, 'signed')
   const opened = offer.opened
   const expiry = opened.loanExpirationTime()
   if (!Number.isInteger(params.tipHeight) || params.tipHeight <= 0) {
@@ -204,11 +212,27 @@ export async function buildPrivateInstallment(
   )
 
   // 3. The plan, from exactly input 2 and output 0's script: the borrower NFT goes back explicit
-  // to the unconfidential form of a fresh receive address.
+  // to the unconfidential form of a fresh receive address. The message is signed for this
+  // installment just before the call that takes it (and consumes it).
   const nftReceiver = deps.addresses.nextReceive(deps.wollet).toUnconfidential()
   const nftReceiverScript = nftReceiver.scriptPubkey().toString()
+  const installmentIndex = state.installmentCount + 1
+  const creationTxid = offer.creationTx.txid().toString()
   const plan = wasmStep('Planning the installment', () =>
-    state.planInstallment(amount, firstWalletInput, nftReceiverScript),
+    state.planInstallment(
+      amount,
+      firstWalletInput,
+      nftReceiverScript,
+      message === undefined
+        ? undefined
+        : wasm.signMessage(
+            params.lendingKey,
+            creationTxid,
+            wasm.MessagePhase.Installment,
+            installmentIndex,
+            message,
+          ),
+    ),
   )
   try {
     const debtWitness = plan.debtWitness
@@ -399,6 +423,7 @@ export async function buildPrivateInstallment(
       amount,
       remaining,
       successorDebtHash,
+      message,
     })
     const prevouts = () => [
       requireOutput(nftTx, nftRef.vout, 'The borrower NFT'),
@@ -522,14 +547,22 @@ function outputNonce(bytes: Uint8Array, vout: number): string | undefined {
 /**
  * Reads the loan again with the built installment `txHex` appended, with `key`, and requires what
  * the plan expects: one more installment, of `expected.amount`, the loan at its output 1 owing
- * `expected.remaining` under `expected.successorDebtHash`. Throws before anything is signed.
+ * `expected.remaining` under `expected.successorDebtHash`, and, when `expected.message` was sent,
+ * that message, verified: signed by `key` for this installment of this offer. Throws before
+ * anything is signed.
  */
 export function assertInstallmentReadsBack(
   offer: VerifiedOffer,
   loan: Loan,
   key: LendingKey,
   txHex: string,
-  expected: { loanOutpoint: string; amount: bigint; remaining: bigint; successorDebtHash: string },
+  expected: {
+    loanOutpoint: string
+    amount: bigint
+    remaining: bigint
+    successorDebtHash: string
+    message?: string
+  },
 ): void {
   const after = wasmStep('Reading the installment back', () =>
     offer.opened.loanState(key, loan.acceptanceHex, [...loan.installmentHexes, txHex]),
@@ -538,10 +571,25 @@ export function assertInstallmentReadsBack(
     const j = after.installmentCount
     const paid = j === loan.installmentHexes.length + 1 ? after.installment(j) : undefined
     let paidAmount: bigint | undefined
+    let messageReadsBack = expected.message === undefined
     try {
       paidAmount = paid?.amount
+      if (paid !== undefined && expected.message !== undefined) {
+        const read = paid.message
+        try {
+          messageReadsBack = read?.verified === true && read.text === expected.message
+        } finally {
+          read?.free()
+        }
+      }
     } finally {
       paid?.free()
+    }
+    if (!messageReadsBack) {
+      throw new Error(
+        'The installment does not read back as built: it was not signed. Its message does not ' +
+          'read back as yours',
+      )
     }
     if (
       paidAmount !== expected.amount ||

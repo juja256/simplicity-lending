@@ -921,6 +921,7 @@ async function buildSignedAcceptance(
     principalCoins,
     feeCoins,
     lenderNftReceiver,
+    lendingKey: lender.lendingKey,
   })
   out('blinded acceptance PSET:')
   describeOutputs(built.pset, {
@@ -1889,6 +1890,7 @@ async function buildSignedRepayment(
     principalCoins,
     feeCoins,
     collateralReceiver,
+    lendingKey: borrower.lendingKey,
   })
   out('blinded repayment PSET:')
   describeOutputs(built.pset, {
@@ -2103,6 +2105,7 @@ async function repayHostileDryStage(ctx: Context): Promise<void> {
       principalCoins,
       feeCoins,
       collateralReceiver,
+      lendingKey: borrower.lendingKey,
     }).then(
       () => new Error('the builder returned a PSET despite stopAtBuild'),
       (error: unknown) => error,

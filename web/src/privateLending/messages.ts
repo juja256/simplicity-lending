@@ -38,6 +38,28 @@ export function messageError(text: string, channel: MessageChannel): string | nu
 }
 
 /**
+ * The message to send for the text typed: undefined for none (an empty or blank text), otherwise
+ * the text exactly as typed, which is what `messageError` counted.
+ */
+export function messageToSend(text: string | undefined): string | undefined {
+  return text === undefined || text.trim() === '' ? undefined : text
+}
+
+/**
+ * `messageToSend(text)`, for a builder: throws the error `messageError` gives when it does not fit
+ * on `channel`.
+ */
+export function checkedMessage(
+  text: string | undefined,
+  channel: MessageChannel,
+): string | undefined {
+  const message = messageToSend(text)
+  const error = message === undefined ? null : messageError(message, channel)
+  if (error !== null) throw new Error(error)
+  return message
+}
+
+/**
  * Whether a code point is removed for display: the C0 controls except the newline, DEL, the C1
  * controls, and the bidirectional controls (the Arabic letter mark, the left-to-right and
  * right-to-left marks, the embeddings and overrides, and the isolates). DEL is neither C0 nor C1,

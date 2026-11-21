@@ -12,6 +12,8 @@
 // A stored value that does not decode reads as no messages, and the next save starts over.
 import { z as zod } from 'zod'
 
+import type { UpdatedPset } from '@/lwk/updatedPset'
+
 import type { ScanKv, ScanScope } from './scanStore'
 
 /** A message this wallet sent, or the record that a transaction it sent carried none. */
@@ -114,6 +116,33 @@ export function kvSentMessages(kv: ScanKv, scope: ScanScope, fingerprint: string
     },
     forOffer(offerTxid) {
       return read().filter(message => message.offerTxid === offerTxid)
+    },
+  }
+}
+
+/**
+ * `built`, whose `finalize` also records `sent` in `store` under the finalized transaction's txid,
+ * as the caller goes on to save the transaction itself, before its first broadcast. Without a
+ * store, or when the record cannot be saved, the console says so (never with the text) and the
+ * transaction goes on all the same: a record never holds up a payment.
+ */
+export function recordingSent<TSummary>(
+  built: UpdatedPset<TSummary>,
+  store: SentMessages | undefined,
+  sent: Omit<SentMessage, 'txid' | 'savedAt'>,
+): UpdatedPset<TSummary> {
+  return {
+    pset: built.pset,
+    finalize: signedPset => {
+      const finalized = built.finalize(signedPset)
+      const txid = finalized.finalizedTx.txid().toString()
+      try {
+        if (store === undefined) throw new Error('The store of sent messages did not open')
+        store.save({ ...sent, txid, savedAt: Date.now() })
+      } catch (error) {
+        console.error(`The ${sent.phase} ${txid} was sent without a record of its message`, error)
+      }
+      return finalized
     },
   }
 }

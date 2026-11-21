@@ -10,6 +10,7 @@ import {
   unitsFromDecimal,
   unitsToDecimal,
 } from '@/privateLending/lenderTerms'
+import { messageError, messageToSend } from '@/privateLending/messages'
 import {
   type ProposalForm,
   type ProposalFormErrors,
@@ -136,20 +137,32 @@ export interface ProposalAmounts {
   repayment: bigint
   days: number
   aprBps: number
+  /** The private message to the lender, exactly as typed; absent for none. */
+  message?: string
 }
 
+/** The errors of the form's fields, and of its private message. */
+export type ProposalErrors = ProposalFormErrors & { message?: string }
+
 /**
- * The proposal of the form, or the error of each field that the lender's `pair` refuses
- * (`proposalFormErrors`), or that the creation cannot carry: a repayment above `u64::MAX`, or an
- * interest above 655.35 % of the principal, both on the APR.
+ * The proposal of the form with the private message `messageText`, or the error of each field that
+ * the lender's `pair` refuses (`proposalFormErrors`), or that the creation cannot carry: a
+ * repayment above `u64::MAX`, or an interest above 655.35 % of the principal, both on the APR, and
+ * a message longer than the terms carry (`messageError`). An empty or blank message is none.
  */
 export function proposalOfForm(
   wasm: FormWasm,
   pair: PairTermsInput,
   pairInfo: TermsPair,
   form: ProposalForm,
-): { proposal: ProposalAmounts; errors: null } | { proposal: null; errors: ProposalFormErrors } {
-  const errors = proposalFormErrors(wasm, pair, pairInfo, form)
+  messageText?: string,
+): { proposal: ProposalAmounts; errors: null } | { proposal: null; errors: ProposalErrors } {
+  const message = messageToSend(messageText)
+  const messageRefused = message === undefined ? null : messageError(message, 'creation')
+  const errors: ProposalErrors = {
+    ...proposalFormErrors(wasm, pair, pairInfo, form),
+    ...(messageRefused === null ? {} : { message: messageRefused }),
+  }
   if (Object.keys(errors).length > 0) return { proposal: null, errors }
 
   const principal = unitsFromDecimal(form.principal, pairInfo.principal.decimals)
@@ -171,7 +184,17 @@ export function proposalOfForm(
       },
     }
   }
-  return { proposal: { principal, collateral, repayment, days, aprBps }, errors: null }
+  return {
+    proposal: {
+      principal,
+      collateral,
+      repayment,
+      days,
+      aprBps,
+      ...(message === undefined ? {} : { message }),
+    },
+    errors: null,
+  }
 }
 
 /**

@@ -1,7 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import type { Pset } from 'lwk_wasm'
+import { describe, expect, it, vi } from 'vitest'
+
+import type { UpdatedPset } from '@/lwk/updatedPset'
 
 import type { ScanKv, ScanScope } from './scanStore'
-import { kvSentMessages, type SentMessage, sentMessagesKey } from './sentMessages'
+import { kvSentMessages, recordingSent, type SentMessage, sentMessagesKey } from './sentMessages'
 
 const OFFER = 'aa'.repeat(32)
 const OTHER_OFFER = 'bb'.repeat(32)
@@ -111,6 +114,71 @@ describe('kvSentMessages', () => {
       expect(store.forOffer(OFFER)).toEqual([])
       store.save(installment)
       expect(store.forOffer(OFFER)).toEqual([installment])
+    }
+  })
+})
+
+describe('recordingSent', () => {
+  const TXID = '05'.repeat(32)
+  /** A built transaction whose `finalize` gives the transaction `TXID`, and counts its calls. */
+  function built(): UpdatedPset<string> & { finalized: number } {
+    const finalizedTx = { txid: () => ({ toString: () => TXID }) }
+    const result = {
+      pset: {} as Pset,
+      finalized: 0,
+      finalize: () => {
+        result.finalized++
+        return { finalizedTx, summary: 'summary' }
+      },
+    }
+    return result as unknown as UpdatedPset<string> & { finalized: number }
+  }
+  const sent = {
+    offerTxid: OFFER,
+    phase: 'installment',
+    installment: 2,
+    text: 'a private text',
+  } as const
+
+  it('records the message under the finalized txid, once finalize ran', () => {
+    const store = kvSentMessages(mapKv(), SCOPE, 'f1')
+    const inner = built()
+    const recording = recordingSent(inner, store, sent)
+    expect(recording.pset).toBe(inner.pset)
+    expect(store.forOffer(OFFER)).toEqual([])
+    const before = Date.now()
+    expect(recording.finalize({} as Pset).summary).toBe('summary')
+    expect(inner.finalized).toBe(1)
+    const [record] = store.forOffer(OFFER)
+    expect(record).toEqual({ ...sent, txid: TXID, savedAt: record.savedAt })
+    expect(record.savedAt).toBeGreaterThanOrEqual(before)
+  })
+
+  it('records a transaction without a message as such', () => {
+    const store = kvSentMessages(mapKv(), SCOPE, 'f1')
+    recordingSent(built(), store, { offerTxid: OFFER, phase: 'repayment' }).finalize({} as Pset)
+    expect(store.forOffer(OFFER)).toEqual([
+      { offerTxid: OFFER, txid: TXID, phase: 'repayment', savedAt: expect.any(Number) },
+    ])
+  })
+
+  it('never holds up the transaction: without a store, or when the save throws', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const throwing = {
+        save: () => {
+          throw new Error('quota')
+        },
+        forOffer: () => [],
+      }
+      for (const store of [undefined, throwing]) {
+        expect(recordingSent(built(), store, sent).finalize({} as Pset).summary).toBe('summary')
+      }
+      expect(error).toHaveBeenCalledTimes(2)
+      // the console never shows the text
+      expect(JSON.stringify(error.mock.calls.map(([text]) => text))).not.toContain(sent.text)
+    } finally {
+      error.mockRestore()
     }
   })
 })

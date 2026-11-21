@@ -2,7 +2,14 @@ import { describe, expect, it } from 'vitest'
 
 import { wasm } from '@/test/wasm'
 
-import { displayMessage, MESSAGE_LIMITS, messageBytes, messageError } from './messages'
+import {
+  checkedMessage,
+  displayMessage,
+  MESSAGE_LIMITS,
+  messageBytes,
+  messageError,
+  messageToSend,
+} from './messages'
 
 const borrower = wasm.LendingKey.fromMasterBlindingKey('01'.repeat(32))
 const lender = wasm.LendingKey.fromMasterBlindingKey('02'.repeat(32))
@@ -51,6 +58,21 @@ describe('messageError', () => {
     expect(messageError(atLimit, 'signed')).toBeNull()
     expect(messageError(`${atLimit}a`, 'signed')).toBe(
       'The message is 3069 bytes; at most 3068 fit.',
+    )
+  })
+})
+
+describe('messageToSend', () => {
+  it('sends no message for none, an empty or a blank text, and any other exactly as typed', () => {
+    for (const none of [undefined, '', ' \n\t ']) expect(messageToSend(none)).toBeUndefined()
+    expect(messageToSend(' two\nlines ')).toBe(' two\nlines ')
+  })
+
+  it("throws the counter's error for a builder, and gives the text otherwise", () => {
+    expect(checkedMessage('  ', 'signed')).toBeUndefined()
+    expect(checkedMessage('a'.repeat(2915), 'creation')).toBe('a'.repeat(2915))
+    expect(() => checkedMessage('a'.repeat(2916), 'creation')).toThrow(
+      'The message is 2916 bytes; at most 2915 fit.',
     )
   })
 })

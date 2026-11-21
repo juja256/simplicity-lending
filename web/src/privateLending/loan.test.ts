@@ -39,6 +39,7 @@ interface Fixture {
     loan_script_pubkeys: string[]
   }
   other_offer: { creation_tx: string }
+  messages: { installment: string }
 }
 
 const fixture = JSON.parse(
@@ -287,7 +288,7 @@ describe('loadLoan', () => {
     paid.free()
     expect(before.acceptanceHex).toBe(fixture.loan.acceptance_tx)
     expect(after.installmentHexes).toEqual([installmentHex])
-    const readBack = (exp: typeof expected) => () =>
+    const readBack = (exp: typeof expected & { message?: string }) => () =>
       assertInstallmentReadsBack(offer, before, keys.borrower, installmentHex, exp)
     expect(readBack(expected)).not.toThrow()
     const refused = /does not read back as built/
@@ -297,6 +298,11 @@ describe('loadLoan', () => {
     expect(readBack({ ...expected, successorDebtHash: fixture.loan.debt_hashes[0] })).toThrow(
       refused,
     )
+    // the fixture's installment carries the borrower's message, signed for installment 1: a
+    // message sent must read back verified, as sent
+    const message = fixture.messages.installment
+    expect(readBack({ ...expected, message })).not.toThrow()
+    expect(readBack({ ...expected, message: `${message}.` })).toThrow(refused)
     // the lender's key, not the one the loan was read with, is refused (`bad-input`)
     expect(() =>
       assertInstallmentReadsBack(offer, before, keys.lender, installmentHex, expected),
@@ -329,6 +335,43 @@ describe('loadLoan', () => {
     )
     expect(installmentNonceMatches(renonced, ephemeralPublicKey)).toBe(false)
     expect(installmentNonceMatches(renonced, generator)).toBe(true)
+  })
+
+  // The flows sign right before the call that takes the message, with the creation txid and the
+  // phase as they pass them: the wasm takes a message signed so, and refuses one signed for
+  // another step.
+  it('carries a message signed as the flows sign it, and refuses one signed otherwise', async () => {
+    const sign = (key: keyof typeof keys, phase: number, j = 0) =>
+      wasm.signMessage(keys[key], creationTxid, phase, j, 'A message.')
+    const { Acceptance, Installment, FullRepayment } = wasm.MessagePhase
+    const borrowerOffer = await openOffer('borrower')
+    const { state } = await loadLoan(
+      fakeChain().deps,
+      borrowerOffer,
+      keys.borrower,
+      `${acceptanceTxid}:0`,
+    )
+    const built = lwk.Transaction.fromString(installmentHex)
+    const input = built.inputs[2].outpoint()
+    const plan = (message: ReturnType<typeof sign>) =>
+      state.planInstallment(
+        1n,
+        `${input.txid().toString()}:${input.vout()}`,
+        built.outputs[0].scriptPubkey().toString(),
+        message,
+      )
+    plan(sign('borrower', Installment, state.installmentCount + 1)).free()
+    expect(() => plan(sign('borrower', Installment, state.installmentCount + 2))).toThrow(
+      /bad-input/,
+    )
+    state.repaymentBlinding(1, sign('borrower', FullRepayment)).free()
+    expect(() => state.repaymentBlinding(1, sign('borrower', Acceptance))).toThrow(/bad-input/)
+
+    const lenderOffer = await openOffer('lender')
+    const principal = (message: ReturnType<typeof sign>) =>
+      lenderOffer.opened.pinnedBlinding(wasm.PinnedRole.Principal, 1, message)
+    principal(sign('lender', Acceptance)).free()
+    expect(() => principal(sign('borrower', Acceptance))).toThrow(/bad-input/)
   })
 
   it('reads a loan at its acceptance', async () => {
@@ -434,6 +477,7 @@ describe("the borrower's flows", () => {
           principalCoins: [coin(`${'c1'.repeat(32)}:0`, offer.opened.principalAsset(), 8_000n)],
           feeCoins,
           collateralReceiver: confidential,
+          lendingKey: keys.borrower,
         }),
     ]
     for (const build of builds) {
@@ -466,6 +510,27 @@ describe("the borrower's flows", () => {
       expect(refusal).toBeInstanceOf(InstallmentAfterTermError)
       expect(fetched).toEqual([])
     }
+  })
+
+  // The builder checks the message before anything else it checks or fetches, so the form's
+  // counter and the builder refuse the same texts.
+  it('refuse an installment message over the limit, before anything is fetched', async () => {
+    const offer = await openOffer('borrower')
+    const { deps: walk } = fakeChain()
+    const loan = await loadLoan(walk, offer, keys.borrower, fixture.loan.loan_outpoint)
+    const { deps, fetched } = fakeChain()
+    const refusal = await buildPrivateInstallment(deps, offer, loan, {
+      amount: 1_000n,
+      borrowerNftOutpoint: `${installmentTxid}:0`,
+      principalCoins: [coin(`${'c1'.repeat(32)}:0`, offer.opened.principalAsset(), 5_000n)],
+      feeCoins: [coin(`${'c2'.repeat(32)}:0`, OTHER_ASSET, 2_000n)],
+      lendingKey: keys.borrower,
+      tipHeight: offer.opened.loanExpirationTime() - 1,
+      message: 'a'.repeat(3069),
+    }).catch((error: unknown) => error)
+    expect(refusal).toBeInstanceOf(Error)
+    expect((refusal as Error).message).toBe('The message is 3069 bytes; at most 3068 fit.')
+    expect(fetched).toEqual([])
   })
 
   it('refuse a zero-debt close before the principal is claimed', async () => {

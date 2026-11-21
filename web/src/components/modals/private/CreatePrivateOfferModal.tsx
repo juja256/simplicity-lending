@@ -12,6 +12,7 @@ import { usePrivateFlowDeps } from '@/privateLending/hooks/usePrivateFlowDeps'
 import { usePrivateTransaction } from '@/privateLending/hooks/usePrivateTransaction'
 import { proposalExpiryIsStale } from '@/privateLending/lenderTerms'
 import { syncInSession } from '@/privateLending/lendingKeyHolder'
+import { displayMessage } from '@/privateLending/messages'
 import {
   checkCreationSendable,
   creationExpiredNote,
@@ -45,6 +46,11 @@ export interface PrivateOfferDraft {
    * `termDays` (`proposalExpiryIsStale`), and so does every broadcast (`checkCreationSendable`).
    */
   loanExpirationTime: number
+  /**
+   * The private message to the lender, exactly as typed and within `MESSAGE_LIMITS.creation`
+   * bytes; absent for none. The terms carry it, so it reads again from the seed on any device.
+   */
+  message?: string
 }
 
 interface CreatePrivateOfferModalProps {
@@ -118,6 +124,7 @@ export default function CreatePrivateOfferModal({
           repaymentAmount: draft.repaymentAmount,
           loanExpirationTime: draft.loanExpirationTime,
           borrowerNftReceiver: walletReceiver(deps),
+          message: draft.message,
         })
       },
       beforeBroadcast,
@@ -189,6 +196,14 @@ export default function CreatePrivateOfferModal({
       }
     >
       <DetailsPanel rows={rows} />
+      {draft?.message !== undefined && (
+        <section aria-label='Your message' className='flex flex-col gap-1 text-sm'>
+          <h3 className='text-foreground font-medium'>Your message</h3>
+          <p className='text-muted wrap-break-word whitespace-pre-wrap'>
+            {displayMessage(draft.message)}
+          </p>
+        </section>
+      )}
     </PrivateTxShell>
   )
 }

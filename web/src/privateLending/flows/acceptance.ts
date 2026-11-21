@@ -18,9 +18,11 @@ import {
 } from '@/simplicity/private-lending/layout'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
 import { SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/script-auth/witness'
+import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from '../deps'
 import { finalizePrivateOfferInput, finalizeScriptAuthInput, pinnedAuthCovenant } from '../finalize'
+import { checkedMessage } from '../messages'
 import { walletInputSecret } from '../secrets'
 import type { VerifiedOffer } from '../verify'
 import {
@@ -45,6 +47,13 @@ export interface AcceptanceParams {
   feeCoins: WalletTxOut[]
   /** Receives the lender NFT, as an explicit output. */
   lenderNftReceiver: Address
+  /** The lender's lending key, the one the offer was opened with: it signs the message. */
+  lendingKey: LendingKey
+  /**
+   * The lender's private message to the borrower, in the principal's range proof: at most
+   * `MESSAGE_LIMITS.signed` UTF-8 bytes. An empty or blank one is none.
+   */
+  message?: string
 }
 
 export interface AcceptanceSummary {
@@ -72,7 +81,11 @@ export async function buildPrivateAcceptance(
 ): Promise<UpdatedPset<AcceptanceSummary>> {
   const { lwk, wasm } = deps
   if (offer.role !== 'lender') throw new Error('Only the lender accepts an offer')
+  const message = checkedMessage(params.message, 'signed')
   const opened = offer.opened
+  if (params.lendingKey.xOnlyPublicKey() !== opened.lenderPublicKey()) {
+    throw new Error("This wallet is not the offer's lender")
+  }
   const creationTx = offer.creationTx
   const creationTxid = creationTx.txid().toString()
   const offerInput = `${creationTxid}:${CREATION_OUTPUT.pendingOffer}`
@@ -264,7 +277,8 @@ export async function buildPrivateAcceptance(
   // 5. The layout of the unblinded PSET.
   assertSpendLayout(deps, unblinded, layout, false, 'Acceptance')
 
-  // 6. Blinding: the active collateral and the principal with their pinned blinders.
+  // 6. Blinding: the active collateral and the principal with their pinned blinders, the principal
+  // with the lender's message, signed just before the call that takes it (and consumes it).
   const blindedBase64 = wasmStep('Blinding the acceptance', () =>
     wasm.blindPset(
       unblinded.toString(),
@@ -277,7 +291,19 @@ export async function buildPrivateAcceptance(
       ],
       [
         opened.pinnedBlinding(wasm.PinnedRole.ActiveCollateral, ACCEPTANCE_OUTPUT.activeOffer),
-        opened.pinnedBlinding(wasm.PinnedRole.Principal, ACCEPTANCE_OUTPUT.principal),
+        opened.pinnedBlinding(
+          wasm.PinnedRole.Principal,
+          ACCEPTANCE_OUTPUT.principal,
+          message === undefined
+            ? undefined
+            : wasm.signMessage(
+                params.lendingKey,
+                creationTxid,
+                wasm.MessagePhase.Acceptance,
+                0,
+                message,
+              ),
+        ),
       ],
     ),
   )

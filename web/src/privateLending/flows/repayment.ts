@@ -26,10 +26,12 @@ import type { UpdatedPset } from '@/lwk/updatedPset'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { NFT_AMOUNT, REPAYMENT_INPUT, REPAYMENT_OUTPUT } from '@/simplicity/private-lending/layout'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
+import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from '../deps'
 import { finalizePrivateOfferInput, pinnedAuthCovenant } from '../finalize'
 import { borrowerLoanInputs, type Loan } from '../loan'
+import { checkedMessage } from '../messages'
 import { walletInputSecret } from '../secrets'
 import type { VerifiedOffer } from '../verify'
 import {
@@ -65,6 +67,13 @@ export interface RepaymentParams {
   feeCoins: WalletTxOut[]
   /** A confidential address: receives the collateral, blinded to it. */
   collateralReceiver: Address
+  /** The borrower's lending key, the one the loan was read with: it signs the message. */
+  lendingKey: LendingKey
+  /**
+   * The borrower's private message to the lender, in the repayment's range proof: at most
+   * `MESSAGE_LIMITS.signed` UTF-8 bytes. An empty or blank one is none.
+   */
+  message?: string
 }
 
 export interface RepaymentSummary {
@@ -93,7 +102,11 @@ export async function buildPrivateRepayment(
 ): Promise<UpdatedPset<RepaymentSummary>> {
   const { lwk, wasm } = deps
   if (offer.role !== 'borrower') throw new Error('Only the borrower repays a loan')
+  const message = checkedMessage(params.message, 'signed')
   const opened = offer.opened
+  if (params.lendingKey.xOnlyPublicKey() !== opened.borrowerPublicKey()) {
+    throw new Error("This wallet is not the loan's borrower")
+  }
   const { state } = loan
   const borrowerNft = opened.borrowerNft()
   const lenderNft = opened.lenderNft()
@@ -292,7 +305,9 @@ export async function buildPrivateRepayment(
   // 5. The layout of the unblinded PSET.
   assertSpendLayout(deps, unblinded, layout, false, 'Repayment')
 
-  // 6. Blinding: the repayment with the debt's opening; the other outputs fresh.
+  // 6. Blinding: the repayment with the debt's opening and the borrower's message, signed just
+  // before the call that takes it (and consumes it); the other outputs fresh.
+  const creationTxid = offer.creationTx.txid().toString()
   const blindedBase64 = wasmStep('Blinding the repayment', () =>
     wasm.blindPset(
       unblinded.toString(),
@@ -303,7 +318,20 @@ export async function buildPrivateRepayment(
           walletInputSecret(deps, coin, REPAYMENT_INPUT.offer + 1 + index),
         ),
       ],
-      [state.repaymentBlinding(REPAYMENT_OUTPUT.repayment)],
+      [
+        state.repaymentBlinding(
+          REPAYMENT_OUTPUT.repayment,
+          message === undefined
+            ? undefined
+            : wasm.signMessage(
+                params.lendingKey,
+                creationTxid,
+                wasm.MessagePhase.FullRepayment,
+                0,
+                message,
+              ),
+        ),
+      ],
     ),
   )
   const blinded = new lwk.Pset(blindedBase64)

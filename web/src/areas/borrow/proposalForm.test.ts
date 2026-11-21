@@ -141,6 +141,28 @@ describe('proposalOfForm', () => {
     expect(result.proposal?.aprBps).toBe(725)
   })
 
+  it("refuses a message a byte over its limit with the counter's error, sends one at it", () => {
+    const { form } = opened()
+    // 728 emoji of 4 bytes and 3 bytes of ASCII: 2915 bytes, counted in UTF-8
+    const atLimit = '😀'.repeat(728) + 'abc'
+    expect(proposalOfForm(wasm, PAIR, PAIR_INFO, form, atLimit + 'd')).toEqual({
+      proposal: null,
+      errors: { message: 'The message is 2916 bytes; at most 2915 fit.' },
+    })
+    expect(proposalOfForm(wasm, PAIR, PAIR_INFO, form, atLimit).proposal?.message).toBe(atLimit)
+  })
+
+  it('sends no message for an empty or blank one, and a message exactly as typed', () => {
+    const { form } = opened()
+    for (const blank of [undefined, '', ' \n\t ']) {
+      const result = proposalOfForm(wasm, PAIR, PAIR_INFO, form, blank)
+      expect(result.errors).toBeNull()
+      expect(result.proposal).not.toHaveProperty('message')
+    }
+    const typed = '  Two lines,\nkept as typed.  '
+    expect(proposalOfForm(wasm, PAIR, PAIR_INFO, form, typed).proposal?.message).toBe(typed)
+  })
+
   it('refuses an interest the creation cannot carry', () => {
     const form = { principal: '1000', days: '180', collateral: '0.02', aprPercent: '1400' }
     expect(proposalOfForm(wasm, PAIR, PAIR_INFO, form)).toEqual({
