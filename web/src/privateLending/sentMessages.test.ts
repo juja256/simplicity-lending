@@ -148,6 +148,20 @@ describe('sentMessagesOf', () => {
     expect(await store.forOffer(OFFER)).toEqual([acceptance])
   })
 
+  // An open connection that ignored `versionchange` would block another tab's upgrade or
+  // deletion of the database for as long as it stays open.
+  it('closes its connection for another that deletes the database, then opens a new one', async () => {
+    const store = (await anotherTab()).sentMessagesOf('testnet', freshFingerprint())
+    await store.save(acceptance)
+    const { deleteDB } = await import('idb')
+    const blocked = vi.fn()
+    await deleteDB(sentMessagesModule.SENT_MESSAGES_DB_NAME, { blocked })
+    expect(blocked).not.toHaveBeenCalled()
+    expect(await store.forOffer(OFFER)).toEqual([])
+    await store.save(installment)
+    expect(await store.forOffer(OFFER)).toEqual([installment])
+  })
+
   it('rejects a save and a read where IndexedDB is unavailable', async () => {
     vi.stubGlobal('indexedDB', undefined)
     const store = (await anotherTab()).sentMessagesOf('testnet', freshFingerprint())
@@ -212,6 +226,63 @@ describe('recordingSent', () => {
     expect(resolved).toBe(false)
     finishSave()
     expect((await finalizing).summary).toBe('summary')
+  })
+
+  // A save that never settles (a blocked open, a stalled write) must not hold up the payment.
+  it('gives up waiting for a save after 3 seconds, and logs only the phase and the txid', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.useFakeTimers()
+    try {
+      const stalled: SentMessages = {
+        save: () => new Promise<void>(() => {}),
+        forOffer: () => Promise.resolve([]),
+      }
+      let resolved = false
+      const finalizing = recordingSent(built(), stalled, sent)
+        .finalize({} as Pset)
+        .then(result => {
+          resolved = true
+          return result
+        })
+      await vi.advanceTimersByTimeAsync(2_999)
+      expect(resolved).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect((await finalizing).summary).toBe('summary')
+      expect(error).toHaveBeenCalledTimes(1)
+      expect(error.mock.calls[0][0]).toBe(
+        `The installment ${TXID} was sent without a record of its message`,
+      )
+      expect(JSON.stringify(error.mock.calls)).not.toContain(sent.text)
+    } finally {
+      vi.useRealTimers()
+      error.mockRestore()
+    }
+  })
+
+  it('swallows the rejection of a save it gave up on', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const unhandled = vi.fn()
+    process.on('unhandledRejection', unhandled)
+    vi.useFakeTimers()
+    try {
+      let fail: (reason: Error) => void = () => {}
+      const late: SentMessages = {
+        save: () => new Promise<void>((_, reject) => (fail = reject)),
+        forOffer: () => Promise.resolve([]),
+      }
+      const finalizing = recordingSent(built(), late, sent).finalize({} as Pset)
+      await vi.advanceTimersByTimeAsync(3_000)
+      await finalizing
+      fail(new Error('the write failed late'))
+      vi.useRealTimers()
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(unhandled).not.toHaveBeenCalled()
+      expect(error).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+      process.off('unhandledRejection', unhandled)
+      error.mockRestore()
+    }
   })
 
   it('records a transaction without a message as such', async () => {

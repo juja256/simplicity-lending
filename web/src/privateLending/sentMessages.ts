@@ -102,22 +102,49 @@ function toSentMessage(message: SentMessage): SentMessage {
   }
 }
 
+/** How long `recordingSent` waits for a record to be committed before the payment goes on. */
+export const SAVE_TIMEOUT_MS = 3_000
+
 let dbPromise: Promise<IDBPDatabase<SentMessagesDBSchema>> | null = null
 
-/** The database, opened once per page; rejects where IndexedDB is unavailable. */
+/**
+ * The database, opened once per page; rejects where IndexedDB is unavailable, and when another
+ * connection blocks the open. A connection that blocks another's upgrade or deletion, or that the
+ * browser terminates, is closed and dropped, so the next call opens a new one.
+ */
 function getDb(): Promise<IDBPDatabase<SentMessagesDBSchema>> {
-  dbPromise ??= (async () =>
+  if (dbPromise !== null) return dbPromise
+  let opened: IDBPDatabase<SentMessagesDBSchema> | undefined
+  const drop = () => {
+    opened?.close()
+    if (dbPromise === promise) dbPromise = null
+  }
+  const promise = new Promise<IDBPDatabase<SentMessagesDBSchema>>((resolve, reject) => {
+    let refused = false
     openDB<SentMessagesDBSchema>(SENT_MESSAGES_DB_NAME, DB_VERSION, {
       upgrade(db) {
         const store = db.createObjectStore(SENT_MESSAGES_STORE_NAME, { keyPath: 'txid' })
         store.createIndex(OFFER_INDEX, ['network', 'fingerprint', 'offerTxid'])
       },
-    }))().catch(error => {
+      blocked() {
+        refused = true
+        reject(new Error('Another connection blocks the database of sent messages'))
+      },
+      blocking: drop,
+      terminated: drop,
+    }).then(db => {
+      // opened after all, once the open was given up on: not kept
+      if (refused) return db.close()
+      opened = db
+      resolve(db)
+    }, reject)
+  }).catch((error: unknown) => {
     // Not cached, so a later call tries again.
-    dbPromise = null
+    if (dbPromise === promise) dbPromise = null
     throw error
   })
-  return dbPromise
+  dbPromise = promise
+  return promise
 }
 
 /** The sent messages of the wallet with lending-key fingerprint `fingerprint` on `network`. */
@@ -147,10 +174,11 @@ export function sentMessagesOf(network: string, fingerprint: string): SentMessag
 
 /**
  * `built`, whose `finalize` also records `sent` in `store` under the finalized transaction's txid,
- * and resolves only once the record is committed: the caller goes on to save the transaction
- * itself, then broadcasts it. When the record cannot be saved (IndexedDB unavailable, or the write
- * failed), the console says so with the phase and the txid only, never the text, and the
- * transaction goes on all the same: a record never holds up a payment.
+ * and resolves once the record is committed: the caller goes on to save the transaction itself,
+ * then broadcasts it. When the record cannot be saved (IndexedDB unavailable, or the write failed)
+ * or is not committed within `SAVE_TIMEOUT_MS`, the console says so with the phase and the txid
+ * only, never the text, and the transaction goes on all the same: a record never holds up a
+ * payment. A save given up on may still commit; its late failure is ignored.
  */
 export function recordingSent<TSummary>(
   built: UpdatedPset<TSummary>,
@@ -162,10 +190,24 @@ export function recordingSent<TSummary>(
     finalize: async signedPset => {
       const finalized = built.finalize(signedPset)
       const txid = finalized.finalizedTx.txid().toString()
+      let timer: ReturnType<typeof setTimeout> | undefined
       try {
-        await store.save({ ...sent, txid, savedAt: Date.now() })
+        const saving = store.save({ ...sent, txid, savedAt: Date.now() })
+        // the save may settle after the timeout: its rejection is then nobody's to handle
+        saving.catch(() => {})
+        await Promise.race([
+          saving,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error(`Not committed within ${SAVE_TIMEOUT_MS} ms`)),
+              SAVE_TIMEOUT_MS,
+            )
+          }),
+        ])
       } catch (error) {
         console.error(`The ${sent.phase} ${txid} was sent without a record of its message`, error)
+      } finally {
+        clearTimeout(timer)
       }
       return finalized
     },
