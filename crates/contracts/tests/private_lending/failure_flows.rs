@@ -148,7 +148,7 @@ fn private_offer_repayment_succeeds_with_the_pinned_repayment(
     let repayment = setup.parameters.pinned.repayment;
 
     let acceptance_tx = accept_private_offer(&context, &mut setup, &lender)?;
-    let loan = Loan::accepted(setup.parameters, &acceptance_tx);
+    let loan = Loan::accepted(&setup, &acceptance_tx);
 
     let ctx = build_full_repayment_with(
         &loan,
@@ -175,7 +175,7 @@ fn private_offer_repayment_fails_with_unpinned_repayment_blinders(
     let repayment = setup.parameters.pinned.repayment;
 
     let acceptance_tx = accept_private_offer(&context, &mut setup, &lender)?;
-    let loan = Loan::accepted(setup.parameters, &acceptance_tx);
+    let loan = Loan::accepted(&setup, &acceptance_tx);
 
     // the borrower pays the right amount, but under blinding factors the lender cannot know
     let reblinded_repayment = PinnedOutput::new_random(repayment.asset_id, repayment.amount);
@@ -221,9 +221,10 @@ fn private_offer_repayment_fails_with_wrong_debt_slot(
     let funding_tx = broadcast(&funding_ctx, borrower)?;
 
     let loan = Loan {
-        utxo: find_pinned_utxo(&funding_tx, &wrong_debt_offer.get_collateral()),
+        utxo: find_pinned_utxo(&funding_tx, &parameters.pinned.active_collateral),
         offer: wrong_debt_offer,
         opening: DebtOpening::of(&repayment),
+        carries: Vec::new(),
     };
     let ctx = build_full_repayment_with(
         &loan,
@@ -313,7 +314,7 @@ fn liquidation_fails_with_another_debt_hash(context: simplex::TestContext) -> an
     let expiry = parameters.loan_expiration_time;
 
     // the control: the debt hash of the loan's storage goes through the program
-    build_liquidation_at(&loan, &lender)?.finalize(&lender)?;
+    build_liquidation_at(&setup, &loan, &lender)?.finalize(&lender)?;
 
     for other_debt_hash in [
         // the starting debt, before the installment
@@ -325,7 +326,7 @@ fn liquidation_fails_with_another_debt_hash(context: simplex::TestContext) -> an
         ),
     ] {
         assert_ne!(other_debt_hash, loan.offer.get_debt_hash());
-        let mut ctx = build_liquidation_at(&loan, &lender)?;
+        let mut ctx = build_liquidation_at(&setup, &loan, &lender)?;
         set_liquidation_witness(
             &mut ctx,
             PrivateLendingWitnessBranch::Liquidation {

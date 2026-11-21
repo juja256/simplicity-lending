@@ -85,7 +85,6 @@ interface Fixture {
   witness_vectors: {
     installment: WitnessVector & { debt_hash: string; debt: string }
     full_repayment: WitnessVector & { debt_hash: string }
-    zero_debt_close: WitnessVector & { debt_hash: string; debt: string; k: string }
     liquidation: WitnessVector & { debt_hash: string; salt: string; expiry: number }
   }
   // The offer's loan on regtest, after its acceptance and one installment, which both parties
@@ -414,12 +413,7 @@ async function main(): Promise<void> {
  * of a debt, cannot pass. A reversed debt x, debt hash, key or salt must fail to run.
  */
 function checkWitnessVectors(scripts: PrivateOfferScripts, network: lwk.Network): void {
-  const {
-    installment,
-    full_repayment: repayment,
-    zero_debt_close: close,
-    liquidation,
-  } = fixture.witness_vectors
+  const { installment, full_repayment: repayment, liquidation } = fixture.witness_vectors
   const reversed = (value: string) => Buffer.from(value, 'hex').reverse().toString('hex')
   // the debt's prefix, then its x reversed
   const reversedX = (debt: string) => debt.slice(0, 2) + reversed(debt.slice(2))
@@ -442,15 +436,6 @@ function checkWitnessVectors(scripts: PrivateOfferScripts, network: lwk.Network)
       reverse => ({
         branch: 'FullRepayment',
         debtHash: reverse ? reversed(repayment.debt_hash) : repayment.debt_hash,
-      }),
-    ],
-    [
-      'zero-debt close',
-      close,
-      reverse => ({
-        branch: 'ZeroDebtClose',
-        debt: close.debt,
-        key: reverse ? reversed(close.k) : close.k,
       }),
     ],
     [

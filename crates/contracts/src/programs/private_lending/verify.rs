@@ -3,7 +3,8 @@
 //! contract.
 
 use private_lending_core::{
-    CreationError, LendingKey, OpenedOffer, open_creation_as_borrower, open_creation_as_lender,
+    CreationError, LendingKey, OpenedOffer, ReleaseError, check_bounds, open_creation_as_borrower,
+    open_creation_as_lender,
 };
 use simplex::{provider::SimplicityNetwork, simplicityhl::elements::Transaction};
 
@@ -25,6 +26,11 @@ pub enum VerifyError {
     /// [`private_lending_core`]: its terms, the lender NFT's issuance or the NFT outputs.
     #[error(transparent)]
     Creation(#[from] CreationError),
+    /// The collateral is above `2^44` base units or the repayment above `2^50 − 2`, or either is
+    /// 0: the release proof's integer argument needs both bounds, and no range proof bounds the
+    /// repayment, so the lender checks them before accepting.
+    #[error(transparent)]
+    OutOfBounds(#[from] ReleaseError),
     /// The offer output is not at the pending offer address that the terms and the pinned outputs
     /// give: its program would enforce other terms than those the lender sees.
     #[error("The offer is not at the address of its terms")]
@@ -40,6 +46,7 @@ pub enum VerifyError {
 ///
 /// [`open_creation_as_lender`] checks the borrower's signature, the pinned collateral, the terms,
 /// the lender NFT's unique issuance at input 1 and the NFT outputs. This adds that:
+/// - the collateral and the repayment are within the bounds of [`check_bounds`];
 /// - output 3 is at the pending offer address that the parameters, rebuilt with
 ///   [`PrivateLendingParameters::from_terms`] from the opened terms, pinned outputs and secrets,
 ///   give: otherwise the borrower pinned other outputs, such as a smaller repayment, than the terms
@@ -48,8 +55,9 @@ pub enum VerifyError {
 ///   acceptance unlocks.
 ///
 /// # Errors
-/// Returns [`VerifyError::Creation`], [`VerifyError::AddressMismatch`] or
-/// [`VerifyError::LenderNftNotLocked`], in this order, for the first check that fails.
+/// Returns [`VerifyError::Creation`], [`VerifyError::OutOfBounds`],
+/// [`VerifyError::AddressMismatch`] or [`VerifyError::LenderNftNotLocked`], in this order, for the
+/// first check that fails.
 pub fn verify_offer_as_lender(
     lender: &LendingKey,
     creation_tx: &Transaction,
@@ -81,12 +89,20 @@ pub fn verify_offer_as_borrower(
     verify_addresses(opened, creation_tx, network)
 }
 
-/// The address checks of an offer that the core opened and checked from `creation_tx`.
+/// The bounds and the address checks of an offer that the core opened and checked from
+/// `creation_tx`. The parameters it rebuilds include the points of the release proof's statement,
+/// `FS_IV` and `BLINDER_ROOT`, all recomputed from the shared secret and the terms, so the address
+/// check covers them.
 fn verify_addresses(
     opened: OpenedOffer,
     creation_tx: &Transaction,
     network: SimplicityNetwork,
 ) -> Result<(OpenedOffer, PrivateLendingParameters), VerifyError> {
+    check_bounds(
+        opened.pinned.active_collateral.amount,
+        opened.pinned.repayment.amount,
+    )?;
+
     let parameters = PrivateLendingParameters::from_terms(
         &opened.signed_terms.terms,
         opened.pinned,

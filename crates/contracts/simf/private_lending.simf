@@ -18,15 +18,20 @@
  * - Terms are pinned commitments, not explicit assets, amounts and an interest rate.
  * - No protocol fee. The interest is folded into the repayment commitment; the lender checks its
  *   opening once, off chain, before accepting the offer.
- * - An installment pays any amount, hidden in a value commitment V under A, and releases no
- *   collateral: the program computes the debt left, D' = D − V, and moves the loan to the storage
- *   of h(A, D'). The full repayment pays an output equal to the debt, so the installments and the
- *   full repayment add up to the repayment of the terms. A debt of no amount, which no output can
- *   carry, closes by revealing its blinder k, with k·G = ±D. There is no vault: the repayment and
- *   the installments go to asset_auth outputs of the lender NFT.
- * - Each installment re-blinds the collateral by a public step: its asset commitment moves by G
- *   and its value commitment stays, which proves the same asset and amount without opening it.
- *   An unchanged asset commitment would need a surjection proof with a zero blinding difference.
+ * - An installment pays any amount below the debt, hidden in a value commitment V under A: the
+ *   program computes the debt left, D' = D − V, and moves the loan to the storage of h(A, D'). The
+ *   full repayment pays an output equal to the debt, so the installments and the full repayment
+ *   add up to the repayment of the terms. There is no vault: the repayment and the installments go
+ *   to asset_auth outputs of the lender NFT.
+ * - An installment releases collateral in proportion: with C the collateral and R the repayment
+ *   of the terms, the successor holds c' = ceil(d'·C/R), d' being the amount of D'. Its asset
+ *   commitment moves by G at each step, and the borrower proves its value commitment with a Sigma
+ *   proof (verify_release), linked to two carry outputs whose amounts, e + 1 and R − e, consensus
+ *   bounds; e is the remainder c'·R − d'·C.
+ * - The successor's value blinder is committed in advance (the liquidation repair): at step i + 1
+ *   its value commitment is c'·A_c + x_(i+1)·G, and Y_(i+1) = x_(i+1)·G + y_(i+1)·J is leaf i of
+ *   BLINDER_ROOT. The lender derives every x_j, so it opens the collateral at liquidation by a
+ *   search for c', without reading the installments.
  * - The expiry is not in the program: it holds EXPIRY_HASH, the SHA-256 of a salt and the expiry,
  *   and the liquidation's witness reveals both.
  *
@@ -35,6 +40,13 @@
  * decode points. Elements sets a commitment's prefix bit exactly when y is not a square, while
  * jet::decompress reads that bit as the parity of y, so the program converts by testing whether
  * y is a square.
+ *
+ * The points of the release proof's statement that are fixed for the loan are parameters, as
+ * affine points: REPAYMENT_ASSET_POINT (A, the point of REPAYMENT_ASSET), COLLATERAL_ASSET_POINT
+ * (A_c) and COLLATERAL_VALUE_POINT (V_c0), the points of the active collateral's commitments, and
+ * STARTING_DEBT_POINT (D₀, the point of the pinned repayment's value commitment). FS_IV, the
+ * chaining value of the proof's challenge, hashes them with J. The lender recomputes every
+ * parameter from the shared secret and the terms before accepting.
  */
 
 // Helper getters
@@ -221,6 +233,27 @@ fn get_point_plus_generator(point: Ge) -> Ge {
     unwrap(jet::gej_normalize(jet::gej_ge_add(point, get_generator())))
 }
 
+// J, the point with even y whose x is the first SHA-256("simplicity-lending/private/v1/release-J"
+// ‖ t), t a 4-byte big-endian counter, that has one: nobody knows its discrete logarithm to base G
+fn get_release_j() -> Ge {
+    (
+        0xbd8d8368c2d77e10d44111aca9ee0f2be215e62cee554e7cbb3ed577ae7cb9db,
+        0xe0072f694007f4795ffc5633d8f6c88b7523bee3282e8e511573c8764381360a
+    )
+}
+
+// T + k·P, as an affine point. Fails at the point at infinity.
+fn add_scaled(t: Ge, k: u256, p: Ge) -> Ge {
+    unwrap(jet::gej_normalize(jet::gej_ge_add(jet::scale(k, (p, 1)), t)))
+}
+
+// A point from the witness is used only once it is known to be on the curve: the jets' addition
+// formulas do not use the curve's constant b, so a point off the curve would admit invalid-curve
+// attacks.
+fn check_on_curve(point: Ge) {
+    assert!(jet::ge_is_on_curve(point));
+}
+
 // Ensure functions
 
 fn ensure_output_is_op_return(index: u32) {
@@ -326,8 +359,8 @@ fn get_script_hash_for_storage(is_active: bool, debt: u256) -> u256 {
     jet::sha_256_ctx_8_finalize(hash_ctx3)
 }
 
-// The flows of the borrower NFT's holder: the installment, the full repayment and the zero-debt
-// close. Each spends the borrower NFT at input 0 and the loan at input 1.
+// The flows of the borrower NFT's holder: the installment and the full repayment. Each spends the
+// borrower NFT at input 0 and the loan at input 1.
 
 fn get_repayment_offer_input_index(start_input_index: u32) -> u32 {
     safe_add_32(start_input_index, 1)
@@ -347,13 +380,208 @@ fn get_installment_output_index(start_output_index: u32) -> u32 {
     safe_add_32(start_output_index, 2)
 }
 
-// The witness's debt is the loan's debt in Elements' encoding: the storage authenticates it.
-fn pay_installment(debt: (u1, u256)) {
+// The carries W1 and W2, which hold e + 1 and R − e units of the loan's carry token
+fn get_installment_carry_output_indexes(start_output_index: u32) -> (u32, u32) {
+    (safe_add_32(start_output_index, 3), safe_add_32(start_output_index, 4))
+}
+
+fn u16_to_u256(value: u16) -> u256 {
+    let value: u32 = <(u16, u16)>::into((0, value));
+    let value: u64 = <(u32, u32)>::into((0, value));
+    let value: u128 = <(u64, u64)>::into((0, value));
+
+    <(u128, u128)>::into((0, value))
+}
+
+// The index check: the loan's asset commitment is the encoding of A_c + i·G, so the loan is at
+// step i, the number of installments it has had. With equation M it fixes the committed blinder
+// that the successor at step i + 1 must use.
+fn check_step(collateral_asset: (u1, u256), index: u16) {
+    let step_asset: Gej = jet::gej_ge_add(
+        jet::generate(u16_to_u256(index)),
+        param::COLLATERAL_ASSET_POINT
+    );
+
+    check_commitment_encodings_eq(
+        collateral_asset,
+        get_point_commitment(unwrap(jet::gej_normalize(step_asset)))
+    );
+}
+
+// The chaining value of the leaves of BLINDER_ROOT's tree,
+// SHA-256("simplicity-lending/private/v1/release-leaf")
+fn get_leaf_iv() -> u256 {
+    0xbbf7d7db42afe9bc576c22b006772d76a16e07d70e5d1120774acda820542c41
+}
+
+// The chaining value of the tree's inner nodes,
+// SHA-256("simplicity-lending/private/v1/release-node")
+fn get_node_iv() -> u256 {
+    0xbe7d66ef2b12a4ce860bd56b5f69b750947b3710391de9fe883dd8e79ff9f6cd
+}
+
+// compress(h, P.x, P.y): the SHA-256 compression of the block P.x ‖ P.y from the chaining value h
+fn absorb(chaining_value: u256, point: Ge) -> u256 {
+    let (x, y): (u256, u256) = point;
+
+    jet::sha_256_block(chaining_value, x, y)
+}
+
+// One level of a Merkle path, from the leaf up: whether the node is a right child, and its
+// sibling. The accumulator holds the node, the index the levels so far spell, and the weight of
+// the next level's bit. Ten levels keep the index below 2^10 and the weight at most 2^10, so the
+// additions never carry.
+fn merkle_step(level: (bool, u256), accumulator: (u256, u16, u16)) -> (u256, u16, u16) {
+    let (is_right, sibling): (bool, u256) = level;
+    let (node, index, weight): (u256, u16, u16) = accumulator;
+    let (weight_carry, next_weight): (bool, u16) = jet::add_16(weight, weight);
+
+    match is_right {
+        true => {
+            let (index_carry, next_index): (bool, u16) = jet::add_16(index, weight);
+            (jet::sha_256_block(get_node_iv(), sibling, node), next_index, next_weight)
+        },
+        false => (jet::sha_256_block(get_node_iv(), node, sibling), index, next_weight),
+    }
+}
+
+// Equation M: Y is on the curve, and the path takes its leaf, compress(LEAF_IV, Y.x, Y.y), at
+// index i to BLINDER_ROOT, the root of the tree of Y_1 … Y_1024. Leaf i holds Y_(i+1), so Y is the
+// blinder commitment of the successor's step. The index is rebuilt from the path's ten bits.
+fn check_blinder_commitment(blinder_commitment: Ge, index: u16, path: [(bool, u256); 10]) {
+    check_on_curve(blinder_commitment);
+
+    let leaf: u256 = absorb(get_leaf_iv(), blinder_commitment);
+    let (root, path_index, weight): (u256, u16, u16) =
+        array_fold::<merkle_step, 10>(path, (leaf, 0, 1));
+
+    assert!(jet::eq_256(root, param::BLINDER_ROOT));
+    assert!(jet::eq_16(path_index, index));
+}
+
+// The release proof: a Sigma proof of knowledge of C, ρ, c', x, y, e, w1, R, r₀, w2 and τ with
+//   E1  V_c0      = C·A_c + ρ·G
+//   E2  V_s       = c'·A_c + x·G
+//   E3  Y         = x·G + y·J
+//   E4  W1 − A_w1 = e·A_w1 + w1·G
+//   E5  D₀        = R·A + r₀·G
+//   E6  W2        = (R − e)·A_w2 + w2·G
+//   E7  0         = c'·D₀ − C·D' − e·A − τ·G
+// with one response per secret, shared by every equation it appears in. The carries' amounts lie
+// in [1, 2^64) by consensus, so E4 and E6 give 0 ≤ e ≤ R − 1, and E7, which then holds over the
+// integers, gives c' = ceil(d'·C/R). The challenge chains the compression from FS_IV over the
+// statement's points D', V_s, W1, A_w1, W2, A_w2 and Y, then over T1 … T7, each its x ‖ y, and
+// each Vi below is one linear_verify_1, a·P + b·G = Q. The commitments are on the curve, checked
+// by the caller.
+fn verify_release(
+    debt_left: Ge,
+    successor_value: Ge,
+    first_carry_value: Ge,
+    first_carry_asset: Ge,
+    second_carry_value: Ge,
+    second_carry_asset: Ge,
+    blinder_commitment: Ge,
+    commitments: (Ge, Ge, Ge, Ge, Ge, Ge, Ge),
+    responses: (u256, u256, u256, u256, u256, u256, u256, u256, u256, u256, u256)
+) {
+    let (t1, t2, t3, t4, t5, t6, t7): (Ge, Ge, Ge, Ge, Ge, Ge, Ge) = commitments;
+    let (
+        z_collateral,
+        z_rho,
+        z_successor,
+        z_x,
+        z_y,
+        z_e,
+        z_first_carry,
+        z_repayment,
+        z_r0,
+        z_second_carry,
+        z_tau
+    ): (u256, u256, u256, u256, u256, u256, u256, u256, u256, u256, u256) = responses;
+
+    // h₁ … h₇, the statement's digest
+    let h: u256 = absorb(param::FS_IV, debt_left);
+    let h: u256 = absorb(h, successor_value);
+    let h: u256 = absorb(h, first_carry_value);
+    let h: u256 = absorb(h, first_carry_asset);
+    let h: u256 = absorb(h, second_carry_value);
+    let h: u256 = absorb(h, second_carry_asset);
+    let h: u256 = absorb(h, blinder_commitment);
+    // h₈ … h₁₄
+    let h: u256 = absorb(h, t1);
+    let h: u256 = absorb(h, t2);
+    let h: u256 = absorb(h, t3);
+    let h: u256 = absorb(h, t4);
+    let h: u256 = absorb(h, t5);
+    let h: u256 = absorb(h, t6);
+    let challenge: u256 = jet::scalar_normalize(absorb(h, t7));
+
+    // V1  z_C·A_c + z_ρ·G = T1 + c·V_c0
+    jet::linear_verify_1(
+        ((z_collateral, param::COLLATERAL_ASSET_POINT), z_rho),
+        add_scaled(t1, challenge, param::COLLATERAL_VALUE_POINT)
+    );
+    // V2  z_c'·A_c + z_x·G = T2 + c·V_s
+    jet::linear_verify_1(
+        ((z_successor, param::COLLATERAL_ASSET_POINT), z_x),
+        add_scaled(t2, challenge, successor_value)
+    );
+    // V3  z_y·J + z_x·G = T3 + c·Y
+    jet::linear_verify_1(
+        ((z_y, get_release_j()), z_x),
+        add_scaled(t3, challenge, blinder_commitment)
+    );
+    // V4  z_e·A_w1 + z_w1·G = T4 + c·(W1 − A_w1)
+    let first_carry_less_asset: Ge = unwrap(jet::gej_normalize(
+        jet::gej_ge_add((first_carry_value, 1), jet::ge_negate(first_carry_asset))
+    ));
+    jet::linear_verify_1(
+        ((z_e, first_carry_asset), z_first_carry),
+        add_scaled(t4, challenge, first_carry_less_asset)
+    );
+    // V5  z_R·A + z_r₀·G = T5 + c·D₀
+    jet::linear_verify_1(
+        ((z_repayment, param::REPAYMENT_ASSET_POINT), z_r0),
+        add_scaled(t5, challenge, param::STARTING_DEBT_POINT)
+    );
+    // V6  (z_R − z_e)·A_w2 + z_w2·G = T6 + c·W2
+    let z_second_amount: u256 = jet::scalar_add(z_repayment, jet::scalar_negate(z_e));
+    jet::linear_verify_1(
+        ((z_second_amount, second_carry_asset), z_second_carry),
+        add_scaled(t6, challenge, second_carry_value)
+    );
+    // V7  z_c'·D₀ − z_τ·G = T7 + z_C·D' + z_e·A
+    jet::linear_verify_1(
+        ((z_successor, param::STARTING_DEBT_POINT), jet::scalar_negate(z_tau)),
+        add_scaled(
+            add_scaled(t7, z_collateral, debt_left),
+            z_e,
+            param::REPAYMENT_ASSET_POINT
+        )
+    );
+}
+
+// The installment's witness: the loan's debt D in Elements' encoding, which the storage
+// authenticates; the loan's step i; Y = Y_(i+1) and its Merkle path; and the release proof, its
+// commitments T1 … T7 and its responses z_C, z_ρ, z_c', z_x, z_y, z_e, z_w1, z_R, z_r₀, z_w2, z_τ.
+fn pay_installment(
+    debt: (u1, u256),
+    index: u16,
+    blinder_commitment: Ge,
+    path: [(bool, u256); 10],
+    commitments: (Ge, Ge, Ge, Ge, Ge, Ge, Ge),
+    responses: (u256, u256, u256, u256, u256, u256, u256, u256, u256, u256, u256)
+) {
     let (borrower_nft_input_index, borrower_nft_output_index): (u32, u32) = (0, 0);
     let offer_input_index: u32 = get_repayment_offer_input_index(borrower_nft_input_index);
     let successor_output_index: u32 = get_installment_successor_output_index(borrower_nft_output_index);
     let installment_output_index: u32 = get_installment_output_index(borrower_nft_output_index);
+    let (
+        first_carry_output_index,
+        second_carry_output_index
+    ): (u32, u32) = get_installment_carry_output_indexes(borrower_nft_output_index);
 
+    // 1. The loan is input 1, at the storage of the witness's debt
     assert!(jet::eq_32(jet::current_index(), offer_input_index));
 
     ensure_input_script_hash(
@@ -361,6 +589,7 @@ fn pay_installment(debt: (u1, u256)) {
         get_script_hash_for_storage(true, get_debt_hash(debt))
     );
 
+    // 2. The borrower NFT passes from input 0 to output 0
     ensure_io_asset_and_amount_eq(
         borrower_nft_input_index,
         borrower_nft_output_index,
@@ -368,7 +597,7 @@ fn pay_installment(debt: (u1, u256)) {
         1
     );
 
-    // The installment V, to the lender NFT's lock, under the repayment asset
+    // 3. The installment V, to the lender NFT's lock, under the repayment asset
     ensure_output_script_hash(installment_output_index, param::INSTALLMENT_OUTPUT_SCRIPT_HASH);
     let (
         installment_asset,
@@ -376,15 +605,17 @@ fn pay_installment(debt: (u1, u256)) {
     ): ((u1, u256), (u1, u256)) = get_confidential_asset_and_amount(installment_output_index, false);
     check_commitment_encodings_eq(installment_asset, get_repayment_asset());
 
+    // 4. D' = D − V, not the point at infinity
     let debt_left: Ge = get_debt_left(debt, installment_value);
 
+    // 5. The successor at the storage of D'
     ensure_output_script_hash(
         successor_output_index,
         get_script_hash_for_storage(true, get_debt_hash(get_point_commitment(debt_left)))
     );
 
-    // The successor carries the collateral: its asset commitment is the loan's plus G and its value
-    // commitment the loan's, so the asset and the amount are the loan's.
+    // 6. The successor's asset commitment is the loan's plus G: the same asset, one step on. Its
+    // value commitment is the release proof's.
     let (
         collateral_asset,
         collateral_value
@@ -397,7 +628,48 @@ fn pay_installment(debt: (u1, u256)) {
         successor_asset,
         get_point_commitment(get_point_plus_generator(get_commitment_point(collateral_asset)))
     );
-    check_commitment_encodings_eq(successor_value, collateral_value);
+
+    // 7. The loan is at step i
+    check_step(collateral_asset, index);
+
+    // 8. Y is the blinder commitment of step i + 1
+    check_blinder_commitment(blinder_commitment, index, path);
+
+    // 9. The carries, confidential, to the principal's lock: a spendable script, so consensus
+    // bounds both amounts to [1, 2^64)
+    ensure_output_script_hash(first_carry_output_index, param::PRINCIPAL_OUTPUT_SCRIPT_HASH);
+    ensure_output_script_hash(second_carry_output_index, param::PRINCIPAL_OUTPUT_SCRIPT_HASH);
+    let (
+        first_carry_asset,
+        first_carry_value
+    ): ((u1, u256), (u1, u256)) = get_confidential_asset_and_amount(first_carry_output_index, false);
+    let (
+        second_carry_asset,
+        second_carry_value
+    ): ((u1, u256), (u1, u256)) = get_confidential_asset_and_amount(second_carry_output_index, false);
+
+    // 10. The statement's points, and the commitments on the curve
+    let (t1, t2, t3, t4, t5, t6, t7): (Ge, Ge, Ge, Ge, Ge, Ge, Ge) = commitments;
+    check_on_curve(t1);
+    check_on_curve(t2);
+    check_on_curve(t3);
+    check_on_curve(t4);
+    check_on_curve(t5);
+    check_on_curve(t6);
+    check_on_curve(t7);
+
+    // 11. The challenge and V1 … V7
+    verify_release(
+        debt_left,
+        get_commitment_point(successor_value),
+        get_commitment_point(first_carry_value),
+        get_commitment_point(first_carry_asset),
+        get_commitment_point(second_carry_value),
+        get_commitment_point(second_carry_asset),
+        blinder_commitment,
+        commitments,
+        responses
+    );
 }
 
 // Full repayment flow
@@ -424,52 +696,6 @@ fn full_repay_offer(debt_hash: u256) {
         debt_hash,
         param::REPAYMENT_OUTPUT_SCRIPT_HASH
     );
-}
-
-// Zero-debt close flow
-
-// SHA-256 of the script of an OP_RETURN with one 32-byte push of the key
-fn get_key_reveal_script_hash(key: u256) -> u256 {
-    let hash_ctx1: Ctx8 = jet::sha_256_ctx_8_init();
-    let hash_ctx2: Ctx8 = jet::sha_256_ctx_8_add_2(hash_ctx1, 0x6a20); // OP_RETURN, push 32 bytes
-    let hash_ctx3: Ctx8 = jet::sha_256_ctx_8_add_32(hash_ctx2, key);
-
-    jet::sha_256_ctx_8_finalize(hash_ctx3)
-}
-
-// The witness's debt is the loan's debt in Elements' encoding, and the key its blinder k or −k.
-// A key with k·G = ±D exists only when no amount is owed: otherwise it would give the discrete
-// logarithm of A to base G. Output 1 reveals the key, from which the lender can sweep the
-// installments. Simplicity reads an OP_RETURN's data only as hashes, so the key comes from the
-// witness and output 1's script must be its OP_RETURN.
-fn close_zero_debt(debt: (u1, u256), key: u256) {
-    let (borrower_nft_input_index, borrower_nft_output_index): (u32, u32) = (0, 0);
-    let offer_input_index: u32 = get_repayment_offer_input_index(borrower_nft_input_index);
-    let key_output_index: u32 = get_repayment_lender_output_index(borrower_nft_output_index);
-
-    assert!(jet::eq_32(jet::current_index(), offer_input_index));
-
-    ensure_input_script_hash(
-        offer_input_index,
-        get_script_hash_for_storage(true, get_debt_hash(debt))
-    );
-
-    ensure_input_asset_and_amount_burn(
-        borrower_nft_input_index,
-        borrower_nft_output_index,
-        param::BORROWER_NFT_ASSET_ID,
-        1
-    );
-
-    // The key is a nonzero scalar below the group's order, not reduced modulo it: k + n would
-    // pass as k, and the lender could not use it.
-    ensure_output_script_hash(key_output_index, get_key_reveal_script_hash(key));
-    assert!(jet::eq_256(jet::scalar_normalize(key), key));
-    check_flags_eq(jet::eq_256(key, 0), false);
-
-    // k·G has the x-coordinate of D, which Elements' encoding carries as it is
-    let (debt_prefix_bit, debt_x): (u1, u256) = debt;
-    assert!(jet::gej_x_equiv(debt_x, jet::generate(key)));
 }
 
 // Liquidation flow
@@ -589,12 +815,22 @@ fn cancel_offer() {
     );
 }
 
+// The installment's witness: the debt, the step i, Y, Y's Merkle path from the leaf up, the
+// proof's commitments T1 … T7 and its eleven responses.
+type InstallmentParams = (
+    (bool, u256),
+    u16,
+    Ge,
+    [(bool, u256); 10],
+    (Ge, Ge, Ge, Ge, Ge, Ge, Ge),
+    (u256, u256, u256, u256, u256, u256, u256, u256, u256, u256, u256)
+);
+
 // The witness path. A debt is a value commitment in Elements' encoding, whether the low bit of its
 // prefix is set and x; a debt hash is h(A, D).
 // - Left(Left(())): acceptance; Left(Right(())): cancellation.
-// - Right(Left(Left(debt))): an installment.
-// - Right(Left(Right(Left(debt_hash)))): the full repayment.
-// - Right(Left(Right(Right((debt, key))))): the zero-debt close.
+// - Right(Left(Left(installment))): an installment, with the release proof.
+// - Right(Left(Right(debt_hash))): the full repayment.
 // - Right(Right((debt_hash, salt, expiry))): the liquidation.
 fn main() {
     match witness::PATH {
@@ -608,24 +844,31 @@ fn main() {
                 },
             }
         },
-        Right(active_offer_params: Either<Either<(bool, u256), Either<u256, ((bool, u256), u256)>>, (u256, u256, u32)>) => {
+        Right(active_offer_params: Either<Either<InstallmentParams, u256>, (u256, u256, u32)>) => {
             match active_offer_params {
-                Left(repayment_params: Either<(bool, u256), Either<u256, ((bool, u256), u256)>>) => {
+                Left(repayment_params: Either<InstallmentParams, u256>) => {
                     match repayment_params {
-                        Left(installment_debt: (bool, u256)) => {
-                            pay_installment(get_commitment(installment_debt));
-                        },
-                        Right(closing_params: Either<u256, ((bool, u256), u256)>) => {
-                            match closing_params {
-                                Left(debt_hash: u256) => {
-                                    full_repay_offer(debt_hash);
-                                },
-                                Right(zero_debt_params: ((bool, u256), u256)) => {
-                                    let (debt, key): ((bool, u256), u256) = zero_debt_params;
+                        Left(installment_params: InstallmentParams) => {
+                            let (
+                                debt,
+                                index,
+                                blinder_commitment,
+                                path,
+                                commitments,
+                                responses
+                            ): InstallmentParams = installment_params;
 
-                                    close_zero_debt(get_commitment(debt), key);
-                                },
-                            }
+                            pay_installment(
+                                get_commitment(debt),
+                                index,
+                                blinder_commitment,
+                                path,
+                                commitments,
+                                responses
+                            );
+                        },
+                        Right(debt_hash: u256) => {
+                            full_repay_offer(debt_hash);
                         },
                     }
                 },

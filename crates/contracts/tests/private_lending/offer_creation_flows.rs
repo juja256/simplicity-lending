@@ -18,13 +18,13 @@ use lending_contracts::programs::program::SimplexProgram;
 use lending_contracts::programs::script_auth::ScriptAuth;
 use lending_contracts::utils::confidential::ConfidentialTransaction;
 use private_lending_core::{
-    CreationError, LendingKey, NewOffer, OfferTerms, OpenError, blind_pset, find_offer,
-    lift_lending_key,
+    CARRY_SUPPLY, CreationError, LendingKey, MAX_COLLATERAL, MAX_REPAYMENT, NewOffer, OfferTerms,
+    OpenError, ReleaseError, blind_pset, find_offer, lift_lending_key,
 };
 
 use super::setup::{
-    COLLATERAL_AMOUNT, PRINCIPAL_AMOUNT, PRINCIPAL_INTEREST_RATE, default_offer_parameters,
-    setup_pending_private_offer,
+    CARRY_SUPPLY_OUTPUT, COLLATERAL_AMOUNT, PRINCIPAL_AMOUNT, PRINCIPAL_INTEREST_RATE,
+    default_offer_parameters, setup_pending_private_offer,
 };
 
 /// The principal and 10% interest.
@@ -51,6 +51,11 @@ fn lender_nft_coin() -> OutPoint {
     OutPoint::new(Txid::from_byte_array([0xee; 32]), 1)
 }
 
+/// Input 2 of a creation transaction, which issues the carry token.
+fn carry_coin() -> OutPoint {
+    OutPoint::new(Txid::from_byte_array([0xee; 32]), 2)
+}
+
 /// The asset that `coin` issues with `contract_hash`.
 fn issued_asset(coin: OutPoint, contract_hash: [u8; 32]) -> AssetId {
     AssetId::from_entropy(AssetId::generate_asset_entropy(
@@ -68,10 +73,15 @@ struct OffChainOffer {
 
 impl OffChainOffer {
     fn new(network: SimplicityNetwork) -> OffChainOffer {
+        Self::with_amounts(network, COLLATERAL_AMOUNT, REPAYMENT_AMOUNT)
+    }
+
+    /// An offer of `collateral` and the full repayment `repayment`.
+    fn with_amounts(network: SimplicityNetwork, collateral: u64, repayment: u64) -> OffChainOffer {
         let terms = OfferTerms {
             principal_asset: AssetId::from_slice(&[0xaa; 32]).unwrap(),
-            principal_amount: PRINCIPAL_AMOUNT,
-            repayment_amount: REPAYMENT_AMOUNT,
+            principal_amount: PRINCIPAL_AMOUNT.min(repayment),
+            repayment_amount: repayment,
             interest_rate_bps: PRINCIPAL_INTEREST_RATE,
             loan_expiration_time: 1_000,
             borrower_nft: issued_asset(first_input(), BORROWER_NFT_CONTRACT_HASH),
@@ -83,7 +93,7 @@ impl OffChainOffer {
             &first_input(),
             PrivateLendingOffer::get_program_id(),
             network.policy_asset(),
-            COLLATERAL_AMOUNT,
+            collateral,
             terms,
             None,
         )
@@ -115,11 +125,12 @@ impl OffChainOffer {
         let terms = new_offer.signed_terms.terms;
         let offer = PrivateLendingOffer::new_pending(parameters);
         let policy_asset = parameters.network.policy_asset();
+        let collateral = parameters.pinned.pending_collateral.amount;
 
         let mut pset = PartiallySignedTransaction::new_v2();
         let mut input_secrets = HashMap::new();
         let coins = [
-            (first_input(), BORROWER_NFT_CONTRACT_HASH, COLLATERAL_AMOUNT),
+            (first_input(), BORROWER_NFT_CONTRACT_HASH, collateral),
             (lender_nft_coin(), LENDER_NFT_CONTRACT_HASH, 1_000),
         ];
         for (index, (coin, contract_hash, amount)) in coins.into_iter().enumerate() {
@@ -170,7 +181,7 @@ impl OffChainOffer {
             ),
             Output::new_explicit(
                 offer.get_script_pubkey(),
-                COLLATERAL_AMOUNT,
+                collateral,
                 policy_asset,
                 Some(lender_blinding_key),
             ),
@@ -259,7 +270,86 @@ fn creation_issues_nfts_in_the_creation_layout(
         setup.offer.get_script_pubkey()
     );
 
+    // input 2 issues the carry supply, without reissuance tokens, and output 4 holds it, explicit,
+    // locked like the principal by the borrower NFT
+    let carry = &creation_tx.input[2];
+    let carry_asset = carry.issuance_ids().0;
+    assert!(!nfts.contains(&carry_asset));
+    assert_eq!(
+        carry.asset_issuance.amount,
+        confidential::Value::Explicit(CARRY_SUPPLY)
+    );
+    assert_eq!(
+        carry.asset_issuance.inflation_keys,
+        confidential::Value::Null
+    );
+    let supply = &creation_tx.output[CARRY_SUPPLY_OUTPUT];
+    assert_eq!(
+        supply.script_pubkey,
+        parameters
+            .get_principal_output_asset_auth()
+            .get_script_pubkey()
+    );
+    assert_eq!(supply.asset.explicit(), Some(carry_asset));
+    assert_eq!(supply.value.explicit(), Some(CARRY_SUPPLY));
+
     Ok(())
+}
+
+/// The bounds the lender checks before accepting: `C ≤ 2^44` and `R ≤ 2^50 − 2` pass, one more
+/// each is refused, by the lender and by the borrower's own check.
+#[simplex::test]
+fn offers_beyond_the_bounds_fail_verification(context: simplex::TestContext) -> anyhow::Result<()> {
+    let network = *context.get_network();
+
+    let at_bounds = OffChainOffer::with_amounts(network, MAX_COLLATERAL, MAX_REPAYMENT);
+    assert_eq!(
+        verify_both(&at_bounds.creation_tx(), network),
+        [Ok(at_bounds.parameters); 2]
+    );
+
+    for (collateral, repayment, error) in [
+        (
+            MAX_COLLATERAL + 1,
+            MAX_REPAYMENT,
+            ReleaseError::CollateralOutOfBounds,
+        ),
+        (
+            MAX_COLLATERAL,
+            MAX_REPAYMENT + 1,
+            ReleaseError::RepaymentOutOfBounds,
+        ),
+    ] {
+        let offer = OffChainOffer::with_amounts(network, collateral, repayment);
+        assert_eq!(
+            verify_both(&offer.creation_tx(), network),
+            [Err(VerifyError::OutOfBounds(error)); 2]
+        );
+    }
+
+    Ok(())
+}
+
+/// The borrower's builder refuses to create an offer the lender would refuse.
+#[simplex::test]
+#[should_panic(expected = "The lender refuses this offer")]
+fn creation_beyond_the_bounds_panics(context: simplex::TestContext) {
+    let network = *context.get_network();
+    let offer = OffChainOffer::with_amounts(network, MAX_COLLATERAL + 1, REPAYMENT_AMOUNT);
+
+    let mut ctx = ConfidentialTransaction::new();
+    add_nft_issuances(
+        &mut ctx,
+        coin(first_input(), network),
+        coin(lender_nft_coin(), network),
+    );
+
+    PrivateLendingOffer::new_pending(offer.parameters).attach_creation(
+        &mut ctx,
+        &offer.new_offer,
+        Script::new(),
+        coin(carry_coin(), network),
+    );
 }
 
 #[simplex::test]
@@ -410,6 +500,7 @@ fn creation_with_other_parameters_panics(context: simplex::TestContext) {
         &mut ctx,
         &offer.new_offer,
         Script::new(),
+        coin(carry_coin(), network),
     );
 }
 
@@ -431,5 +522,6 @@ fn creation_from_another_first_input_panics(context: simplex::TestContext) {
         &mut ctx,
         &offer.new_offer,
         Script::new(),
+        coin(carry_coin(), network),
     );
 }
