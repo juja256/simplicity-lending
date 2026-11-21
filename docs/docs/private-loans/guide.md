@@ -184,8 +184,10 @@ same transaction ID; it does not create or sign another loan. A saved proposal t
 fewer days than you chose, or a saved acceptance whose proposal's term has passed, is not sent
 again: the app offers only **Discard** for it. The same holds for a saved installment once the
 loan's term has ended. While a saved installment waits, the app offers no other payment on that
-loan. After you discard one, the app pays the next installment of that loan from other coins: if
-the discarded one did reach the network, a new one from the same coins could reveal both amounts.
+loan. After you discard one, or once the app stops tracking one that never confirmed, the app pays
+the next installment of that loan from other coins: if the earlier one did reach the network, a
+new one from the same coins could reveal both amounts. This record lives in the browser profile
+too.
 
 Preserve the browser profile and its site data while a transaction needs recovery. A different
 profile does not have that local retry record. Check the transaction ID in the explorer if the
