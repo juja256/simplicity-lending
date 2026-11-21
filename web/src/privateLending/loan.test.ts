@@ -11,7 +11,7 @@ import type { PrivateFlowDeps } from './deps'
 import { pinnedAuthCovenant } from './finalize'
 import { buildInstallmentClaim, findLenderNft } from './flows/claimInstallments'
 import { buildFinalClaim, NothingToClaimError } from './flows/claimRepayment'
-import { buildPrivateInstallment } from './flows/installment'
+import { assertInstallmentReadsBack, buildPrivateInstallment } from './flows/installment'
 import { buildPrivateLiquidation, ExpiryNotReachedError } from './flows/liquidation'
 import { buildPrivateRepayment } from './flows/repayment'
 import { buildZeroDebtClose } from './flows/zeroDebtClose'
@@ -266,6 +266,38 @@ describe('loadLoan', () => {
     }
   })
 
+  // The installment builder reads its blinded transaction back with the borrower's key before
+  // it is signed: the fixture's installment stands in for a freshly built one.
+  it('reads an installment back as built before it is signed, and refuses any other', async () => {
+    const offer = await openOffer('borrower')
+    const before = await loadLoan(fakeChain().deps, offer, keys.borrower, `${acceptanceTxid}:0`)
+    const after = await loadLoan(fakeChain().deps, offer, keys.borrower, fixture.loan.loan_outpoint)
+    const paid = after.state.installment(1)
+    const expected = {
+      loanOutpoint: fixture.loan.loan_outpoint,
+      amount: paid.amount ?? 0n,
+      remaining: BigInt(fixture.loan.remaining),
+      successorDebtHash: fixture.loan.debt_hashes[1],
+    }
+    paid.free()
+    expect(before.acceptanceHex).toBe(fixture.loan.acceptance_tx)
+    expect(after.installmentHexes).toEqual([installmentHex])
+    const readBack = (exp: typeof expected) => () =>
+      assertInstallmentReadsBack(offer, before, keys.borrower, installmentHex, exp)
+    expect(readBack(expected)).not.toThrow()
+    const refused = /does not read back as built/
+    expect(readBack({ ...expected, amount: expected.amount + 1n })).toThrow(refused)
+    expect(readBack({ ...expected, remaining: expected.remaining - 1n })).toThrow(refused)
+    expect(readBack({ ...expected, loanOutpoint: `${installmentTxid}:2` })).toThrow(refused)
+    expect(readBack({ ...expected, successorDebtHash: fixture.loan.debt_hashes[0] })).toThrow(
+      refused,
+    )
+    // read with the lender's key, as a build blinded to the wrong key would be
+    expect(() =>
+      assertInstallmentReadsBack(offer, before, keys.lender, installmentHex, expected),
+    ).toThrow()
+  })
+
   it('reads a loan at its acceptance', async () => {
     const offer = await openOffer('borrower')
     const loan = await loadLoan(fakeChain().deps, offer, keys.borrower, `${acceptanceTxid}:0`)
@@ -353,6 +385,7 @@ describe("the borrower's flows", () => {
           borrowerNftOutpoint: nft,
           principalCoins,
           feeCoins,
+          lendingKey: keys.borrower,
         }),
       (deps: PrivateFlowDeps) =>
         buildPrivateRepayment(deps, offer, loan, {

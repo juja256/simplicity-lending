@@ -1,6 +1,7 @@
 // The borrower's repay form as rules: the amount typed decides between an installment and the full
 // repayment, and what the app refuses. With the rule that keeps a rebuilt installment from reusing
-// the key of one the borrower discarded. Pure (no React, no app config), so tests import it.
+// the key of an earlier one that did not go through. Pure (no React, no app config), so tests
+// import it.
 import type { Lwk } from '@/lwk'
 import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
 import { INSTALLMENT_INPUT } from '@/simplicity/private-lending/layout'
@@ -135,17 +136,20 @@ export function keepsDiscardTrace(record: Pick<PrivateTxRecord, 'kind'>): boolea
 }
 
 /**
- * The first wallet inputs (input 2, `"<txid>:<vout>"`) of the `discarded` installments that spent
- * the loan at `loanOutpoint`: the next installment of that loan leaves these coins out, so that
- * it never starts from one of them.
+ * The first wallet inputs (input 2, `"<txid>:<vout>"`) of every installment this browser saved
+ * that spent the loan at `loanOutpoint`, whatever became of it: discarded, failed (its tracking
+ * timed out, as for a transaction the network dropped), or still waiting. The next installment of
+ * that loan leaves these coins out, so that it never starts from one of them: any of them may
+ * have reached the network under the key a rebuild would derive again. A waiting one blocks a
+ * new build anyway, and a confirmed one spent the loan output, so neither costs a coin.
  */
-export function discardedInstallmentInputs(
+export function installmentTraceInputs(
   lwk: Pick<Lwk, 'Transaction'>,
-  discarded: readonly PrivateTxRecord[],
+  saved: readonly PrivateTxRecord[],
   loanOutpoint: string,
 ): Set<string> {
   const inputs = new Set<string>()
-  for (const record of discarded) {
+  for (const record of saved) {
     if (!keepsDiscardTrace(record)) continue
     const tx = lwk.Transaction.fromString(record.txHex)
     const outpointAt = (index: number) => {

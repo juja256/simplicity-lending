@@ -45,7 +45,7 @@ export interface PrivateTxRecord {
   /**
    * When the borrower discarded this installment. The record stays, out of `privateTxs`, as the
    * discard's trace: the next installment of its loan must not start from its first wallet input
-   * (`discardedInstallmentInputs`).
+   * (`installmentTraceInputs`).
    */
   discardedAt?: number
 }

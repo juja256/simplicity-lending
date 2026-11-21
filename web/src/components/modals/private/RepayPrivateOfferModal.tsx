@@ -24,7 +24,7 @@ import { loadLoan } from '@/privateLending/loan'
 import { borrowerActions, isPastExpiry, offerTxState } from '@/privateLending/offerView'
 import {
   checkInstallmentTerm,
-  discardedInstallmentInputs,
+  installmentTraceInputs,
   repayBroadcast,
   type RepayPlan,
   repayPlan,
@@ -111,7 +111,8 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
     if (plan === undefined || plan.kind === 'refused') {
       throw new Error(plan?.message ?? 'The amount this loan still owes is not read yet')
     }
-    const fresh = await loadLoan(deps, offer, await getLendingKey(), utxoOutpoint(utxo))
+    const lendingKey = await getLendingKey()
+    const fresh = await loadLoan(deps, offer, lendingKey, utxoOutpoint(utxo))
     const freshOwed = fresh.state.remaining
     if (freshOwed === undefined) {
       throw new Error(
@@ -168,10 +169,15 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
       })
     }
     // An installment derives its key from the loan output, its first wallet input (input 2) and
-    // the NFT's receiver script: it never starts from the first input of an installment of this
-    // loan that was discarded, which may have reached the network with the same key.
-    const discarded = discardedInstallmentInputs(deps.lwk, discardedTxs, fresh.state.loanOutpoint)
-    const usable = coins.filter(coin => !discarded.has(outpointOf(coin)))
+    // the NFT's receiver script: it never starts from the first input of an earlier installment
+    // of this loan saved here (discarded, or failed), which may have reached the network with the
+    // same key.
+    const traced = installmentTraceInputs(
+      deps.lwk,
+      [...privateTxs, ...discardedTxs],
+      fresh.state.loanOutpoint,
+    )
+    const usable = coins.filter(coin => !traced.has(outpointOf(coin)))
     let principalCoins
     try {
       principalCoins = selectAssetCoins(
@@ -183,8 +189,9 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
     } catch (error) {
       if (usable.length === coins.length) throw error
       throw new Error(
-        `Your other ${principalAsset.symbol} coins cannot pay this installment: an installment ` +
-          'you discarded started from one of them, and a new one must not. Repay in full, or ' +
+        `Your other ${principalAsset.symbol} coins cannot pay this installment: an earlier ` +
+          'installment of this loan that did not go through started from one of them, and a ' +
+          'new one must not. Repay in full, or ' +
           `send your ${principalAsset.symbol} to your own address first.`,
         { cause: error },
       )
@@ -201,6 +208,7 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
       borrowerNftOutpoint: borrowerNft,
       principalCoins,
       feeCoins,
+      lendingKey,
     })
   }
 
