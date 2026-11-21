@@ -43,11 +43,17 @@ export const privateOfferStatusSchema = zod.enum([
 ])
 export type PrivateOfferStatus = zod.infer<typeof privateOfferStatusSchema>
 
+/**
+ * `active_offer` is the loan: an installment spends it and leaves its successor at output 1 and the
+ * `installment` at output 2. `repayment` is the full repayment's output; a zero-debt close leaves
+ * none.
+ */
 export const privateUtxoTypeSchema = zod.enum([
   'pending_offer',
   'active_offer',
   'principal',
   'repayment',
+  'installment',
 ])
 export type PrivateUtxoType = zod.infer<typeof privateUtxoTypeSchema>
 

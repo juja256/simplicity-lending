@@ -116,15 +116,20 @@ export interface Need {
 
 /**
  * The state records of the transactions that spend from the wallets, one per transaction. Most
- * stages broadcast one; `cancel` broadcasts its own creation (`cancel-create`), then the
- * cancellation, and `liquidate` its creation (`liquidate-create`), the lender's acceptance
- * (`liquidate-accept`), then the liquidation. `scan` and `directory` broadcast nothing (they read
+ * stages broadcast one; `repay-partial` broadcasts two installments (`repay-partial-1`,
+ * `repay-partial-2`) and, between them, the lender's claim of the first (`claim-installment-1`),
+ * `cancel` its own creation (`cancel-create`), then the cancellation, and
+ * `liquidate` its creation (`liquidate-create`), the lender's acceptance (`liquidate-accept`), then
+ * the liquidation. `scan` and `directory` broadcast nothing (they read
  * the indexer and write the directory, off-chain), so they never have a record.
  */
 export type Stage =
   | 'create'
   | 'accept'
   | 'claim-principal'
+  | 'repay-partial-1'
+  | 'claim-installment-1'
+  | 'repay-partial-2'
   | 'repay'
   | 'claim-repayment'
   | 'cancel-create'
@@ -157,8 +162,21 @@ export const STAGE_NEEDS: Record<Stage, Record<Wallet, Need>> = {
     borrower: { lbtc: FEE_BUDGET, test: 0n },
     lender: NONE,
   },
+  // the installments pay from the claimed principal
+  'repay-partial-1': {
+    borrower: { lbtc: FEE_BUDGET, test: 0n },
+    lender: NONE,
+  },
+  'claim-installment-1': {
+    borrower: NONE,
+    lender: { lbtc: FEE_BUDGET, test: 0n },
+  },
+  'repay-partial-2': {
+    borrower: { lbtc: FEE_BUDGET, test: 0n },
+    lender: NONE,
+  },
   repay: {
-    // the principal comes from the claim; the interest from the wallet
+    // the rest of the principal comes from the claim; the interest from the wallet
     borrower: { lbtc: FEE_BUDGET, test: REPAYMENT - PRINCIPAL },
     lender: NONE,
   },

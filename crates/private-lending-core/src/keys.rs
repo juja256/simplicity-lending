@@ -1,13 +1,14 @@
-//! Lending keys and the ephemeral key of an offer.
+//! Lending keys, and the ephemeral keys of an offer and of an installment.
 
-use elements::hashes::Hash;
+use elements::hashes::{Hash, sha256};
 use elements::secp256k1_zkp::{Parity, PublicKey, SECP256K1, SecretKey, XOnlyPublicKey};
-use elements::{AssetId, OutPoint};
+use elements::{AssetId, OutPoint, Script};
 
 use crate::tagged_hash;
 
 const LENDING_KEY_TAG: &str = "simplicity-lending/lending-key/v1";
 const EPHEMERAL_TAG: &str = "simplicity-lending/private/v1/ephemeral";
+const INSTALLMENT_EPHEMERAL_TAG: &str = "simplicity-lending/private/v1/installment-ephemeral";
 
 /// A user's lending key, derived from the wallet's SLIP-77 master blinding key.
 ///
@@ -71,6 +72,39 @@ pub fn ephemeral_key(
         first_input,
         borrower_nft,
         lender_nft,
+    );
+
+    SecretKey::from_slice(&hash)
+        .expect("a tagged hash is zero or above the curve order with negligible probability")
+}
+
+/// The ephemeral key of an installment, whose public key is the installment output's nonce:
+/// `tagged_hash("simplicity-lending/private/v1/installment-ephemeral", borrower_sk ‖ loan txid ‖
+/// loan vout_le32 ‖ first wallet input txid ‖ vout_le32 ‖ SHA-256(nft_receiver))`, the txids in
+/// their internal byte order and the script hashed over its raw bytes.
+///
+/// `loan` is the loan output the installment spends (its input 1), `first_wallet_input` its
+/// input 2 and `nft_receiver` the script of its output 0, the borrower NFT's fresh receive
+/// address. Like the offer's [`ephemeral_key`], the key is deterministic, so the borrower can
+/// rewind its installments from its lending key and the chain alone and rebuild the loan's debt.
+/// The receive address, fresh for every build, makes the key differ between two builds of one
+/// installment, so that they do not share a range proof's nonce.
+pub fn installment_ephemeral_key(
+    borrower: &LendingKey,
+    loan: OutPoint,
+    first_wallet_input: OutPoint,
+    nft_receiver: &Script,
+) -> SecretKey {
+    let hash = tagged_hash(
+        INSTALLMENT_EPHEMERAL_TAG,
+        &[
+            &borrower.secret_key.secret_bytes(),
+            loan.txid.as_byte_array(),
+            &loan.vout.to_le_bytes(),
+            first_wallet_input.txid.as_byte_array(),
+            &first_wallet_input.vout.to_le_bytes(),
+            sha256::Hash::hash(nft_receiver.as_bytes()).as_byte_array(),
+        ],
     );
 
     SecretKey::from_slice(&hash)
@@ -194,6 +228,22 @@ mod tests {
         assert_eq!(
             key.secret_bytes().to_hex(),
             "9e4fa154e4e6c26b764e128148af50f4cf2a105cb2c89433d05fc58df8f75a4e"
+        );
+    }
+
+    /// The frozen installment key of fixed inputs, so a change of tag, byte order or data fails.
+    /// The expected key was computed apart from this crate, with Python's hashlib.
+    #[test]
+    fn installment_ephemeral_key_known_answer() {
+        let borrower = LendingKey::from_master_blinding_key(&[1; 32]);
+        let first_wallet_input = OutPoint::new(Txid::from_byte_array(sequence(0x20)), 0x0506_0708);
+        let nft_receiver = Script::from([&[0x51, 0x20][..], &sequence(0x40)].concat());
+        let key =
+            installment_ephemeral_key(&borrower, first_input(), first_wallet_input, &nft_receiver);
+
+        assert_eq!(
+            key.secret_bytes().to_hex(),
+            "4f3dd00ca0c32256ac0bb5d46767003ef63e0d9eaf9d770d8fdfbc4a52cbaef7"
         );
     }
 }

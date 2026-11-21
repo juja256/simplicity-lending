@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 elements = "0.25.2"
+k256 = { version = "0.13", default-features = false, features = ["arithmetic", "expose-field"] }
 rand = "0.8"
 
 [dev-dependencies]

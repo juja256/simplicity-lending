@@ -25,6 +25,12 @@ function sentence(label: string): string {
   return label.charAt(0).toUpperCase() + label.slice(1)
 }
 
+/** Why a proposal waits for its creation's block, by what esplora last answered. */
+const PENDING_LABEL: Record<NonNullable<TermsBadgeProps['pending']>, string> = {
+  unconfirmed: 'Not confirmed yet',
+  failed: 'Could not read the chain',
+}
+
 interface TermsBadgeProps {
   /**
    * The proposal against the lender's terms; undefined until the terms are loaded and esplora
@@ -33,19 +39,22 @@ interface TermsBadgeProps {
   verdict: TermsVerdict | undefined
   /** The check cannot run: the lender's terms, or the app's loan rules, could not be loaded. */
   failed?: boolean
+  /**
+   * Why esplora gave no block for the creation yet: it reports the creation unconfirmed, or it
+   * could not be read. Undefined while its first answer loads, or once it gave the block.
+   */
+  pending?: 'unconfirmed' | 'failed'
 }
 
 /**
  * A proposal against the lender's own terms: within them, or each term it breaks named in plain
- * words with the lender's figure, or why it could not be checked.
+ * words with the lender's figure, or why it could not be checked yet.
  */
-export default function TermsBadge({ verdict, failed }: TermsBadgeProps) {
+export default function TermsBadge({ verdict, failed, pending }: TermsBadgeProps) {
   if (verdict === undefined) {
-    return failed ? (
-      <Pill tone='default'>Not checked</Pill>
-    ) : (
-      <Skeleton className='h-5 w-28 rounded-full' />
-    )
+    if (failed) return <Pill tone='default'>Not checked</Pill>
+    if (pending !== undefined) return <Pill tone='default'>{PENDING_LABEL[pending]}</Pill>
+    return <Skeleton className='h-5 w-28 rounded-full' />
   }
   switch (verdict.kind) {
     case 'within':

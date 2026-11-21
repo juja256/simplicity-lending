@@ -43,11 +43,17 @@ export interface Chain {
 }
 
 export function createChain(esploraApi: string): Chain {
+  // A transaction never changes under its txid: each is fetched once a run, which spares the
+  // esplora requests of the loan walks (`loadLoan`, `principalClaimedBefore`).
+  const txHexes = new Map<string, string>()
   const chain: Chain = {
     async fetchTx(txid) {
-      return Transaction.fromString(
-        (await (await get(esploraApi, `/tx/${txid}/hex`)).text()).trim(),
-      )
+      let hex = txHexes.get(txid)
+      if (hex === undefined) {
+        hex = (await (await get(esploraApi, `/tx/${txid}/hex`)).text()).trim()
+        txHexes.set(txid, hex)
+      }
+      return Transaction.fromString(hex)
     },
     async fetchWitnesses(txid) {
       const tx = (await (await get(esploraApi, `/tx/${txid}`)).json()) as {

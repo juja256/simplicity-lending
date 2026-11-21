@@ -7,10 +7,14 @@ import Notice from '@/components/Notice'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { utxoOutpoint } from '@/privateLending/candidate'
+import { findLenderNft } from '@/privateLending/flows/claimInstallments'
 import { buildPrivateLiquidation } from '@/privateLending/flows/liquidation'
+import { esploraSpentBy } from '@/privateLending/hooks/usePrivateFlowDeps'
+import { loadLoan } from '@/privateLending/loan'
 import { isPastExpiry } from '@/privateLending/offerView'
 import { selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
-import { ACCEPTANCE_OUTPUT } from '@/simplicity/private-lending/layout'
+import { useWallet } from '@/providers/wallet/useWallet'
+import { ASSET_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/asset-auth/witness'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
 
 import PrivateOfferActionShell, {
@@ -22,28 +26,37 @@ import PrivateOfferActionShell, {
 const LIQUIDATE_WEIGHT_UNITS =
   PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.Liquidation + EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY
 
-/** The lender takes the collateral of an expired loan, burning its lender NFT. */
+/**
+ * The lender takes the collateral of an expired loan, burning its lender NFT, and sweeps the
+ * installments it has not claimed that open with its key.
+ */
 export default function LiquidatePrivateOfferModal(props: PrivateOfferActionModalProps) {
   const { terms } = props.item
+  const { getLendingKey } = useWallet()
   const { data: tipHeight } = useBlockHeight()
   const { formatCollateralDisplay } = useFormatAmount()
   const isExpired = isPastExpiry(terms, tipHeight)
 
-  // `utxo` is the unspent active offer. The outpoints come from the indexer, read again now; the
-  // builder checks both on chain. It also refuses, before anything else, while the tip is below
-  // the expiry.
-  const build = async ({ deps, offer, utxo }: FreshOffer) => {
+  // `utxo` is the unspent loan output. The outpoints come from the indexer, read again now:
+  // `loadLoan` walks the loan back on chain to this offer's acceptance, the lender NFT is found by
+  // walking forward from it, and the builder checks the rest on chain. It also refuses, before
+  // building, while the tip is below the expiry.
+  const build = async ({ deps, offer, candidate, utxo }: FreshOffer) => {
     const currentTip = await fetchLatestBlockHeight()
+    const loan = await loadLoan(deps, offer, await getLendingKey(), utxoOutpoint(utxo))
+    const unspentInstallments = candidate.utxos
+      .filter(installment => installment.utxo_type === 'installment')
+      .filter(installment => installment.spent_txid === null)
+      .map(utxoOutpoint)
     const feeCoins = selectFeeCoins(
       deps.walletUtxos(),
       deps.assets.policy,
-      LIQUIDATE_WEIGHT_UNITS,
+      LIQUIDATE_WEIGHT_UNITS + unspentInstallments.length * ASSET_AUTH_MAX_WEIGHT_TO_SATISFY,
       deps.feeRate,
     )
-    return buildPrivateLiquidation(deps, offer, {
-      activeOfferOutpoint: utxoOutpoint(utxo),
-      // The acceptance created the active offer and paid the lender NFT in the same transaction.
-      lenderNftOutpoint: `${utxo.txid}:${ACCEPTANCE_OUTPUT.lenderNft}`,
+    return buildPrivateLiquidation(deps, offer, loan, {
+      lenderNftOutpoint: await findLenderNft(deps, offer, loan, esploraSpentBy),
+      unspentInstallments,
       feeCoins,
       collateralReceiver: walletReceiver(deps),
       tipHeight: currentTip,

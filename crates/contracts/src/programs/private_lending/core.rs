@@ -1,8 +1,13 @@
-use private_lending_core::{NewOffer, OfferSecrets, lift_lending_key};
+use private_lending_core::{
+    DebtOpening, NewOffer, OfferSecrets, debt_after, debt_hash, lift_lending_key, zero_debt_key,
+};
 use simplex::{
     program::Program,
     provider::SimplicityNetwork,
-    simplicityhl::elements::{AssetId, LockTime, OutPoint, Script, Sequence, bitcoin::PublicKey},
+    simplicityhl::elements::{
+        AssetId, LockTime, OutPoint, Script, Sequence, bitcoin::PublicKey, confidential,
+        secp256k1_zkp::SecretKey,
+    },
     transaction::{
         PartialInput, PartialOutput, RequiredSignature, UTXO, partial_input::IssuanceInput,
     },
@@ -15,7 +20,10 @@ use crate::{
         program::SimplexProgram,
         script_auth::{ScriptAuth, ScriptAuthWitnessParams},
     },
-    utils::{confidential::ConfidentialTransaction, get_random_seed},
+    utils::{
+        confidential::{ConfidentialTransaction, PinnedOutput},
+        get_random_seed,
+    },
 };
 
 /// Adds the issuance inputs of an offer's creation transaction: `borrower_coin` (input 0, the
@@ -55,13 +63,16 @@ pub fn add_nft_issuances(
     (issue_nft(borrower_coin), issue_nft(lender_coin))
 }
 
-/// A private lending offer. Its storage holds the status (slot 0) and the outstanding debt as the
-/// hash of its commitment (slot 1). Without partial repayment, the debt is the pinned repayment
-/// from creation until the full repayment.
+/// A private lending offer. Its storage holds the status (slot 0) and the debt (slot 1), the hash
+/// `h(A, D)` of the repayment's asset commitment `A` and of the debt `D`, a value commitment under
+/// `A`. The debt is the pinned repayment until the first installment, and every installment
+/// replaces it with the debt it leaves.
 pub struct PrivateLendingOffer {
     program: PrivateLendingProgram,
     parameters: PrivateLendingParameters,
     is_active: bool,
+    debt: confidential::Value,
+    installments: u32,
 }
 
 impl PrivateLendingOffer {
@@ -69,26 +80,41 @@ impl PrivateLendingOffer {
         Self::new_with_storage(
             parameters,
             false,
-            parameters.pinned.repayment.commitment_hash(),
+            parameters.pinned.repayment.value_commitment(),
+            0,
         )
     }
 
+    /// The loan at acceptance, whose debt is the pinned repayment:
+    /// [`Self::new_active_at`] of `D₀` after no installment.
     pub fn new_active(parameters: PrivateLendingParameters) -> Self {
-        Self::new_with_storage(
+        Self::new_active_at(
             parameters,
-            true,
-            parameters.pinned.repayment.commitment_hash(),
+            parameters.pinned.repayment.value_commitment(),
+            0,
         )
     }
 
-    /// The offer whose storage holds `is_active` and `debt_slot`. The program only accepts
-    /// `debt_slot` equal to the repayment's commitment hash, as in [`Self::new_pending`] and
-    /// [`Self::new_active`].
-    pub fn new_with_storage(
+    /// The loan after `installments` installments, which left the debt `debt`: its storage holds
+    /// `h(A, debt)`, and its collateral is
+    /// [`collateral_after`](private_lending_core::OfferPinned::collateral_after) of the
+    /// installments.
+    pub fn new_active_at(
+        parameters: PrivateLendingParameters,
+        debt: confidential::Value,
+        installments: u32,
+    ) -> Self {
+        Self::new_with_storage(parameters, true, debt, installments)
+    }
+
+    fn new_with_storage(
         parameters: PrivateLendingParameters,
         is_active: bool,
-        debt_slot: [u8; 32],
+        debt: confidential::Value,
+        installments: u32,
     ) -> Self {
+        let debt_slot = debt_hash(&parameters.pinned.repayment.asset_commitment(), &debt);
+
         let mut program =
             PrivateLendingProgram::new(parameters.build_arguments()).with_storage_capacity(2);
 
@@ -101,6 +127,8 @@ impl PrivateLendingOffer {
             program,
             parameters,
             is_active,
+            debt,
+            installments,
         }
     }
 
@@ -119,10 +147,29 @@ impl PrivateLendingOffer {
         self.is_active
     }
 
-    /// The collateral this offer holds in its current state.
-    pub fn get_collateral(&self) -> crate::utils::confidential::PinnedOutput {
+    /// The debt still owed, `D`, a value commitment under the repayment's asset commitment.
+    pub fn get_debt(&self) -> confidential::Value {
+        self.debt
+    }
+
+    /// `h(A, D)`, which the storage holds.
+    pub fn get_debt_hash(&self) -> [u8; 32] {
+        debt_hash(
+            &self.parameters.pinned.repayment.asset_commitment(),
+            &self.debt,
+        )
+    }
+
+    /// How many installments the loan has had.
+    pub fn get_installments(&self) -> u32 {
+        self.installments
+    }
+
+    /// The collateral this offer holds in its current state: once active, each installment moves
+    /// its asset commitment by `G`.
+    pub fn get_collateral(&self) -> PinnedOutput {
         if self.is_active {
-            self.parameters.pinned.active_collateral
+            self.parameters.pinned.collateral_after(self.installments)
         } else {
             self.parameters.pinned.pending_collateral
         }
@@ -173,6 +220,7 @@ impl PrivateLendingOffer {
         let expected = PrivateLendingParameters::from_terms(
             &new_offer.signed_terms.terms,
             new_offer.pinned,
+            &new_offer.secrets,
             self.parameters.network,
         );
         assert!(
@@ -289,23 +337,112 @@ impl PrivateLendingOffer {
         ));
     }
 
-    /// Burns the borrower NFT (input 0, output 0), spends the active offer (input 1) and pays
-    /// the pinned repayment (output 1). The caller adds the principal to repay and takes the
-    /// collateral.
+    /// Passes the borrower NFT from input 0 to `borrower_nft_receiver` (output 0), explicit, spends
+    /// the loan (input 1) and pays `payment` (output 2), an installment under the repayment's asset
+    /// commitment `A`, to the lender NFT's lock without burn. The successor loan (output 1)
+    /// holds the debt the installment leaves and the collateral re-blinded by one step. Returns
+    /// the successor. The caller adds the principal that pays the installment.
+    ///
+    /// The installment's range proof is blinded to `lender_blinding_key` with the nonce
+    /// `ephemeral_sk·G`, which the borrower derives with
+    /// [`installment_ephemeral_key`](private_lending_core::installment_ephemeral_key), so that
+    /// both parties can rewind it and rebuild the debt from the chain. The successor's range proof
+    /// is blinded to `lender_blinding_key` too: both parties derive its blinders anyway.
     ///
     /// # Panics
-    /// Panics if the offer is pending or the transaction already has inputs or outputs.
+    /// Panics if the offer is pending, the transaction already has inputs or outputs,
+    /// `payment` is not under the repayment's asset id and asset blinder, or it pays the whole
+    /// debt, amount and blinder: the debt left would be the point at infinity, which the program
+    /// refuses.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attach_installment(
+        &self,
+        ctx: &mut ConfidentialTransaction,
+        borrower_nft_utxo: UTXO,
+        loan_utxo: UTXO,
+        borrower_nft_receiver: Script,
+        payment: PinnedOutput,
+        lender_blinding_key: PublicKey,
+        ephemeral_sk: SecretKey,
+    ) -> PrivateLendingOffer {
+        assert!(self.is_active, "Only an active offer takes installments");
+        assert!(
+            ctx.n_inputs() == 0 && ctx.n_outputs() == 0,
+            "The installment must be the first attachment"
+        );
+        let repayment = self.parameters.pinned.repayment;
+        assert!(
+            payment.asset_id == repayment.asset_id
+                && payment.asset_blinding_factor == repayment.asset_blinding_factor,
+            "The installment is not under the repayment's asset commitment"
+        );
+        let debt_left = debt_after(&self.debt, &payment.value_commitment())
+            .expect("The installment leaves no debt: the full repayment pays it");
+        let successor = Self::new_active_at(self.parameters, debt_left, self.installments + 1);
+
+        ctx.add_input(
+            PartialInput::new(borrower_nft_utxo),
+            RequiredSignature::NativeEcdsa,
+        );
+        ctx.add_output(PartialOutput::new(
+            borrower_nft_receiver,
+            1,
+            self.parameters.borrower_nft_asset_id,
+        ));
+
+        self.add_program_input(
+            ctx,
+            loan_utxo,
+            PrivateLendingWitnessBranch::Installment { debt: self.debt }.build_witness(),
+        );
+
+        ctx.add_pinned_output(
+            successor.get_script_pubkey(),
+            successor.get_collateral(),
+            lender_blinding_key,
+        );
+        ctx.add_pinned_output_with(
+            self.parameters
+                .get_installment_output_asset_auth()
+                .get_script_pubkey(),
+            payment,
+            lender_blinding_key,
+            ephemeral_sk,
+            Vec::new(),
+        );
+
+        successor
+    }
+
+    /// Burns the borrower NFT (input 0, output 0), spends the loan (input 1) and pays the debt
+    /// (output 1): the repayment's asset commitment with `opening`'s amount and value blinder,
+    /// whose value commitment is the debt itself. The caller adds the principal to repay and takes
+    /// the collateral.
+    ///
+    /// # Panics
+    /// Panics if the offer is pending, the transaction already has inputs or outputs, or
+    /// `opening` is not the debt's opening or owes no amount, which the zero-debt close closes.
     pub fn attach_full_repayment(
         &self,
         ctx: &mut ConfidentialTransaction,
         borrower_nft_utxo: UTXO,
-        active_offer_utxo: UTXO,
+        loan_utxo: UTXO,
+        opening: DebtOpening,
         lender_blinding_key: PublicKey,
     ) {
         assert!(self.is_active, "Only an active offer can be repaid");
         assert!(
             ctx.n_inputs() == 0 && ctx.n_outputs() == 0,
             "Repayment must be the first attachment"
+        );
+        assert!(
+            opening.amount > 0,
+            "A debt of no amount closes with the zero-debt close"
+        );
+        let repayment = self.parameters.pinned.repayment;
+        assert!(
+            opening.commitment(&repayment) == self.debt,
+            "The opening is not the debt's"
         );
 
         ctx.add_input(
@@ -320,41 +457,104 @@ impl PrivateLendingOffer {
 
         self.add_program_input(
             ctx,
-            active_offer_utxo,
-            PrivateLendingWitnessBranch::FullRepayment.build_witness(),
+            loan_utxo,
+            PrivateLendingWitnessBranch::FullRepayment {
+                debt_hash: self.get_debt_hash(),
+            }
+            .build_witness(),
         );
 
         ctx.add_pinned_output(
             self.parameters
                 .get_repayment_output_asset_auth()
                 .get_script_pubkey(),
-            self.parameters.pinned.repayment,
+            PinnedOutput {
+                amount: opening.amount,
+                value_blinding_factor: opening.blinder,
+                ..repayment
+            },
             lender_blinding_key,
         );
     }
 
-    /// Spends the active offer after its expiration (input 0) and burns the lender NFT
-    /// (output 0). The caller adds the lender NFT input (input 1) and takes the collateral.
+    /// Closes a loan that owes no amount: burns the borrower NFT (input 0, output 0), spends the
+    /// loan (input 1) and reveals the debt's blinder `k` in an `OP_RETURN` (output 1), which lets
+    /// the lender sweep the installments it has not claimed. The caller takes the collateral.
+    ///
+    /// # Panics
+    /// Panics if the offer is pending, the transaction already has inputs or outputs, or
+    /// `opening` is not the debt's opening or owes an amount.
+    pub fn attach_zero_debt_close(
+        &self,
+        ctx: &mut ConfidentialTransaction,
+        borrower_nft_utxo: UTXO,
+        loan_utxo: UTXO,
+        opening: DebtOpening,
+    ) {
+        assert!(self.is_active, "Only an active offer can be closed");
+        assert!(
+            ctx.n_inputs() == 0 && ctx.n_outputs() == 0,
+            "The close must be the first attachment"
+        );
+        let key = zero_debt_key(&opening).expect("The debt owes an amount");
+        assert!(
+            opening.commitment(&self.parameters.pinned.repayment) == self.debt,
+            "The opening is not the debt's"
+        );
+
+        ctx.add_input(
+            PartialInput::new(borrower_nft_utxo),
+            RequiredSignature::NativeEcdsa,
+        );
+        ctx.add_output(PartialOutput::new(
+            Script::new_op_return(b"burn"),
+            1,
+            self.parameters.borrower_nft_asset_id,
+        ));
+
+        self.add_program_input(
+            ctx,
+            loan_utxo,
+            PrivateLendingWitnessBranch::ZeroDebtClose {
+                debt: self.debt,
+                key,
+            }
+            .build_witness(),
+        );
+
+        ctx.add_output(PartialOutput::new_metadata(&key));
+    }
+
+    /// Spends the loan after its expiration (input 0) and burns the lender NFT (output 0). The loan
+    /// input's witness carries the debt hash of the loan's storage and reveals the expiry salt and
+    /// the expiration, and the transaction is locked to the expiration. The caller adds the lender
+    /// NFT input (input 1) and takes the collateral.
     ///
     /// # Panics
     /// Panics if the offer is pending or the transaction already has inputs or outputs.
-    pub fn attach_liquidation(&self, ctx: &mut ConfidentialTransaction, active_offer_utxo: UTXO) {
+    pub fn attach_liquidation(&self, ctx: &mut ConfidentialTransaction, loan_utxo: UTXO) {
         assert!(self.is_active, "Only an active offer can be liquidated");
         assert!(
             ctx.n_inputs() == 0 && ctx.n_outputs() == 0,
             "Liquidation must be the first attachment"
         );
 
-        let locktime = LockTime::from_height(self.parameters.loan_expiration_time).unwrap();
+        let expiry = self.parameters.loan_expiration_time;
+        let locktime = LockTime::from_height(expiry).unwrap();
 
-        let active_offer_input = PartialInput::new(active_offer_utxo)
+        let loan_input = PartialInput::new(loan_utxo)
             .with_sequence(Sequence::ENABLE_LOCKTIME_NO_RBF)
             .with_locktime(locktime);
 
         self.add_program_input_from_partial_input(
             ctx,
-            active_offer_input,
-            PrivateLendingWitnessBranch::Liquidation.build_witness(),
+            loan_input,
+            PrivateLendingWitnessBranch::Liquidation {
+                debt_hash: self.get_debt_hash(),
+                salt: self.parameters.expiry_salt,
+                expiry,
+            }
+            .build_witness(),
         );
 
         ctx.add_output(PartialOutput::new(

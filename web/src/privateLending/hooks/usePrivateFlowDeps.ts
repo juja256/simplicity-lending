@@ -7,13 +7,15 @@ import { useCallback } from 'react'
 import { sources } from 'virtual:simplicity-sources'
 
 import { FALLBACK_FEE_RATE_SAT_PER_KVB, fetchFeeRateSatPerKvb } from '@/api/esplora/fee'
-import { fetchLatestBlockHeight, fetchTxRaw } from '@/api/esplora/methods'
+import { fetchLatestBlockHeight, fetchTxOutspends, fetchTxRaw } from '@/api/esplora/methods'
 import { esploraQueryKeys } from '@/api/esplora/queryKeys'
 import { env } from '@/constants/env'
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import { getLwk } from '@/lwk'
 import { AddressCursor } from '@/privateLending/addressCursor'
 import type { PrivateFlowDeps } from '@/privateLending/deps'
+import type { SpentBy } from '@/privateLending/flows/claimInstallments'
+import { parseOutpoint } from '@/privateLending/flows/shared'
 import { getPrivateLendingWasm } from '@/privateLending/wasm'
 import { useLwk } from '@/providers/lwk/useLwk'
 import { useWallet } from '@/providers/wallet/useWallet'
@@ -107,6 +109,21 @@ export function usePrivateFlowDeps(): () => Promise<PrivateFlowDeps> {
       },
     }
   }, [lwkNetwork, network, getWollet, queryClient])
+}
+
+/**
+ * Which transaction spends an output, from esplora's outspends: what `findLenderNft` walks the
+ * lender NFT forward with. Untrusted: the builders check the outpoint it leads to on chain.
+ */
+export const esploraSpentBy: SpentBy = async outpoint => {
+  const { txid, vout } = parseOutpoint(outpoint)
+  const outspend = (await fetchTxOutspends(txid))[vout]
+  if (outspend === undefined) throw new Error(`Esplora lists no output ${outpoint}`)
+  if (!outspend.spent) return null
+  if (outspend.txid === undefined) {
+    throw new Error(`Esplora lists ${outpoint} as spent, by no transaction`)
+  }
+  return { txid: outspend.txid, confirmed: outspend.status?.confirmed === true }
 }
 
 /** The public identity of the session's lending key. */

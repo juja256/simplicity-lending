@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
 import type { PrivateCandidateDetails, PrivateOfferStatus } from '@/api/indexer/private'
+import type { LoanFigures } from '@/privateLending/hooks/useLoan'
 import { BLOCKS_PER_DAY } from '@/privateLending/lenderTerms'
 import type { OpenedOfferItem } from '@/privateLending/offerView'
 
-import { bookSummary } from './bookSummary'
+import { bookSummary, loanBookFigures } from './bookSummary'
 
 const TIP = 3_000_000
 let nextTxid = 0
@@ -86,6 +87,9 @@ describe('bookSummary', () => {
       // Due in 3 days and in exactly 7 days; not in 8 days, not the overdue one.
       dueWithin7Days: 2,
       overdue: 1,
+      // no loan was read
+      repaid: 0n,
+      claimable: 0n,
     })
   })
 
@@ -111,6 +115,8 @@ describe('bookSummary', () => {
       collateralHeld: 15n,
       dueWithin7Days: 0,
       overdue: 0,
+      repaid: 0n,
+      claimable: 0n,
     })
   })
 
@@ -122,6 +128,129 @@ describe('bookSummary', () => {
       collateralHeld: 0n,
       dueWithin7Days: 0,
       overdue: 0,
+      repaid: 0n,
+      claimable: 0n,
+    })
+  })
+})
+
+const ACCEPT = '0a'.repeat(32)
+const FIRST = '1a'.repeat(32)
+const SECOND = '2a'.repeat(32)
+const CLAIM = '3a'.repeat(32)
+const CLOSE = '4a'.repeat(32)
+const SWEEP = '5a'.repeat(32)
+
+function utxo(type: string, txid: string, vout: number, spentTxid: string | null = null) {
+  return {
+    utxo_type: type,
+    txid,
+    vout,
+    created_at_height: TIP - BLOCKS_PER_DAY,
+    spent_txid: spentTxid,
+    spent_at_height: spentTxid === null ? null : TIP,
+  }
+}
+
+/** A loan of 1,000 lent for a repayment of 1,001, in `status`, with the UTXOs the indexer lists. */
+function loanItem(status: PrivateOfferStatus, utxos: ReturnType<typeof utxo>[]): OpenedOfferItem {
+  const base = item(status, 10 * BLOCKS_PER_DAY, amounts(1_000n, 10n))
+  return {
+    ...base,
+    candidate: { ...base.candidate, utxos } as unknown as PrivateCandidateDetails,
+  }
+}
+
+/** Two installments: the loan at the second's output 1, the first claimed by the lender. */
+const TWO_PAID = [
+  utxo('active_offer', ACCEPT, 0, FIRST),
+  utxo('active_offer', FIRST, 1, SECOND),
+  utxo('installment', FIRST, 2, CLAIM),
+  utxo('active_offer', SECOND, 1),
+  utxo('installment', SECOND, 2),
+]
+
+function figures(amounts: (bigint | undefined)[], remaining: bigint | undefined): LoanFigures {
+  return {
+    loanOutpoint: `${SECOND}:1`,
+    installments: [FIRST, SECOND]
+      .slice(0, amounts.length)
+      .map((txid, j) => ({ outpoint: `${txid}:2`, amount: amounts[j] })),
+    paid: amounts.reduce<bigint>((sum, amount) => sum + (amount ?? 0n), 0n),
+    remaining,
+  }
+}
+
+describe('loanBookFigures', () => {
+  it('reads what was repaid, what remains and what is claimable of an active loan', () => {
+    expect(loanBookFigures(loanItem('active', TWO_PAID), figures([300n, 200n], 501n))).toEqual({
+      repaid: 500n,
+      remaining: { amount: 501n, exact: true },
+      // the first installment was claimed
+      claimable: 200n,
+      unknownClaimable: 0,
+    })
+  })
+
+  it('bounds what remains, and leaves out the amount, of an installment that does not open', () => {
+    expect(
+      loanBookFigures(loanItem('active', TWO_PAID), figures([300n, undefined], undefined)),
+    ).toEqual({
+      repaid: 300n,
+      // at most the repayment less what opened
+      remaining: { amount: 701n, exact: false },
+      claimable: 0n,
+      unknownClaimable: 1,
+    })
+  })
+
+  it('claims the rest of the repayment once the loan closed, whatever opened', () => {
+    const closed = [
+      ...TWO_PAID.slice(0, 3),
+      utxo('active_offer', SECOND, 1, CLOSE),
+      utxo('installment', SECOND, 2),
+      utxo('repayment', CLOSE, 1),
+    ]
+    // the final claim sweeps the second installment and the repayment: 1,001 less the 300 claimed
+    for (const loan of [figures([300n, 200n], 501n), figures([300n, undefined], undefined)]) {
+      expect(loanBookFigures(loanItem('repaid', closed), loan)).toEqual({
+        repaid: 1_001n,
+        remaining: { amount: 0n, exact: true },
+        claimable: 701n,
+        unknownClaimable: 0,
+      })
+    }
+    const swept = closed.map(entry =>
+      entry.spent_txid === null && entry.utxo_type !== 'active_offer'
+        ? utxo(entry.utxo_type, entry.txid, entry.vout, SWEEP)
+        : entry,
+    )
+    expect(loanBookFigures(loanItem('repaid', swept), figures([300n, 200n], 501n))).toEqual({
+      repaid: 1_001n,
+      remaining: { amount: 0n, exact: true },
+      claimable: 0n,
+      unknownClaimable: 0,
+    })
+  })
+
+  it('reads nothing before the loan is read', () => {
+    expect(loanBookFigures(loanItem('active', TWO_PAID), undefined)).toBeNull()
+  })
+})
+
+describe("bookSummary's repaid and claimable", () => {
+  it('sums the loans read', () => {
+    const active = loanItem('active', TWO_PAID)
+    const unopened = loanItem('active', TWO_PAID)
+    const unread = loanItem('active', TWO_PAID)
+    const loans = new Map([
+      [active.txid, figures([300n, 200n], 501n)],
+      [unopened.txid, figures([300n, undefined], undefined)],
+    ])
+    expect(bookSummary([active, unopened, unread], TIP, loans)).toMatchObject({
+      active: 3,
+      repaid: 800n,
+      claimable: 200n,
     })
   })
 })

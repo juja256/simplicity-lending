@@ -2,11 +2,11 @@
 
 use elements::encode::deserialize;
 use elements::hex::ToHex;
-use elements::{Transaction, confidential};
+use elements::{OutPoint, Transaction, confidential};
 use private_lending_core::{
-    CreationError, OfferPinned, OfferTerms, OpenedOffer as CoreOpenedOffer, PinnedOutput,
-    PinnedRole as CorePinnedRole, lift_lending_key, open_creation_as_borrower,
-    open_creation_as_lender,
+    CreationError, OfferPinned, OfferSecrets, OfferTerms, OpenedOffer as CoreOpenedOffer,
+    PinnedOutput, PinnedRole as CorePinnedRole, expiry_hash, lift_lending_key,
+    open_creation_as_borrower, open_creation_as_lender,
 };
 use wasm_bindgen::prelude::*;
 
@@ -34,11 +34,20 @@ impl From<PinnedRole> for CorePinnedRole {
     }
 }
 
-/// An offer opened from its creation transaction.
+/// The party of an offer: its borrower or its lender.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Party {
+    Borrower,
+    Lender,
+}
+
+/// An offer opened from its creation transaction by one of its parties, which it remembers: a
+/// loan's state reads the installments for that party.
 #[wasm_bindgen]
 pub struct OpenedOffer {
     offer: CoreOpenedOffer,
     first_input: String,
+    party: Party,
 }
 
 impl OpenedOffer {
@@ -46,16 +55,28 @@ impl OpenedOffer {
         &self.offer
     }
 
-    fn new(offer: CoreOpenedOffer, tx: &Transaction) -> Result<Self, String> {
+    /// The party that opened the offer.
+    pub(crate) fn party(&self) -> Party {
+        self.party
+    }
+
+    fn new(offer: CoreOpenedOffer, tx: &Transaction, party: Party) -> Result<Self, String> {
         let outpoint = tx
             .input
             .first()
             .ok_or_else(|| bad_input("the transaction has no inputs"))?
             .previous_output;
-        // not `OutPoint`'s `Display`, which prefixes "[elements]"
-        let first_input = format!("{}:{}", outpoint.txid, outpoint.vout);
-        Ok(Self { offer, first_input })
+        Ok(Self {
+            offer,
+            first_input: outpoint_string(&outpoint),
+            party,
+        })
     }
+}
+
+/// An outpoint as `"<txid>:<vout>"`, not `OutPoint`'s `Display`, which prefixes "[elements]".
+pub(crate) fn outpoint_string(outpoint: &OutPoint) -> String {
+    format!("{}:{}", outpoint.txid, outpoint.vout)
 }
 
 /// The lifted lending key, hex of the 33-byte compressed public key.
@@ -63,17 +84,18 @@ pub(crate) fn lifted(key: &elements::secp256k1_zkp::XOnlyPublicKey) -> String {
     encode_hex(&lift_lending_key(key).serialize())
 }
 
-fn parse_tx(hex: &str) -> Result<Transaction, String> {
+pub(crate) fn parse_tx(hex: &str) -> Result<Transaction, String> {
     deserialize(&decode_hex(hex)?).map_err(|e| bad_input(format!("not a transaction: {e}")))
 }
 
 fn open(
     creation_tx_hex: &str,
+    party: Party,
     open: impl FnOnce(&Transaction) -> Result<CoreOpenedOffer, CreationError>,
 ) -> Result<OpenedOffer, String> {
     let tx = parse_tx(creation_tx_hex)?;
     let offer = open(&tx).map_err(creation_error)?;
-    OpenedOffer::new(offer, &tx)
+    OpenedOffer::new(offer, &tx, party)
 }
 
 /// Opens the offer of a creation transaction as the lender it is addressed to.
@@ -82,7 +104,7 @@ pub fn open_creation_as_lender_hex(
     lender: &LendingKey,
     creation_tx_hex: &str,
 ) -> Result<OpenedOffer, String> {
-    open(creation_tx_hex, |tx| {
+    open(creation_tx_hex, Party::Lender, |tx| {
         open_creation_as_lender(lender.inner(), tx, crate::program_id())
     })
 }
@@ -93,7 +115,7 @@ pub fn open_creation_as_borrower_hex(
     borrower: &LendingKey,
     creation_tx_hex: &str,
 ) -> Result<OpenedOffer, String> {
-    open(creation_tx_hex, |tx| {
+    open(creation_tx_hex, Party::Borrower, |tx| {
         open_creation_as_borrower(borrower.inner(), tx, crate::program_id())
     })
 }
@@ -124,6 +146,13 @@ impl OpenedOffer {
     #[wasm_bindgen(js_name = loanExpirationTime)]
     pub fn loan_expiration_time(&self) -> u32 {
         self.offer.signed_terms.terms.loan_expiration_time
+    }
+
+    /// The salt of the contract's expiry hash, hex: the liquidation's witness carries it with the
+    /// expiration.
+    #[wasm_bindgen(js_name = expirySalt)]
+    pub fn expiry_salt(&self) -> String {
+        encode_hex(&self.offer.secrets.expiry_salt())
     }
 
     #[wasm_bindgen(js_name = borrowerNft)]
@@ -183,7 +212,11 @@ impl OpenedOffer {
     /// The arguments of the offer's contract.
     #[wasm_bindgen(js_name = contractArguments)]
     pub fn contract_arguments(&self) -> ContractArguments {
-        ContractArguments::new(&self.offer.signed_terms.terms, &self.offer.pinned)
+        ContractArguments::new(
+            &self.offer.signed_terms.terms,
+            &self.offer.pinned,
+            &self.offer.secrets,
+        )
     }
 
     pub fn pinned(&self, role: PinnedRole) -> PinnedOutputInfo {
@@ -212,10 +245,14 @@ pub struct ContractArguments {
     principal_commitment: String,
     repayment_commitment: String,
     loan_expiration_time: u32,
+    expiry_hash: String,
+    repayment_asset_prefix_bit: u8,
+    repayment_asset_x: String,
 }
 
 impl ContractArguments {
-    pub(crate) fn new(terms: &OfferTerms, pinned: &OfferPinned) -> Self {
+    pub(crate) fn new(terms: &OfferTerms, pinned: &OfferPinned, secrets: &OfferSecrets) -> Self {
+        let repayment_asset = elements::encode::serialize(&pinned.repayment.asset_commitment());
         Self {
             borrower_nft_asset_id: encode_hex(&terms.borrower_nft.into_inner().0),
             lender_nft_asset_id: encode_hex(&terms.lender_nft.into_inner().0),
@@ -224,6 +261,12 @@ impl ContractArguments {
             principal_commitment: encode_hex(&pinned.principal.commitment_hash()),
             repayment_commitment: encode_hex(&pinned.repayment.commitment_hash()),
             loan_expiration_time: terms.loan_expiration_time,
+            expiry_hash: encode_hex(&expiry_hash(
+                &secrets.expiry_salt(),
+                terms.loan_expiration_time,
+            )),
+            repayment_asset_prefix_bit: repayment_asset[0] & 1,
+            repayment_asset_x: encode_hex(&repayment_asset[1..]),
         }
     }
 }
@@ -260,9 +303,32 @@ impl ContractArguments {
         self.repayment_commitment.clone()
     }
 
+    /// The expiration, which the program does not take: it is in the liquidation's witness and
+    /// its lock time.
     #[wasm_bindgen(getter, js_name = loanExpirationTime)]
     pub fn loan_expiration_time(&self) -> u32 {
         self.loan_expiration_time
+    }
+
+    /// `EXPIRY_HASH`, the SHA-256 of the expiry salt and the expiration, which the program takes
+    /// in place of the expiration.
+    #[wasm_bindgen(getter, js_name = expiryHash)]
+    pub fn expiry_hash(&self) -> String {
+        self.expiry_hash.clone()
+    }
+
+    /// The low bit of the prefix of `A`, the pinned repayment's asset commitment, 0 or 1: 1
+    /// exactly when its `y` is not a square. With [`Self::repayment_asset_x`] it is the
+    /// program's `REPAYMENT_ASSET`, which takes the bit as a bool.
+    #[wasm_bindgen(getter, js_name = repaymentAssetPrefixBit)]
+    pub fn repayment_asset_prefix_bit(&self) -> u8 {
+        self.repayment_asset_prefix_bit
+    }
+
+    /// The x-coordinate of `A`, the 32 bytes after the prefix of its consensus encoding, hex.
+    #[wasm_bindgen(getter, js_name = repaymentAssetX)]
+    pub fn repayment_asset_x(&self) -> String {
+        self.repayment_asset_x.clone()
     }
 }
 
@@ -363,6 +429,9 @@ pub(crate) mod tests {
             a.principal_commitment(),
             a.repayment_commitment(),
             a.loan_expiration_time().to_string(),
+            a.expiry_hash(),
+            a.repayment_asset_prefix_bit().to_string(),
+            a.repayment_asset_x(),
         ]
     }
 
@@ -384,10 +453,12 @@ pub(crate) mod tests {
         );
         assert!(as_lender.repayment_amount() >= as_lender.principal_amount());
         // input 0 of the fixture's creation transaction, as "<txid>:<vout>"
+        let first = tx_of(&hex).input[0].previous_output;
         assert_eq!(
             as_lender.first_input(),
-            "e9c3ff06972d7e7ef13b315c654bc5b6a199babf498f25dbf934ead44bc88b51:0"
+            format!("{}:{}", first.txid, first.vout)
         );
+        assert!(!as_lender.first_input().starts_with('['));
     }
 
     #[test]
@@ -430,7 +501,12 @@ pub(crate) mod tests {
             got.repayment_commitment(),
             encode_hex(&expected.repayment_commitment)
         );
-        assert_eq!(got.loan_expiration_time(), expected.loan_expiration_time);
+        assert_eq!(got.loan_expiration_time(), parameters.loan_expiration_time);
+        assert_eq!(got.expiry_hash(), encode_hex(&expected.expiry_hash));
+        let (prefix_bit, x) = expected.repayment_asset;
+        assert_eq!(got.repayment_asset_prefix_bit(), u8::from(prefix_bit));
+        assert_eq!(got.repayment_asset_x(), encode_hex(&x));
+        assert_eq!(offer.expiry_salt(), encode_hex(&parameters.expiry_salt));
     }
 
     #[test]

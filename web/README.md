@@ -177,9 +177,21 @@ With no stage named, every stage below but `short-proposal` runs in this order.
 - `accept`: the lender accepts the `create` offer: the active offer, the principal locked to the
   borrower NFT, and the lender NFT to the lender.
 - `claim-principal`: the borrower claims the principal with its borrower NFT.
-- `repay`: the borrower repays in full. The borrower NFT is burned, the repayment is locked to the
-  lender NFT, and the collateral comes back.
-- `claim-repayment`: the lender claims the repayment, burning its lender NFT.
+- `repay-partial`: the borrower pays two installments, each a third of what the loan owes then
+  (records `repay-partial-1` and `repay-partial-2`), and between them the lender claims the first
+  (record `claim-installment-1`): the lender NFT comes back to a lender address, and the lender's
+  wallet receives the installment. Each takes the loan's output, and the claim the unspent
+  installments, from the local testnet indexer (below), as the app does, and the stage checks them
+  against the records. Before saving an installment, both parties read the loan back with it from
+  their seeds: the borrower must rebuild what the loan owes, and the lender must open the
+  installment's amount. The second installment is left unclaimed.
+- `repay`: the borrower repays the rest, `R` minus the installments, taking the loan's output from
+  the indexer as `repay-partial` does. The borrower NFT is burned, the repayment, whose value
+  commitment is the loan's debt, is locked to the lender NFT, and the collateral comes back.
+- `claim-repayment`: the lender's final claim, which burns its lender NFT. It reads the loan the
+  repayment spent and the unspent installments from the indexer, and must sweep the unclaimed
+  second installment, then the repayment, with the combined opening. The lender's wallet must then
+  hold `R` from its two claims, which the stage prints one by one.
 - `cancel`: a new offer (record `cancel-create`), which the borrower cancels (record `cancel`).
   Both NFTs are burned and the collateral comes back to the borrower.
 - `liquidate`: a new offer that expires 3 blocks after the tip (`liquidate-create`), which the
@@ -220,16 +232,23 @@ every stage but `claim-principal` also before broadcasting. The liquidation must
 expiry as its lock time, with sequence `0xfffffffe` on the offer input, and be mined after the
 expiry.
 
-The dry stages `create-dry`, `accept-dry`, `claim-principal-dry`, `repay-dry`,
-`claim-repayment-dry`, `cancel-dry` and `liquidate-dry` build, check, sign and finalize their
-stage's transaction from the wallets' current coins, and never save or broadcast it. They run
+The dry stages `create-dry`, `accept-dry`, `claim-principal-dry`, `repay-partial-dry`,
+`repay-dry`, `claim-repayment-dry`, `cancel-dry` and `liquidate-dry` build, check, sign and
+finalize their stage's transaction from the wallets' current coins, and never save or broadcast
+it. `repay-partial-dry` builds the next installment of a third of what the loan owes, and reads it
+back as `repay-partial` does. They run
 only when named, and need the records the real transaction would spend: `cancel-dry` rebuilds the
 cancellation of the `cancel-create` offer, and `liquidate-dry` the liquidation of the
-`liquidate-accept` one, which below the expiry checks the refusal instead.
+`liquidate-accept` one, which below the expiry checks the refusal instead. Before that,
+`liquidate-dry` builds the `create` loan's liquidation after its installments, at its expiry,
+which the tip has not reached, so it needs the `create` and `accept` records too. Finalizing it
+runs the covenant with the debt hash the loan holds after the installments, and the installments
+no claim took are swept. It is never broadcast.
 
 `repay-hostile-dry` checks that a hostile indexer cannot lead the borrower to repay while the
 principal may be unclaimed, which would burn the only key to it. It reads the `create` offer's
-candidate from the local testnet indexer (below) and wraps it in memory as an active loan. With
+candidate from the local testnet indexer (below) and wraps it in memory as an active loan, and
+builds against the loan output the repayment spent. With
 the principal left out, or listed as spent by the creation, the app's rules derive no repay inputs,
 and the builder refuses the creation's borrower NFT with `principal-not-claimed` before building.
 With the principal listed as spent by the repayment, the builder refuses that outpoint the same
@@ -238,10 +257,12 @@ Nothing is built, signed or broadcast.
 
 ### Local testnet indexer
 
-The `scan` and `directory` stages, and the app on testnet (`VITE_API_URL` in `.env.liquidtestnet`,
-which the e2e script reads too), use a local indexer of Liquid testnet with its own database. A
-`scan` rerun needs a fresh database for the e2e state it reads, indexed from just below that state's
-first creation (`INDEXER__LAST_INDEXED_HEIGHT`, below); the commands use
+The `scan`, `directory`, `repay-partial`, `repay`, `claim-repayment` and `repay-hostile-dry`
+stages, the dry ones of `repay-partial`, `repay` and `claim-repayment`, and the app on testnet
+(`VITE_API_URL` in `.env.liquidtestnet`, which the e2e script reads too), use a local indexer of
+Liquid testnet with its own database. A `scan` rerun needs a fresh database for the e2e state it
+reads, indexed from just below that state's first creation (`INDEXER__LAST_INDEXED_HEIGHT`, below);
+the commands use
 `lending-indexer-testnet-v2p1` as the example name. Never point the indexer tests at that database,
 nor run them while this indexer uses Postgres. From `crates/indexer`, with Postgres on
 `localhost:5432`:
@@ -309,9 +330,9 @@ collateral 20 000 tL-sats, principal 1 000 TEST units, repayment 1 100 TEST unit
 tL-sats of fee budget per transaction. A creation needs 2 × the collateral, as it takes two coins
 besides the collateral. From an empty state, the stages need:
 
-- the borrower: 132 000 tL-sats and 100 TEST units (the interest; the principal comes from the
-  claim);
-- the lender: 8 000 tL-sats and 2 000 TEST units.
+- the borrower: 136 000 tL-sats and 100 TEST units (the interest; the installments and the rest of
+  the principal come from the claim);
+- the lender: 10 000 tL-sats and 2 000 TEST units.
 
 The cancellation returns the borrower's collateral, and the liquidation pays its collateral to the
 lender.
@@ -342,7 +363,11 @@ part:
    than 1 day"; as its term is 15 blocks, the lender accepts it at once, after ticking "Accept
    outside my terms";
 4. the lender accepts the borrower's proposal, within its terms; the borrower receives the
-   principal and repays; the lender claims the repayment;
+   principal; the repay form opens on the whole repayment, and the borrower pays half of it as an
+   installment, which the loan book shows as repaid and claimable; the lender claims it; the
+   borrower repays the rest, and the lender's final claim takes that repayment, with no
+   installment left to sweep: the loan book then shows the loan claimed, repaid in full, with
+   nothing left to claim;
 5. once the short loan expired, the lender liquidates it, and the loan book shows it liquidated;
 6. each borrower page has no horizontal scroll at 375 px, and every page of both areas gets a
    screenshot.
@@ -355,8 +380,8 @@ It needs:
   demo's own transactions. On top of those, the borrower needs the short proposal's creation,
   42 000 tL-sats (as any creation in `STAGE_NEEDS`), and the demo loan's collateral,
   0.00001 tL-BTC, and its interest; the lender needs the demo loan's principal, 0.1 TEST, and the
-  short proposal's, 1 000 TEST units; and each needs the fees of its own transactions, three for
-  the borrower and four for the lender;
+  short proposal's, 1 000 TEST units; and each needs the fees of its own transactions, four for
+  the borrower and five for the lender;
 - the local testnet indexer (above), indexing, on a fresh database that starts at the tip
   (`INDEXER__LAST_INDEXED_HEIGHT`), after an earlier run's last transaction: the demo finds its
   loans by their amounts, so an earlier run's loans would match too. The dev server proxies it

@@ -1,8 +1,11 @@
 use super::setup::{
-    accept_private_offer, assert_confidential, broadcast, build_full_repayment,
-    claim_asset_auth_output, default_offer_parameters, find_pinned_utxo, get_active_offer,
-    setup_pending_private_offer, unblind_with,
+    Loan, accept_private_offer, assert_confidential, broadcast, build_full_repayment,
+    claim_asset_auth_output, default_offer_parameters, find_pinned_utxo,
+    setup_pending_private_offer, simplicity_spend, unblind_with,
 };
+
+/// The input of a full repayment that spends the loan.
+const FULL_REPAYMENT_LOAN_INPUT: usize = 1;
 
 #[simplex::test]
 fn private_offer_full_repayment_pays_pinned_repayment(
@@ -17,13 +20,12 @@ fn private_offer_full_repayment_pays_pinned_repayment(
 
     let acceptance_tx = accept_private_offer(&context, &mut setup, &lender)?;
 
-    setup.offer = get_active_offer(&setup);
-
-    let active_offer_utxo = find_pinned_utxo(&acceptance_tx, &pinned.active_collateral);
+    let loan = Loan::accepted(parameters, &acceptance_tx);
     let repayment_tx = broadcast(
-        &build_full_repayment(&setup.offer, active_offer_utxo, borrower, &lender)?,
+        &build_full_repayment(&loan, borrower, lender.get_blinding_public_key())?,
         borrower,
     )?;
+    simplicity_spend("FullRepayment", &repayment_tx, FULL_REPAYMENT_LOAN_INPUT)?;
 
     let repayment_utxo = find_pinned_utxo(&repayment_tx, &pinned.repayment);
 

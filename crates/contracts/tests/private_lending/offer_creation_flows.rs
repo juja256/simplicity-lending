@@ -87,7 +87,12 @@ impl OffChainOffer {
             terms,
         )
         .unwrap();
-        let parameters = PrivateLendingParameters::from_terms(&terms, new_offer.pinned, network);
+        let parameters = PrivateLendingParameters::from_terms(
+            &terms,
+            new_offer.pinned,
+            &new_offer.secrets,
+            network,
+        );
 
         OffChainOffer {
             new_offer,
@@ -312,6 +317,25 @@ fn dishonest_repayment_fails_verification(context: simplex::TestContext) -> anyh
     // the borrower pins one unit less of repayment than the terms show
     let mut dishonest = offer.parameters;
     dishonest.pinned.repayment = dishonest.pinned.repayment.with_amount(REPAYMENT_AMOUNT - 1);
+    let creation_tx = offer.creation_tx_with(dishonest);
+
+    assert_eq!(
+        verify_both(&creation_tx, network),
+        [Err(VerifyError::AddressMismatch); 2]
+    );
+
+    Ok(())
+}
+
+#[simplex::test]
+fn another_expiry_salt_fails_verification(context: simplex::TestContext) -> anyhow::Result<()> {
+    let network = *context.get_network();
+    let offer = OffChainOffer::new(network);
+
+    // the terms do not carry the salt: with one the lender cannot derive, the lender could never
+    // liquidate, and only the address shows it
+    let mut dishonest = offer.parameters;
+    dishonest.expiry_salt = [0; 32];
     let creation_tx = offer.creation_tx_with(dishonest);
 
     assert_eq!(

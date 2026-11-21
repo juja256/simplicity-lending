@@ -15,8 +15,8 @@ import {
 import { buildAssetAuthArguments } from '@/simplicity/asset-auth/arguments'
 import { buildScriptAuthArguments } from '@/simplicity/script-auth/arguments'
 import { buildCovenantSpendInfo, UNSPENDABLE_TAPROOT_PUBKEY } from '@/simplicity/taproot'
-import { hexToBytes } from '@/utils/hex'
-import { toBytes32, toUint32, toUint64 } from '@/utils/uint'
+import { hexToBytes, isHexStringOfByteLength } from '@/utils/hex'
+import { toBytes32, toUint64 } from '@/utils/uint'
 import type { ContractArguments } from '@/wasm/private-lending/private_lending_wasm'
 
 import { CREATION_OUTPUT, NFT_AMOUNT } from './layout'
@@ -34,17 +34,33 @@ export interface PrivateOfferArguments {
   activeCollateralCommitment: string
   principalCommitment: string
   repaymentCommitment: string
-  loanExpirationTime: number
+  /** The SHA-256 of the expiry salt and the expiry: the program never takes the expiry itself. */
+  expiryHash: string
+  /**
+   * `A`, the pinned repayment's asset commitment, which every installment and repayment carries:
+   * the low bit of its prefix (0 or 1, 1 exactly when its `y` is not a square) and its x-coordinate
+   * (32 bytes, hex).
+   */
+  repaymentAssetPrefixBit: number
+  repaymentAssetX: string
 }
 
 export interface PrivateOfferScripts {
   pendingOffer: Script
+  /** The loan at acceptance, whose debt hash is the repayment commitment: `activeOfferAt` of it. */
   activeOffer: Script
   lenderNftLock: Script
   principalOutputScriptHash: string
   repaymentOutputScriptHash: string
+  installmentOutputScriptHash: string
   pendingSpendInfo: StateTaprootSpendInfo
   activeSpendInfo: StateTaprootSpendInfo
+  /**
+   * The loan whose storage holds the debt hash `debtHash` (32 bytes, hex), `h(A, D)`: after
+   * installments, `LoanState.debtHashAt(j)` of loan output `j`. Throws on a malformed hash.
+   */
+  activeOfferAt(debtHash: string): Script
+  activeSpendInfoAt(debtHash: string): StateTaprootSpendInfo
   program: SimplicityProgram
 }
 
@@ -56,7 +72,9 @@ export function toPrivateOfferArguments(args: ContractArguments): PrivateOfferAr
     activeCollateralCommitment: args.activeCollateralCommitment,
     principalCommitment: args.principalCommitment,
     repaymentCommitment: args.repaymentCommitment,
-    loanExpirationTime: args.loanExpirationTime,
+    expiryHash: args.expiryHash,
+    repaymentAssetPrefixBit: args.repaymentAssetPrefixBit,
+    repaymentAssetX: args.repaymentAssetX,
   }
 }
 
@@ -75,25 +93,39 @@ function u256(hex: string): SimplicityTypedValue {
   return SimplicityTypedValue.fromU256Hex(hex)
 }
 
+/**
+ * A commitment as the program takes it, `(bool, u256)`: whether the low bit of its prefix is set,
+ * and x. The program converts the bool to the `u1` of Elements' encoding.
+ */
+function commitment(prefixBit: number, x: string): SimplicityTypedValue {
+  if (prefixBit !== 0 && prefixBit !== 1) throw new Error('A prefix bit is 0 or 1')
+  return SimplicityTypedValue.fromElements([
+    SimplicityTypedValue.fromBoolean(prefixBit === 1),
+    u256(x),
+  ])
+}
+
+/** The program's storage: whether the offer is active, and the debt hash, `h(A, D)`. */
 function storageSpendInfo(
   program: SimplicityProgram,
   isActive: boolean,
-  repaymentCommitment: string,
+  debtHash: string,
 ): StateTaprootSpendInfo {
+  if (!isHexStringOfByteLength(debtHash, 32)) throw new Error('A debt hash is 32 bytes of hex')
   const isActiveSlot = new Uint8Array(32)
   isActiveSlot[31] = isActive ? 1 : 0
 
   return new StateTaprootBuilder()
     .addSimplicityLeaf(2, program.cmr)
     .addDataLeaf(2, isActiveSlot)
-    .addDataLeaf(1, hexToBytes(repaymentCommitment))
+    .addDataLeaf(1, hexToBytes(debtHash))
     .finalize(XOnlyPublicKey.fromString(UNSPENDABLE_TAPROOT_PUBKEY))
 }
 
 /**
  * The asset_auth program that locks a pinned output to one unit of an NFT: the principal
- * (borrower NFT, no burn) or the repayment (lender NFT, burned). `nftAssetId` is in the internal
- * byte order of `ContractArguments`.
+ * (borrower NFT, no burn), the repayment (lender NFT, burned) or an installment (lender NFT, no
+ * burn). `nftAssetId` is in the internal byte order of `ContractArguments`.
  */
 export function privateAssetAuthProgram(
   sources: PrivateLendingSources,
@@ -134,6 +166,9 @@ export function privateOfferScripts(
   const repaymentOutputScriptHash = scriptHash(
     privateAssetAuthProgram(sources, args.lenderNftAssetId, true),
   )
+  const installmentOutputScriptHash = scriptHash(
+    privateAssetAuthProgram(sources, args.lenderNftAssetId, false),
+  )
 
   const program = loadProgram(
     sources.privateLending,
@@ -144,16 +179,17 @@ export function privateOfferScripts(
       .addValue('ACTIVE_COLLATERAL_COMMITMENT', u256(args.activeCollateralCommitment))
       .addValue('PRINCIPAL_COMMITMENT', u256(args.principalCommitment))
       .addValue('REPAYMENT_COMMITMENT', u256(args.repaymentCommitment))
-      .addValue(
-        'LOAN_EXPIRATION_TIME',
-        SimplicityTypedValue.fromU32(toUint32(args.loanExpirationTime, 'loanExpirationTime')),
-      )
+      .addValue('EXPIRY_HASH', u256(args.expiryHash))
+      .addValue('REPAYMENT_ASSET', commitment(args.repaymentAssetPrefixBit, args.repaymentAssetX))
       .addValue('PRINCIPAL_OUTPUT_SCRIPT_HASH', u256(principalOutputScriptHash))
-      .addValue('REPAYMENT_OUTPUT_SCRIPT_HASH', u256(repaymentOutputScriptHash)),
+      .addValue('REPAYMENT_OUTPUT_SCRIPT_HASH', u256(repaymentOutputScriptHash))
+      .addValue('INSTALLMENT_OUTPUT_SCRIPT_HASH', u256(installmentOutputScriptHash)),
   )
 
+  // Until the first installment, the debt is the pinned repayment.
   const pendingSpendInfo = storageSpendInfo(program, false, args.repaymentCommitment)
-  const activeSpendInfo = storageSpendInfo(program, true, args.repaymentCommitment)
+  const activeSpendInfoAt = (debtHash: string) => storageSpendInfo(program, true, debtHash)
+  const activeSpendInfo = activeSpendInfoAt(args.repaymentCommitment)
 
   const pendingOffer = pendingSpendInfo.scriptPubkey
   const lenderNftLock = lenderNftLockProgram(sources, pendingOffer)
@@ -166,8 +202,11 @@ export function privateOfferScripts(
     lenderNftLock,
     principalOutputScriptHash,
     repaymentOutputScriptHash,
+    installmentOutputScriptHash,
     pendingSpendInfo,
     activeSpendInfo,
+    activeOfferAt: debtHash => activeSpendInfoAt(debtHash).scriptPubkey,
+    activeSpendInfoAt,
     program,
   }
 }
