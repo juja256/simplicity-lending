@@ -1,27 +1,35 @@
 // The lender's liquidation of an expired private loan (`attach_liquidation` in the contracts'
 // private lending core):
-//   inputs   0 the active offer (Liquidation branch), 1 the lender NFT, explicit; 2… the lender's
-//            fee coins;
+//   inputs   0 the loan (Liquidation branch), 1 the lender NFT, explicit; 2… the unclaimed
+//            installments that open for the lender, each at asset_auth(lender NFT, 1, no burn);
+//            then the lender's fee coins;
 //   outputs  0 burns the lender NFT (OP_RETURN, explicit); 1 the collateral to the lender, blinded
-//            to its wallet; then the policy-asset change and the fee.
-// The covenant checks the active collateral at input 0, the lender NFT burn (input 1 to output 0)
-// and `check_lock_height(LOAN_EXPIRATION_TIME)`: the transaction's nLockTime must be a height at
-// least the expiry, and some input must not be final, or Simplicity reads the lock time as 0. As
-// the contracts' core does, the lock time is the expiry and the offer input's sequence is
-// ENABLE_LOCKTIME_NO_RBF; `buildPset`'s defaults (lock time 0, every sequence final) would fail.
+//            to its wallet; 2 the swept installments' sum to the lender, blinded to its wallet, if
+//            it sweeps any; then the policy-asset change and the fee.
+// The covenant checks that the witness's debt hash is the one the loan's storage holds (which shows
+// only that the loan is active), the lender NFT burn (input 1 to output 0), that the witness's
+// expiry salt and expiry hash to its `EXPIRY_HASH`, and `check_lock_height` of that expiry: the
+// transaction's nLockTime must be a height at least the expiry, and some input must not be final,
+// or Simplicity reads the lock time as 0. As the contracts' core does, the witness carries the
+// debt hash, the offer's salt and expiry, the lock time is the expiry and the loan input's
+// sequence is ENABLE_LOCKTIME_NO_RBF; `buildPset`'s defaults (lock time 0, every sequence final)
+// would fail. The debt hash is the loan's after its installments (`loan.state.debtHash`), which
+// the lender knows from the chain without opening them.
 // Consensus then admits the transaction from the block after the expiry, so the builder refuses,
 // before building anything, while the tip is below the expiry.
-// The lender NFT is an explicit output at a wallet address (the acceptance's output 2), which LWK
-// does not list among the wallet's coins, so it is spent as a plain input, not a wallet coin; the
-// wallet still recognizes its script, and signs it.
+// Burning the lender NFT leaves any unclaimed installment locked for good, so the liquidation
+// sweeps those that open, each with its own opening. One that does not open has no known opening
+// and stays where it is, a loss to the borrower who built it. Which installments are unclaimed is
+// checked on chain against the lender NFT's claims (`lenderNftClaims`), as at the final claim.
+// The lender NFT is an explicit output at a wallet address, which LWK does not list among the
+// wallet's coins, so it is spent as a plain input, not a wallet coin; the wallet still recognizes
+// its script, and signs it.
 import type { Address, WalletTxOut } from 'lwk_wasm'
 
+import type { PsetOutputSpec } from '@/lwk/psetBuilder'
 import type { UpdatedPset } from '@/lwk/updatedPset'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import {
-  ACCEPTANCE_INPUT,
-  ACCEPTANCE_OUTPUT,
-  CREATION_OUTPUT,
   LIQUIDATION_INPUT,
   LIQUIDATION_OUTPUT,
   LOCK_TIME_ENABLING_SEQUENCE,
@@ -32,13 +40,24 @@ import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lend
 
 import type { PrivateFlowDeps } from '../deps'
 import { finalizePrivateOfferInput, pinnedAuthCovenant } from '../finalize'
+import type { Loan } from '../loan'
 import { walletInputSecret } from '../secrets'
 import type { VerifiedOffer } from '../verify'
+import {
+  assertUnspentInstallments,
+  fetchSweptOutputs,
+  finalizeSweptInputs,
+  lenderNftClaims,
+  openedInstallmentAmounts,
+  sweptInputSpecs,
+  type SweptOutput,
+} from './claimInstallments'
 import {
   assertAllInputsFinalized,
   assertSpendLayout,
   buildUnblindedPset,
   burnScript,
+  type ExpectedOutput,
   fetchPrevoutTxs,
   outpointOf,
   parseOutpoint,
@@ -72,13 +91,15 @@ export class ExpiryNotReachedError extends Error {
 
 export interface LiquidationParams {
   /**
-   * The active offer, `"<acceptance txid>:0"`. The builder checks that the transaction spends this
-   * offer's pending offer at input 0: the acceptance covenant then put the active offer at output
-   * 0; a cancellation burns there, which the script check rejects.
+   * The lender NFT, an explicit output at a wallet address: the acceptance's output 2, or output 0
+   * of the lender's last installment claim. The builder walks it back on chain to the acceptance.
    */
-  activeOfferOutpoint: string
-  /** The lender NFT: an explicit output at a wallet address, `"<acceptance txid>:2"`. */
   lenderNftOutpoint: string
+  /**
+   * The installments of the loan still unspent, `"<installment txid>:2"`: exactly those no claim
+   * of the lender NFT took, which the builder checks on chain. It sweeps those that open.
+   */
+  unspentInstallments: string[]
   /** The lender's policy-asset coins, which pay the fee. */
   feeCoins: WalletTxOut[]
   /** A confidential address: receives the collateral, blinded to it. */
@@ -93,17 +114,25 @@ export interface LiquidationSummary {
   collateral: bigint
   /** The transaction's nLockTime: the loan expiration height. */
   lockTime: number
+  /** The swept installments' sum to the lender, `"<txid>:2"`; undefined when none was swept. */
+  installmentsOutpoint: string | undefined
+  /** That sum, in principal units: 0 when none was swept. */
+  installments: bigint
+  /** The installments swept, in input order from input 2. */
+  swept: string[]
 }
 
 /**
- * Builds the lender's liquidation of an accepted offer whose loan has expired, blinded and ready
- * to sign. Throws `ExpiryNotReachedError` before anything else while `tipHeight` is below the
- * loan expiration. `finalize` finalizes the wallet inputs (the lender NFT among them), then the
- * offer (Liquidation), running the covenant on the transaction.
+ * Builds the lender's liquidation of `loan` once it has expired, blinded and ready to sign: the
+ * collateral, and the unclaimed installments that open. Throws `ExpiryNotReachedError` before
+ * anything else while `tipHeight` is below the loan expiration. `finalize` finalizes the wallet
+ * inputs (the lender NFT among them), then the loan (Liquidation), running the covenant on the
+ * transaction, then each swept installment's asset_auth.
  */
 export async function buildPrivateLiquidation(
   deps: PrivateFlowDeps,
   offer: VerifiedOffer,
+  loan: Loan,
   params: LiquidationParams,
 ): Promise<UpdatedPset<LiquidationSummary>> {
   const { lwk, wasm } = deps
@@ -121,12 +150,17 @@ export async function buildPrivateLiquidation(
   if (params.tipHeight < expiration) {
     throw new ExpiryNotReachedError(expiration, params.tipHeight)
   }
+  const { state } = loan
   const lenderNft = opened.lenderNft()
+  const principalAsset = opened.principalAsset()
+  // Read now: `finalize` may run after the loan's state is freed.
+  const debtHash = state.debtHash
+  const collateral = state.collateral()
 
-  // 1. The inputs.
-  const offerRef = parseOutpoint(params.activeOfferOutpoint)
+  // 1. The covenant inputs, and the fee coins.
+  const loanRef = parseOutpoint(state.loanOutpoint)
   const nftRef = parseOutpoint(params.lenderNftOutpoint)
-  const offerInput = `${offerRef.txid}:${offerRef.vout}`
+  const loanInput = `${loanRef.txid}:${loanRef.vout}`
   const nftInput = `${nftRef.txid}:${nftRef.vout}`
   if (params.feeCoins.length === 0) throw new Error('A liquidation needs a fee coin')
   for (const coin of params.feeCoins) {
@@ -134,180 +168,247 @@ export async function buildPrivateLiquidation(
       throw new Error(`Fee coin ${outpointOf(coin)} is not the policy asset`)
     }
   }
-  const feeInputs = params.feeCoins.map(outpointOf)
-  const inputs = [offerInput, nftInput, ...feeInputs]
-  if (new Set(inputs).size !== inputs.length) {
-    throw new Error('The active offer, the lender NFT and the fee coins must be distinct')
-  }
-  const activeCollateral = opened.pinned(wasm.PinnedRole.ActiveCollateral)
   if (
-    activeCollateral.asset !== opened.collateralAsset() ||
-    activeCollateral.amount !== opened.collateralAmount()
+    collateral.asset !== opened.collateralAsset() ||
+    collateral.amount !== opened.collateralAmount()
   ) {
-    throw new Error('The pinned collateral does not carry the offer terms')
+    throw new Error('The loan does not hold the offer terms collateral')
   }
   if (!params.collateralReceiver.isBlinded()) {
     throw new Error('The collateral must go to a confidential address')
   }
 
-  // 2. The covenant input, tied to this offer, and the lender NFT.
-  const [offerTx, nftTx] = await Promise.all([
-    deps.fetchTx(offerRef.txid),
-    deps.fetchTx(nftRef.txid),
-  ])
-  // Only this offer's acceptance or cancellation spends its pending offer, at input 0.
-  const pendingOffer = `${offer.creationTx.txid().toString()}:${CREATION_OUTPUT.pendingOffer}`
-  const acceptanceOffer = offerTx.inputs[ACCEPTANCE_INPUT.offer]?.outpoint()
-  if (
-    offerRef.vout !== ACCEPTANCE_OUTPUT.activeOffer ||
-    acceptanceOffer === undefined ||
-    `${acceptanceOffer.txid().toString()}:${acceptanceOffer.vout()}` !== pendingOffer
-  ) {
-    throw new Error("The active offer outpoint is not output 0 of this offer's acceptance")
-  }
-  const offerOutput = requireOutput(offerTx, offerRef.vout, 'The active offer')
-  if (offerOutput.scriptPubkey().toString() !== offer.scripts.activeOffer.toString()) {
-    throw new Error("The active offer outpoint is not locked to the offer's active script")
-  }
-  const nftOutput = requireOutput(nftTx, nftRef.vout, 'The lender NFT')
-  if (nftOutput.asset()?.toString() !== lenderNft || nftOutput.value() !== NFT_AMOUNT) {
-    throw new Error('The lender NFT outpoint does not hold exactly the lender NFT, explicit')
-  }
-
-  // 3. The outputs, and the lock time with the sequence that enables it.
-  const principalAuth = pinnedAuthCovenant(deps, offer, 'principal')
-  const repaymentAuth = pinnedAuthCovenant(deps, offer, 'repayment')
-  const burn = burnScript(deps)
-  const collateralReceiver = lwk.Address.parse(params.collateralReceiver.toString(), deps.network)
-  const layout: SpendLayout = {
-    inputs,
-    outputs: [
-      {
-        script: burn.toString(),
-        asset: lenderNft,
-        amount: NFT_AMOUNT,
-        blinding: { kind: 'explicit' },
-      },
-      {
-        script: collateralReceiver.scriptPubkey().toString(),
-        asset: activeCollateral.asset,
-        amount: activeCollateral.amount,
-        blinding: { kind: 'fresh', receiver: collateralReceiver },
-      },
-    ],
-    restrictedAssets: [opened.borrowerNft(), lenderNft],
-    restrictedScripts: [
-      offer.scripts.pendingOffer.toString(),
-      offer.scripts.activeOffer.toString(),
-      offer.scripts.lenderNftLock.toString(),
-      principalAuth.script.toString(),
-      repaymentAuth.script.toString(),
-    ],
-    policyAsset: deps.assets.policy,
-    lockTime: {
-      height: expiration,
-      sequences: { [LIQUIDATION_INPUT.offer]: LOCK_TIME_ENABLING_SEQUENCE },
-    },
-  }
-
-  // The transactions of the fee coins: finalization needs every prevout.
-  const feePrevoutTxs = await fetchPrevoutTxs(deps, feeInputs)
-
-  // 4. The unblinded PSET: the inputs and the leading outputs in layout order, the lock time at
-  // the expiry and the offer input's sequence enabling it.
-  const feePrevouts = prevoutsOf(feePrevoutTxs, feeInputs)
-  const unblinded = buildUnblindedPset(deps, {
-    inputs: [
-      {
-        outpoint: new lwk.OutPoint(offerInput),
-        prevout: requireOutput(offerTx, offerRef.vout, 'The active offer'),
-        asset: lwk.AssetId.fromString(activeCollateral.asset),
-        amount: activeCollateral.amount,
-        secrets: pinnedTxOutSecrets(deps, activeCollateral),
-        sequence: LOCK_TIME_ENABLING_SEQUENCE,
-        maxWeightToSatisfy: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.Liquidation,
-      },
-      {
-        outpoint: new lwk.OutPoint(nftInput),
-        prevout: requireOutput(nftTx, nftRef.vout, 'The lender NFT'),
-        asset: lwk.AssetId.fromString(lenderNft),
-        amount: NFT_AMOUNT,
-        secrets: lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(lenderNft), NFT_AMOUNT),
-        maxWeightToSatisfy: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
-      },
-      ...params.feeCoins.map((coin, index) => walletCoinInput(deps, coin, feePrevouts[index])),
-    ],
-    outputs: [
-      { script: burn, amount: NFT_AMOUNT, asset: lwk.AssetId.fromString(lenderNft) },
-      {
-        script: collateralReceiver.scriptPubkey(),
-        amount: activeCollateral.amount,
-        asset: lwk.AssetId.fromString(activeCollateral.asset),
-        blindingPubkey: collateralReceiver.blindingPubkey(),
-      },
-    ],
-    changeAddress: deps.addresses.nextChange(deps.wollet, 1)[0],
-    lockTime: expiration,
-  })
-
-  // 5. The layout of the unblinded PSET, with the lock time and the offer input's sequence.
-  assertSpendLayout(deps, unblinded, layout, false, 'Liquidation')
-
-  // 6. Blinding: the offer input's secrets are the pinned ones; every output is fresh.
-  const blindedBase64 = wasmStep('Blinding the liquidation', () =>
-    wasm.blindPset(
-      unblinded.toString(),
-      [
-        opened.inputSecret(wasm.PinnedRole.ActiveCollateral, LIQUIDATION_INPUT.offer),
-        wasm.InputSecret.explicit(LIQUIDATION_INPUT.lenderNft, lenderNft, NFT_AMOUNT),
-        ...params.feeCoins.map((coin, index) =>
-          walletInputSecret(deps, coin, LIQUIDATION_INPUT.lenderNft + 1 + index),
-        ),
-      ],
-      [],
-    ),
+  // 2. The unclaimed installments that open, each with its own opening, in chain order.
+  const sweep = wasmStep('Reading the installments', () =>
+    state.sweep(undefined, params.unspentInstallments),
   )
-  const blinded = new lwk.Pset(blindedBase64)
-
-  // 7. The layout again, now blinded.
-  assertSpendLayout(deps, blinded, layout, true, 'Liquidation')
-  const builtTxid = new lwk.Pset(blindedBase64).extractTx().txid().toString()
-  const prevouts = () => [
-    requireOutput(offerTx, offerRef.vout, 'The active offer'),
-    requireOutput(nftTx, nftRef.vout, 'The lender NFT'),
-    ...prevoutsOf(feePrevoutTxs, feeInputs),
-  ]
-
-  // 8. Sign (by the caller), then finalize the wallet inputs and the covenant.
-  return {
-    pset: blinded,
-    finalize: signedPset => {
-      const signed = deps.wollet.finalize(signedPset).extractTx()
-      // the txid commits to the lock time and the sequences, which signing must not change
-      if (signed.txid().toString() !== builtTxid) {
-        throw new Error('The signed liquidation is not the transaction that was built')
-      }
-      const finalizedTx = finalizePrivateOfferInput(
-        deps,
-        signed,
-        offer,
-        true,
-        prevouts(),
-        LIQUIDATION_INPUT.offer,
-        'Liquidation',
+  try {
+    const claimed = await lenderNftClaims(deps, offer, loan, params.lenderNftOutpoint)
+    assertUnspentInstallments(loan, claimed, params.unspentInstallments)
+    const amounts = openedInstallmentAmounts(loan)
+    const swept = sweep.outpoints().map((outpoint): SweptOutput => {
+      const amount = amounts.get(outpoint)
+      if (amount === undefined) throw new Error(`${outpoint} has no amount`)
+      return { outpoint, lock: 'installment', amount }
+    })
+    const sweptAmount = sweep.amount
+    const sweptInputs = swept.map(output => output.outpoint)
+    const feeInputs = params.feeCoins.map(outpointOf)
+    const inputs = [loanInput, nftInput, ...sweptInputs, ...feeInputs]
+    if (new Set(inputs).size !== inputs.length) {
+      throw new Error(
+        'The loan, the lender NFT, the installments and the fee coins must be distinct',
       )
-      const txid = finalizedTx.txid().toString()
-      if (txid !== builtTxid) throw new Error('Finalizing changed the liquidation')
-      assertAllInputsFinalized(finalizedTx, 'The liquidation')
+    }
 
-      return {
-        finalizedTx,
-        summary: {
-          collateralOutpoint: `${txid}:${LIQUIDATION_OUTPUT.collateral}`,
-          collateral: activeCollateral.amount,
-          lockTime: expiration,
+    // 3. The loan, the lender NFT and the installments, fetched and checked. The loan's state
+    // checked the loan output's commitments (`loadLoan`); its script must be the loan's at its
+    // debt.
+    const [loanTx, nftTx, sweptTxs] = await Promise.all([
+      deps.fetchTx(loanRef.txid),
+      deps.fetchTx(nftRef.txid),
+      fetchSweptOutputs(deps, offer, swept),
+    ])
+    const loanScript = offer.scripts.activeOfferAt(debtHash)
+    const loanOutput = requireOutput(loanTx, loanRef.vout, 'The loan')
+    if (loanOutput.scriptPubkey().toString() !== loanScript.toString()) {
+      throw new Error(`The loan output ${loanInput} is not locked to the loan's script at its debt`)
+    }
+    const nftOutput = requireOutput(nftTx, nftRef.vout, 'The lender NFT')
+    if (
+      nftOutput.asset()?.toString() !== lenderNft ||
+      nftOutput.value() !== NFT_AMOUNT ||
+      nftOutput.scriptPubkey().isProvablyUnspendable()
+    ) {
+      throw new Error('The lender NFT outpoint does not hold exactly the lender NFT, explicit')
+    }
+
+    // 4. The outputs, and the lock time with the sequence that enables it.
+    const burn = burnScript(deps)
+    const collateralReceiver = lwk.Address.parse(params.collateralReceiver.toString(), deps.network)
+    const installmentsReceiver =
+      swept.length > 0 ? deps.addresses.nextReceive(deps.wollet) : undefined
+    const sweptOutputs: ExpectedOutput[] =
+      installmentsReceiver === undefined
+        ? []
+        : [
+            {
+              script: installmentsReceiver.scriptPubkey().toString(),
+              asset: principalAsset,
+              amount: sweptAmount,
+              blinding: { kind: 'fresh', receiver: installmentsReceiver },
+            },
+          ]
+    const sweptOutputSpecs: PsetOutputSpec[] =
+      installmentsReceiver === undefined
+        ? []
+        : [
+            {
+              script: installmentsReceiver.scriptPubkey(),
+              amount: sweptAmount,
+              asset: lwk.AssetId.fromString(principalAsset),
+              blindingPubkey: installmentsReceiver.blindingPubkey(),
+            },
+          ]
+    const layout: SpendLayout = {
+      inputs,
+      outputs: [
+        {
+          script: burn.toString(),
+          asset: lenderNft,
+          amount: NFT_AMOUNT,
+          blinding: { kind: 'explicit' },
         },
-      }
-    },
+        {
+          script: collateralReceiver.scriptPubkey().toString(),
+          asset: collateral.asset,
+          amount: collateral.amount,
+          blinding: { kind: 'fresh', receiver: collateralReceiver },
+        },
+        ...sweptOutputs,
+      ],
+      restrictedAssets: [opened.borrowerNft(), lenderNft],
+      restrictedScripts: [
+        offer.scripts.pendingOffer.toString(),
+        offer.scripts.activeOffer.toString(),
+        loanScript.toString(),
+        offer.scripts.lenderNftLock.toString(),
+        pinnedAuthCovenant(deps, offer, 'principal').script.toString(),
+        pinnedAuthCovenant(deps, offer, 'repayment').script.toString(),
+        pinnedAuthCovenant(deps, offer, 'installment').script.toString(),
+      ],
+      policyAsset: deps.assets.policy,
+      lockTime: {
+        height: expiration,
+        sequences: { [LIQUIDATION_INPUT.offer]: LOCK_TIME_ENABLING_SEQUENCE },
+      },
+    }
+
+    // The transactions of the fee coins: finalization needs every prevout.
+    const feePrevoutTxs = await fetchPrevoutTxs(deps, feeInputs)
+
+    // 5. The unblinded PSET: the inputs and the leading outputs in layout order, the lock time at
+    // the expiry and the loan input's sequence enabling it.
+    const feePrevouts = prevoutsOf(feePrevoutTxs, feeInputs)
+    const unblinded = buildUnblindedPset(deps, {
+      inputs: [
+        {
+          outpoint: new lwk.OutPoint(loanInput),
+          prevout: requireOutput(loanTx, loanRef.vout, 'The loan'),
+          asset: lwk.AssetId.fromString(collateral.asset),
+          amount: collateral.amount,
+          secrets: pinnedTxOutSecrets(deps, collateral),
+          sequence: LOCK_TIME_ENABLING_SEQUENCE,
+          maxWeightToSatisfy: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.Liquidation,
+        },
+        {
+          outpoint: new lwk.OutPoint(nftInput),
+          prevout: requireOutput(nftTx, nftRef.vout, 'The lender NFT'),
+          asset: lwk.AssetId.fromString(lenderNft),
+          amount: NFT_AMOUNT,
+          secrets: lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(lenderNft), NFT_AMOUNT),
+          maxWeightToSatisfy: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
+        },
+        ...sweptInputSpecs(deps, offer, swept, sweptTxs),
+        ...params.feeCoins.map((coin, index) => walletCoinInput(deps, coin, feePrevouts[index])),
+      ],
+      outputs: [
+        { script: burn, amount: NFT_AMOUNT, asset: lwk.AssetId.fromString(lenderNft) },
+        {
+          script: collateralReceiver.scriptPubkey(),
+          amount: collateral.amount,
+          asset: lwk.AssetId.fromString(collateral.asset),
+          blindingPubkey: collateralReceiver.blindingPubkey(),
+        },
+        ...sweptOutputSpecs,
+      ],
+      changeAddress: deps.addresses.nextChange(deps.wollet, 1)[0],
+      lockTime: expiration,
+    })
+
+    // 6. The layout of the unblinded PSET, with the lock time and the loan input's sequence.
+    assertSpendLayout(deps, unblinded, layout, false, 'Liquidation')
+
+    // 7. Blinding: the loan input with the collateral after its installments, each installment
+    // with its own opening; every output is fresh.
+    const firstFee = LIQUIDATION_INPUT.firstInstallment + swept.length
+    const blindedBase64 = wasmStep('Blinding the liquidation', () =>
+      wasm.blindPset(
+        unblinded.toString(),
+        [
+          state.loanInputSecret(LIQUIDATION_INPUT.offer),
+          wasm.InputSecret.explicit(LIQUIDATION_INPUT.lenderNft, lenderNft, NFT_AMOUNT),
+          ...swept.map((_, position) =>
+            sweep.inputSecret(position, LIQUIDATION_INPUT.firstInstallment + position),
+          ),
+          ...params.feeCoins.map((coin, index) => walletInputSecret(deps, coin, firstFee + index)),
+        ],
+        [],
+      ),
+    )
+    const blinded = new lwk.Pset(blindedBase64)
+
+    // 8. The layout again, now blinded.
+    assertSpendLayout(deps, blinded, layout, true, 'Liquidation')
+    const builtTxid = new lwk.Pset(blindedBase64).extractTx().txid().toString()
+    const prevouts = () => [
+      requireOutput(loanTx, loanRef.vout, 'The loan'),
+      requireOutput(nftTx, nftRef.vout, 'The lender NFT'),
+      ...prevoutsOf(sweptTxs, sweptInputs),
+      ...prevoutsOf(feePrevoutTxs, feeInputs),
+    ]
+    const spendInfo = offer.scripts.activeSpendInfoAt(debtHash)
+    const salt = opened.expirySalt()
+
+    // 9. Sign (by the caller), then finalize the wallet inputs, the covenant and the installments.
+    return {
+      pset: blinded,
+      finalize: signedPset => {
+        const signed = deps.wollet.finalize(signedPset).extractTx()
+        // the txid commits to the lock time and the sequences, which signing must not change
+        if (signed.txid().toString() !== builtTxid) {
+          throw new Error('The signed liquidation is not the transaction that was built')
+        }
+        const withLoan = finalizePrivateOfferInput(
+          deps,
+          signed,
+          offer,
+          spendInfo,
+          prevouts(),
+          LIQUIDATION_INPUT.offer,
+          { branch: 'Liquidation', debtHash, salt, expiry: expiration },
+        )
+        const finalizedTx = finalizeSweptInputs(
+          deps,
+          withLoan,
+          offer,
+          swept,
+          prevouts,
+          LIQUIDATION_INPUT.firstInstallment,
+          {
+            inputIndex: LIQUIDATION_INPUT.lenderNft,
+            outputIndex: LIQUIDATION_OUTPUT.lenderNftBurn,
+          },
+        )
+        const txid = finalizedTx.txid().toString()
+        if (txid !== builtTxid) throw new Error('Finalizing changed the liquidation')
+        assertAllInputsFinalized(finalizedTx, 'The liquidation')
+
+        return {
+          finalizedTx,
+          summary: {
+            collateralOutpoint: `${txid}:${LIQUIDATION_OUTPUT.collateral}`,
+            collateral: collateral.amount,
+            lockTime: expiration,
+            installmentsOutpoint:
+              swept.length > 0 ? `${txid}:${LIQUIDATION_OUTPUT.installments}` : undefined,
+            installments: sweptAmount,
+            swept: sweptInputs,
+          },
+        }
+      },
+    }
+  } finally {
+    sweep.free()
   }
 }

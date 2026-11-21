@@ -1,8 +1,9 @@
 // The scripted testnet demo of both areas (`pnpm demo:testnet`, see `web/README.md`): the lender
 // console and the borrower app, each in its own browser context with one of the e2e's seed
-// wallets, through a whole loan on Liquid testnet and a short one that the lender liquidates.
-// It broadcasts real testnet transactions and waits for their blocks, so one run takes about 20
-// minutes. Screenshots of every page of both areas go to `.demo-output/` (git-ignored).
+// wallets, through a whole loan on Liquid testnet, repaid in an installment and the rest, and a
+// short one that the lender liquidates. It broadcasts real testnet transactions and waits for
+// their blocks, so one run takes about 20 minutes. Screenshots of every page of both areas go to
+// `.demo-output/` (git-ignored).
 /// <reference lib="dom" />
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
@@ -10,6 +11,7 @@ import path from 'node:path'
 
 import { expect, type Locator, type Page, test } from '@playwright/test'
 
+import { amountText } from '@/areas/borrow/proposalForm'
 import { PERCENT_DECIMALS, unitsFromDecimal, unitsToDecimal } from '@/privateLending/lenderTerms'
 
 import { loadEnv, TESTNET_PAIR, webRoot } from '../e2e/env'
@@ -87,6 +89,33 @@ async function shot(page: Page, name: string): Promise<void> {
   await page.screenshot({ path: path.join(OUTPUT, `${name}.png`), fullPage: true })
 }
 
+/**
+ * A principal amount as the app writes it, grouped and with at least `minFraction` decimals:
+ * `"0.05 TEST"`, and `"0.10 TEST"` on a Repay button (`loanAmounts`).
+ */
+function principalText(units: bigint, minFraction = 0): string {
+  return `${amountText(units, PRINCIPAL.decimals, minFraction)} ${PRINCIPAL.symbol}`
+}
+
+/** The base units of a principal amount as the app writes it, such as `"1,100.5"`. */
+function principalUnits(text: string): bigint {
+  return unitsFromDecimal(text.replaceAll(',', ''), PRINCIPAL.decimals)
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** Exactly `text`: a string `name` of a locator matches any label that contains it. */
+function exactly(text: string): RegExp {
+  return new RegExp(`^${escapeRegExp(text)}$`)
+}
+
+/** A row of a details panel or a transaction's summary: its label, then its value. */
+function detailRow(label: string, value: string): RegExp {
+  return new RegExp(`${escapeRegExp(label)}\\s*${escapeRegExp(value)}`)
+}
+
 /** A typed decimal one base unit (of `decimals`) lower. */
 function oneUnitBelow(text: string, decimals: number): string {
   return unitsToDecimal(unitsFromDecimal(text, decimals) - 1n, decimals)
@@ -112,12 +141,16 @@ async function expectWithinWidth(page: Page, locator: Locator, what: string): Pr
 
 /**
  * Confirms the open action modal with its `label` button and waits for the broadcast; with
- * `confirmed`, also for the first confirmation. Then closes it with "Done".
+ * `confirmed`, also for the first confirmation. Checks the transaction's `summary` rows, then
+ * closes it with "Done".
  */
 async function confirmTransaction(
   page: Page,
   label: string | RegExp,
-  { confirmed = true } = {},
+  {
+    confirmed = true,
+    summary = [],
+  }: { confirmed?: boolean; summary?: [label: string, value: string][] } = {},
 ): Promise<void> {
   const dialog = page.getByRole('dialog')
   const button = dialog.getByRole('button', { name: label })
@@ -130,6 +163,7 @@ async function confirmTransaction(
   if ((await outcome.textContent())?.includes('Failed')) {
     throw new Error(`the transaction failed: ${await dialog.innerText()}`)
   }
+  for (const [name, value] of summary) await expect(dialog).toContainText(detailRow(name, value))
   await dialog.getByRole('button', { name: 'Done' }).click()
   await expect(dialog).toBeHidden()
 }
@@ -337,7 +371,16 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     await confirmTransaction(lender, 'Accept and lend')
   })
 
-  await test.step('4. the main loan: accepted, received, repaid and claimed', async () => {
+  /** The loan book's cell of the column `name` in `row`. */
+  const bookCell = async (row: Locator, name: string): Promise<Locator> => {
+    const headers = await lender.getByRole('main').getByRole('columnheader').allTextContents()
+    const index = headers.findIndex(header => header.trim() === name)
+    if (index < 0) throw new Error(`the loan book has no column ${name}`)
+    return row.getByRole('cell').nth(index)
+  }
+
+  const step4 = '4. the main loan: accepted, received, paid in two parts and claimed in two'
+  await test.step(step4, async () => {
     await tableRow('Within your terms').getByRole('button', { name: 'Review' }).click()
     const dialog = lender.getByRole('dialog')
     await expect(dialog).toContainText('The proposal is within your published terms.')
@@ -356,27 +399,110 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
       `Receive ${termOf('Smallest principal')} ${PRINCIPAL.symbol}`,
     )
 
-    // Then repays.
+    // Once the loan is read on chain, the row counts what is repaid of the repayment, and Repay
+    // names what it still owes: the whole repayment, before any installment.
     const repay = ownLoan.getByRole('button', { name: /^Repay / })
     await expect(repay).toBeVisible({ timeout: CHAIN_TIMEOUT })
-    await expect(ownLoan).toContainText(/Active, due in /)
-    const repayLabel = (await repay.textContent()) ?? ''
+    const unread = new RegExp(`Active, 0 of \\S+ ${PRINCIPAL.symbol} repaid, due in `)
+    await expect(ownLoan).toContainText(unread, { timeout: 2 * MINUTE })
+    const owedText = /^Repay (\S+) /.exec((await repay.textContent()) ?? '')?.[1] ?? ''
+    const repayment = principalUnits(owedText)
+    const repaidOf = (paid: bigint) =>
+      `Active, ${amountText(paid, PRINCIPAL.decimals)} of ${principalText(repayment)} repaid, ` +
+      'due in '
+    await expect(ownLoan).toContainText(repaidOf(0n))
     await shot(borrower, 'borrow-loans-active')
+
+    // The borrower pays half of it as an installment. The form opens on what the loan owes, and
+    // warns that the lender keeps an installment if it liquidates the loan.
+    const half = repayment / 2n
+    const rest = repayment - half
+    const repayForm = borrower.getByRole('dialog')
+    const amount = repayForm.getByRole('textbox', { name: 'Amount', exact: true })
+    const warning = repayForm.getByText(
+      'Installments are not refunded if the loan is liquidated: the lender keeps them and the ' +
+        'collateral.',
+    )
     await repay.click()
-    await confirmTransaction(borrower, repayLabel)
+    await expect(amount).toHaveValue(unitsToDecimal(repayment, PRINCIPAL.decimals), {
+      timeout: 2 * MINUTE,
+    })
+    await expect(repayForm).toContainText(detailRow('Paid so far', principalText(0n)))
+    await expect(repayForm).toContainText(detailRow('Still owed', principalText(repayment)))
+    await amount.fill(unitsToDecimal(half, PRINCIPAL.decimals))
+    await expect(warning).toBeVisible()
+    await warning.scrollIntoViewIfNeeded()
+    await shot(borrower, 'borrow-repay-installment')
+    await confirmTransaction(borrower, exactly(`Pay ${principalText(half, 2)}`), {
+      summary: [
+        ['You pay', principalText(half)],
+        ['Still owed after it', principalText(rest)],
+      ],
+    })
+    // The row counts the installment once the indexer lists it.
+    await expect(ownLoan).toContainText(repaidOf(half), { timeout: CHAIN_TIMEOUT })
+    await expect(repay).toHaveText(`Repay ${principalText(rest, 2)}`, { timeout: CHAIN_TIMEOUT })
+    await shot(borrower, 'borrow-loans-installment')
+
+    // The lender claims the installment: the loan book counts it as repaid and claimable.
+    await lenderNav('Loan book').click()
+    const lent = `${termOf('Smallest principal')} ${PRINCIPAL.symbol}`
+    const mainLoan = lender
+      .getByRole('main')
+      .getByRole('row')
+      .filter({ has: lender.getByRole('cell', { name: lent, exact: true }) })
+    const claim = mainLoan.getByRole('button', { name: 'Claim', exact: true })
+    await expect(claim).toBeVisible({ timeout: CHAIN_TIMEOUT })
+    await expect(await bookCell(mainLoan, 'Repaid')).toHaveText(principalText(half))
+    await expect(await bookCell(mainLoan, 'Remaining')).toHaveText(principalText(rest))
+    await expect(await bookCell(mainLoan, 'Claimable')).toHaveText(principalText(half))
+    await shot(lender, 'lend-loans-installment')
+    await claim.click()
+    await confirmTransaction(lender, exactly('Claim installments'), {
+      summary: [['You claim', principalText(half)]],
+    })
+    // Nothing is claimable once the indexer lists the installment as spent.
+    await expect(await bookCell(mainLoan, 'Claimable')).toHaveText('–', { timeout: CHAIN_TIMEOUT })
+    await expect(claim).toHaveCount(0)
+
+    // The borrower repays the rest, which closes the loan.
+    await repay.click()
+    await expect(amount).toHaveValue(unitsToDecimal(rest, PRINCIPAL.decimals), {
+      timeout: 2 * MINUTE,
+    })
+    await expect(repayForm).toContainText(detailRow('Paid so far', principalText(half)))
+    await expect(repayForm).toContainText(detailRow('Still owed', principalText(rest)))
+    await expect(warning).toBeVisible()
+    await warning.scrollIntoViewIfNeeded()
+    await shot(borrower, 'borrow-repay-rest')
+    await confirmTransaction(borrower, exactly(`Repay ${principalText(rest, 2)}`), {
+      summary: [['You repay', principalText(rest)]],
+    })
     await expect(ownLoan).toContainText('Repaid', { timeout: CHAIN_TIMEOUT })
     // The row waits for the repayment's second confirmation before it drops its spinner.
     await expect(ownLoan).toContainText('Your collateral came back to you.', {
       timeout: CHAIN_TIMEOUT,
     })
 
-    // The lender claims the repayment.
-    await lenderNav('Loan book').click()
-    const claim = lender.getByRole('main').getByRole('button', { name: 'Claim', exact: true })
-    await expect(claim).toBeVisible({ timeout: CHAIN_TIMEOUT })
-    await claim.click()
-    await confirmTransaction(lender, 'Claim repayment')
-    await expect(tableRow('Claimed')).toBeVisible({ timeout: CHAIN_TIMEOUT })
+    // The lender's final claim takes the repayment of the rest: no installment is left to sweep.
+    const claimRepayment = mainLoan.getByRole('button', { name: 'Claim repayment', exact: true })
+    await expect(claimRepayment).toBeVisible({ timeout: CHAIN_TIMEOUT })
+    await expect(await bookCell(mainLoan, 'Claimable')).toHaveText(principalText(rest), {
+      timeout: 2 * MINUTE,
+    })
+    await claimRepayment.click()
+    await confirmTransaction(lender, exactly('Claim repayment'), {
+      summary: [['You claim now', principalText(rest)]],
+    })
+    // The book shows the loan repaid in full, with nothing left to claim.
+    await expect(mainLoan).toContainText('Claimed', { timeout: CHAIN_TIMEOUT })
+    await expect(await bookCell(mainLoan, 'Repaid')).toHaveText(principalText(repayment), {
+      timeout: 2 * MINUTE,
+    })
+    await expect(await bookCell(mainLoan, 'Remaining')).toHaveText(principalText(0n))
+    await expect(await bookCell(mainLoan, 'Claimable')).toHaveText('–')
+    await expect(claimRepayment).toHaveCount(0)
+    await shot(lender, 'lend-loans-claimed')
   })
 
   await test.step('5b. the lender liquidates the short loan once it expired', async () => {

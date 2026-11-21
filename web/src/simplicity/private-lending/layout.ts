@@ -27,6 +27,20 @@ export const PRINCIPAL_CLAIM_INPUT = { principal: 0, borrowerNft: 1 } as const
 /** The principal claim's outputs; change and fee follow. */
 export const PRINCIPAL_CLAIM_OUTPUT = { borrowerNft: 0, principal: 1 } as const
 
+/**
+ * The installment's inputs (`attach_installment`): the borrower NFT and the loan, then the
+ * borrower's principal coins and its fee coins. The installment's key derives from the first
+ * wallet coin, input 2.
+ */
+export const INSTALLMENT_INPUT = { borrowerNft: 0, loan: 1, firstWalletCoin: 2 } as const
+
+/**
+ * The installment's outputs (`attach_installment`): the borrower NFT back to the borrower,
+ * explicit, the successor loan and the installment at its asset_auth (lender NFT, no burn); the
+ * principal change follows at 3 if any, then the policy-asset change and the fee.
+ */
+export const INSTALLMENT_OUTPUT = { borrowerNft: 0, loan: 1, installment: 2 } as const
+
 /** The full repayment's inputs (`attach_full_repayment`); the borrower's coins follow. */
 export const REPAYMENT_INPUT = { borrowerNft: 0, offer: 1 } as const
 
@@ -36,14 +50,27 @@ export const REPAYMENT_INPUT = { borrowerNft: 0, offer: 1 } as const
  */
 export const REPAYMENT_OUTPUT = { borrowerNftBurn: 0, repayment: 1, collateral: 2 } as const
 
-/** The repayment claim's inputs: the asset_auth output, then its NFT; fee coins follow. */
-export const REPAYMENT_CLAIM_INPUT = { repayment: 0, lenderNft: 1 } as const
+/** The zero-debt close's inputs (`attach_zero_debt_close`); the fee coins follow. */
+export const ZERO_DEBT_CLOSE_INPUT = { borrowerNft: 0, loan: 1 } as const
 
 /**
- * The repayment claim's outputs: the lender NFT burned, then the repayment; change and fee
- * follow.
+ * The zero-debt close's outputs: the borrower NFT burned, the `OP_RETURN` of the debt's blinder
+ * `k` (`attach_zero_debt_close`), then the collateral back to the borrower; change and fee follow.
  */
-export const REPAYMENT_CLAIM_OUTPUT = { lenderNftBurn: 0, repayment: 1 } as const
+export const ZERO_DEBT_CLOSE_OUTPUT = { borrowerNftBurn: 0, key: 1, collateral: 2 } as const
+
+/**
+ * The lender's claims' inputs: the lender NFT, then the locked outputs it unlocks, from input 1:
+ * installments (asset_auth(lender NFT, 1, no burn)), and at the final claim the full repayment
+ * after them (asset_auth(lender NFT, 1, burn)); fee coins follow.
+ */
+export const CLAIM_INPUT = { lenderNft: 0, firstLocked: 1 } as const
+
+/**
+ * The lender's claims' outputs: the lender NFT, back to the lender, explicit, or burned at the
+ * final claim, then what was claimed, to the lender; change and fee follow.
+ */
+export const CLAIM_OUTPUT = { lenderNft: 0, claimed: 1 } as const
 
 /**
  * The cancellation's inputs (`attach_cancellation`): the pending offer, the lender NFT at its
@@ -57,14 +84,17 @@ export const CANCELLATION_INPUT = { offer: 0, lenderNft: 1, borrowerNft: 2 } as 
  */
 export const CANCELLATION_OUTPUT = { lenderNftBurn: 0, borrowerNftBurn: 1, collateral: 2 } as const
 
-/** The liquidation's inputs (`attach_liquidation`): the active offer, then the lender NFT. */
-export const LIQUIDATION_INPUT = { offer: 0, lenderNft: 1 } as const
+/**
+ * The liquidation's inputs (`attach_liquidation`): the loan, then the lender NFT, then from input
+ * 2 the unclaimed installments that open for the lender; fee coins follow.
+ */
+export const LIQUIDATION_INPUT = { offer: 0, lenderNft: 1, firstInstallment: 2 } as const
 
 /**
- * The liquidation's outputs: the lender NFT burned (`attach_liquidation`), then the collateral to
- * the lender; change and fee follow.
+ * The liquidation's outputs: the lender NFT burned (`attach_liquidation`), the collateral to the
+ * lender, then the installments' sum to the lender when it sweeps any; change and fee follow.
  */
-export const LIQUIDATION_OUTPUT = { lenderNftBurn: 0, collateral: 1 } as const
+export const LIQUIDATION_OUTPUT = { lenderNftBurn: 0, collateral: 1, installments: 2 } as const
 
 /** Lock times from here on are timestamps, which a block height never reaches. */
 export const LOCK_TIME_THRESHOLD = 500_000_000

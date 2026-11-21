@@ -241,6 +241,57 @@ pub fn repayment_tx(c: &PrivateCreation, active: OutPoint) -> Transaction {
     )
 }
 
+/// Installment: spends the borrower NFT at `nft` and the loan at `active`, and returns the NFT
+/// unburned at output 0, with the successor loan at output 1 and the installment at output 2.
+pub fn installment_tx(c: &PrivateCreation, nft: OutPoint, active: OutPoint) -> Transaction {
+    let terms = &c.offer.signed_terms.terms;
+    tx_with_inputs(
+        vec![nft, active, outpoint_with_txid_byte(0x43, 0)],
+        vec![
+            explicit_output(terms.borrower_nft, 1),
+            explicit_output(asset(9), 5_000),
+            explicit_output(terms.principal_asset, 1_000),
+            explicit_output(terms.principal_asset, 500),
+        ],
+    )
+}
+
+/// Zero-debt close: burns the borrower NFT, reveals the debt's blinder in an `OP_RETURN` at output
+/// 1 and returns the collateral.
+pub fn zero_debt_close_tx(c: &PrivateCreation, nft: OutPoint, active: OutPoint) -> Transaction {
+    let terms = &c.offer.signed_terms.terms;
+    tx_with_inputs(
+        vec![nft, active],
+        vec![
+            burn_output(terms.borrower_nft),
+            TxOut {
+                script_pubkey: Script::new_op_return(&[7; 32]),
+                ..Default::default()
+            },
+            explicit_output(asset(9), 5_000),
+        ],
+    )
+}
+
+/// A claim of installments: spends the lender NFT at `nft` and the installments, and returns the
+/// NFT to the lender at output 0 with what was claimed at output 1.
+pub fn installment_claim_tx(
+    c: &PrivateCreation,
+    nft: OutPoint,
+    installments: &[OutPoint],
+) -> Transaction {
+    let terms = &c.offer.signed_terms.terms;
+    tx_with_inputs(
+        std::iter::once(nft)
+            .chain(installments.iter().copied())
+            .collect(),
+        vec![
+            explicit_output(terms.lender_nft, 1),
+            explicit_output(terms.principal_asset, 1_000),
+        ],
+    )
+}
+
 /// Liquidation: burns the lender NFT and pays out the collateral.
 pub fn liquidation_tx(c: &PrivateCreation, active: OutPoint) -> Transaction {
     let terms = &c.offer.signed_terms.terms;

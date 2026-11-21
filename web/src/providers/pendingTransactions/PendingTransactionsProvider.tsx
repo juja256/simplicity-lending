@@ -10,6 +10,7 @@ import {
 
 import { fetchTxConfirmations } from '@/api/esplora/methods'
 import { useLatestRef } from '@/hooks/useLatestRef'
+import { keepsDiscardTrace } from '@/privateLending/repayPlan'
 import { useWallet } from '@/providers/wallet/useWallet'
 
 import { PendingTransactionsContext } from './PendingTransactionsContext'
@@ -123,11 +124,20 @@ function usePendingTxConfirmationTracking(
 
 /**
  * The wallet's private lending transactions: saved finalized before their first broadcast,
- * tracked to finality, then forgotten. Disabled for wallets that cannot run private loans: then
- * it opens no database and runs no timer.
+ * tracked to finality, then forgotten. A discarded installment stays, untracked, as its discard's
+ * trace (`discardedTxs`). Disabled for wallets that cannot run private loans: then it opens no
+ * database and runs no timer.
  */
 function usePrivateTxStore(scriptPubkey: string | null, enabled: boolean) {
-  const [privateTxs, setPrivateTxs] = useState<PrivateTxRecord[]>([])
+  const [records, setRecords] = useState<PrivateTxRecord[]>([])
+  const privateTxs = useMemo(
+    () => records.filter(record => record.discardedAt === undefined),
+    [records],
+  )
+  const discardedTxs = useMemo(
+    () => records.filter(record => record.discardedAt !== undefined),
+    [records],
+  )
   const privateTxsRef = useLatestRef(privateTxs)
 
   useEffect(() => {
@@ -141,7 +151,7 @@ function usePrivateTxStore(scriptPubkey: string | null, enabled: boolean) {
       .then(records => {
         if (cancelled) return
         // A record saved while loading is newer than its stored copy.
-        setPrivateTxs(prev => [
+        setRecords(prev => [
           ...prev,
           ...records.filter(record => !prev.some(saved => saved.txid === record.txid)),
         ])
@@ -167,7 +177,7 @@ function usePrivateTxStore(scriptPubkey: string | null, enabled: boolean) {
       }
       // A failed write rejects: the caller must not broadcast then.
       await putPrivateTx(record)
-      setPrivateTxs(prev => [...prev.filter(saved => saved.txid !== record.txid), record])
+      setRecords(prev => [...prev.filter(saved => saved.txid !== record.txid), record])
     },
     [scriptPubkey, enabled],
   )
@@ -176,7 +186,7 @@ function usePrivateTxStore(scriptPubkey: string | null, enabled: boolean) {
     async (txid: string, patch: Partial<PrivateTxRecord>) => {
       if (!enabled) return
       const updatedAt = Date.now()
-      setPrivateTxs(prev =>
+      setRecords(prev =>
         prev.map(record => (record.txid === txid ? { ...record, ...patch, updatedAt } : record)),
       )
       try {
@@ -194,7 +204,7 @@ function usePrivateTxStore(scriptPubkey: string | null, enabled: boolean) {
   const removePrivateTx = useCallback(
     async (txid: string) => {
       if (!enabled) return
-      setPrivateTxs(prev => prev.filter(record => record.txid !== txid))
+      setRecords(prev => prev.filter(record => record.txid !== txid))
       try {
         await deletePrivateTx(txid)
       } catch (error) {
@@ -202,6 +212,21 @@ function usePrivateTxStore(scriptPubkey: string | null, enabled: boolean) {
       }
     },
     [enabled],
+  )
+
+  const discardPrivateTx = useCallback(
+    async (txid: string) => {
+      if (!enabled) return
+      const record =
+        privateTxsRef.current.find(saved => saved.txid === txid) ?? (await getPrivateTx(txid))
+      if (record === undefined || !keepsDiscardTrace(record)) return removePrivateTx(txid)
+      // The trace must persist, or a rebuild after a reload could reuse the installment's key: a
+      // failed write rejects, and the record stays as it was.
+      const discarded: PrivateTxRecord = { ...record, discardedAt: Date.now() }
+      await putPrivateTx(discarded)
+      setRecords(prev => prev.map(saved => (saved.txid === txid ? discarded : saved)))
+    },
+    [enabled, privateTxsRef, removePrivateTx],
   )
 
   const trackedPrivateTxs = useMemo(
@@ -231,7 +256,14 @@ function usePrivateTxStore(scriptPubkey: string | null, enabled: boolean) {
     return () => clearInterval(id)
   }, [enabled, privateTxsRef, updatePrivateTx, removePrivateTx])
 
-  return { privateTxs, savePrivateTx, updatePrivateTx, removePrivateTx }
+  return {
+    privateTxs,
+    discardedTxs,
+    savePrivateTx,
+    updatePrivateTx,
+    removePrivateTx,
+    discardPrivateTx,
+  }
 }
 
 /**
@@ -248,14 +280,20 @@ function PendingTransactionsStore({
   privateCapable: boolean
   children: ReactNode
 }) {
-  const { privateTxs, savePrivateTx, updatePrivateTx, removePrivateTx } = usePrivateTxStore(
-    scriptPubkey,
-    privateCapable,
-  )
+  const store = usePrivateTxStore(scriptPubkey, privateCapable)
+  const { privateTxs, discardedTxs, savePrivateTx, updatePrivateTx } = store
+  const { removePrivateTx, discardPrivateTx } = store
 
   const contextValue = useMemo(
-    () => ({ privateTxs, savePrivateTx, updatePrivateTx, removePrivateTx }),
-    [privateTxs, savePrivateTx, updatePrivateTx, removePrivateTx],
+    () => ({
+      privateTxs,
+      discardedTxs,
+      savePrivateTx,
+      updatePrivateTx,
+      removePrivateTx,
+      discardPrivateTx,
+    }),
+    [privateTxs, discardedTxs, savePrivateTx, updatePrivateTx, removePrivateTx, discardPrivateTx],
   )
 
   return (

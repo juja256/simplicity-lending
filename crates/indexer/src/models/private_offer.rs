@@ -32,6 +32,8 @@ pub enum PrivateUtxoType {
     ActiveOffer,
     Principal,
     Repayment,
+    /// Output 2 of an installment, a repayment that leaves part of the debt.
+    Installment,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]

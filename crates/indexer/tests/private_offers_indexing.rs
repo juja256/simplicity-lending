@@ -4,17 +4,18 @@ use lending_indexer::models::{PrivateOfferStatus, PrivateUtxoType};
 use private_lending_core::{Marker, find_offer};
 use serial_test::serial;
 use simplex::simplicityhl::elements::{
-    OutPoint, Script,
+    AssetId, OutPoint, Script,
     confidential::Nonce,
     hashes::Hash,
     secp256k1_zkp::{PublicKey, SECP256K1},
 };
 
 use crate::common::{
-    acceptance_tx, block_processor, burn_output, cancellation_tx, claim_tx, index_block,
-    lending_key, liquidation_tx, normal_output, outpoint_with_txid_byte, private_creation,
-    private_offer_count, private_offer_row, private_program_id, private_utxo_rows, repayment_tx,
-    test_pool, tx_with_input, tx_with_inputs,
+    acceptance_tx, block_processor, burn_output, cancellation_tx, claim_tx, explicit_output,
+    index_block, installment_claim_tx, installment_tx, lending_key, liquidation_tx, normal_output,
+    outpoint_with_txid_byte, private_creation, private_offer_count, private_offer_row,
+    private_program_id, private_utxo_rows, repayment_tx, test_pool, tx_with_input, tx_with_inputs,
+    zero_debt_close_tx,
 };
 
 #[tokio::test]
@@ -377,6 +378,276 @@ async fn liquidated_offer_is_liquidated() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A spent UTXO's expected `(spending txid, height)`, from the spending transaction.
+fn spent_by(
+    tx: &simplex::simplicityhl::elements::Transaction,
+    height: i64,
+) -> Option<(OutPoint, i64)> {
+    Some((outpoint(tx, 0), height))
+}
+
+#[tokio::test]
+#[serial]
+async fn installment_keeps_the_offer_active() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let mut processor = block_processor(&pool).await?;
+    let c = creation();
+    let accept = acceptance_tx(&c);
+    let first = installment_tx(&c, outpoint(&c.tx, 0), outpoint(&accept, 0));
+    let second = installment_tx(&c, outpoint(&first, 0), outpoint(&first, 1));
+    index_block(&mut processor, 100, std::slice::from_ref(&c.tx)).await?;
+    index_block(&mut processor, 101, std::slice::from_ref(&accept)).await?;
+    index_block(&mut processor, 102, std::slice::from_ref(&first)).await?;
+    // After a restart the successor loan's watch entry comes from the database.
+    let mut processor = block_processor(&pool).await?;
+    index_block(&mut processor, 103, std::slice::from_ref(&second)).await?;
+
+    // An installment changes no status, so `updated_at_height` stays at the acceptance.
+    let row = private_offer_row(&pool, c.tx.txid()).await?.expect("row");
+    assert_eq!(
+        (row.current_status, row.updated_at_height),
+        (PrivateOfferStatus::Active, 101)
+    );
+    assert_utxos(
+        &pool,
+        row.id,
+        &[
+            (
+                PrivateUtxoType::PendingOffer,
+                outpoint(&c.tx, 3),
+                spent_by(&accept, 101),
+            ),
+            (
+                PrivateUtxoType::ActiveOffer,
+                outpoint(&accept, 0),
+                spent_by(&first, 102),
+            ),
+            (PrivateUtxoType::Principal, outpoint(&accept, 1), None),
+            (
+                PrivateUtxoType::ActiveOffer,
+                outpoint(&first, 1),
+                spent_by(&second, 103),
+            ),
+            (PrivateUtxoType::Installment, outpoint(&first, 2), None),
+            (PrivateUtxoType::ActiveOffer, outpoint(&second, 1), None),
+            (PrivateUtxoType::Installment, outpoint(&second, 2), None),
+        ],
+    )
+    .await;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn zero_debt_close_is_repaid_without_a_repayment_utxo() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let mut processor = block_processor(&pool).await?;
+    let c = creation();
+    let accept = acceptance_tx(&c);
+    let installment = installment_tx(&c, outpoint(&c.tx, 0), outpoint(&accept, 0));
+    let close = zero_debt_close_tx(&c, outpoint(&installment, 0), outpoint(&installment, 1));
+    index_block(&mut processor, 100, std::slice::from_ref(&c.tx)).await?;
+    index_block(&mut processor, 101, std::slice::from_ref(&accept)).await?;
+    index_block(&mut processor, 102, std::slice::from_ref(&installment)).await?;
+    index_block(&mut processor, 103, std::slice::from_ref(&close)).await?;
+
+    let row = private_offer_row(&pool, c.tx.txid()).await?.expect("row");
+    assert_eq!(
+        (row.current_status, row.updated_at_height),
+        (PrivateOfferStatus::Repaid, 103)
+    );
+    assert_utxos(
+        &pool,
+        row.id,
+        &[
+            (
+                PrivateUtxoType::PendingOffer,
+                outpoint(&c.tx, 3),
+                spent_by(&accept, 101),
+            ),
+            (
+                PrivateUtxoType::ActiveOffer,
+                outpoint(&accept, 0),
+                spent_by(&installment, 102),
+            ),
+            (PrivateUtxoType::Principal, outpoint(&accept, 1), None),
+            (
+                PrivateUtxoType::ActiveOffer,
+                outpoint(&installment, 1),
+                spent_by(&close, 103),
+            ),
+            (
+                PrivateUtxoType::Installment,
+                outpoint(&installment, 2),
+                None,
+            ),
+        ],
+    )
+    .await;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn claimed_installment_is_spent() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let mut processor = block_processor(&pool).await?;
+    let c = creation();
+    let accept = acceptance_tx(&c);
+    let first = installment_tx(&c, outpoint(&c.tx, 0), outpoint(&accept, 0));
+    let claim = installment_claim_tx(&c, outpoint(&accept, 2), &[outpoint(&first, 2)]);
+    let second = installment_tx(&c, outpoint(&first, 0), outpoint(&first, 1));
+    index_block(&mut processor, 100, std::slice::from_ref(&c.tx)).await?;
+    index_block(&mut processor, 101, std::slice::from_ref(&accept)).await?;
+    index_block(&mut processor, 102, std::slice::from_ref(&first)).await?;
+    // After a restart the installment's watch entry comes from the database.
+    let mut processor = block_processor(&pool).await?;
+    index_block(&mut processor, 103, std::slice::from_ref(&claim)).await?;
+    index_block(&mut processor, 104, std::slice::from_ref(&second)).await?;
+
+    let row = private_offer_row(&pool, c.tx.txid()).await?.expect("row");
+    assert_eq!(
+        (row.current_status, row.updated_at_height),
+        (PrivateOfferStatus::Active, 101)
+    );
+    assert_utxos(
+        &pool,
+        row.id,
+        &[
+            (
+                PrivateUtxoType::PendingOffer,
+                outpoint(&c.tx, 3),
+                spent_by(&accept, 101),
+            ),
+            (
+                PrivateUtxoType::ActiveOffer,
+                outpoint(&accept, 0),
+                spent_by(&first, 102),
+            ),
+            (PrivateUtxoType::Principal, outpoint(&accept, 1), None),
+            (
+                PrivateUtxoType::ActiveOffer,
+                outpoint(&first, 1),
+                spent_by(&second, 104),
+            ),
+            (
+                PrivateUtxoType::Installment,
+                outpoint(&first, 2),
+                spent_by(&claim, 103),
+            ),
+            (PrivateUtxoType::ActiveOffer, outpoint(&second, 1), None),
+            (PrivateUtxoType::Installment, outpoint(&second, 2), None),
+        ],
+    )
+    .await;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn liquidation_after_an_installment_sweeps_it() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let mut processor = block_processor(&pool).await?;
+    let c = creation();
+    let accept = acceptance_tx(&c);
+    let installment = installment_tx(&c, outpoint(&c.tx, 0), outpoint(&accept, 0));
+    let terms = &c.offer.signed_terms.terms;
+    let liquidate = tx_with_inputs(
+        vec![
+            outpoint(&installment, 1),
+            outpoint(&accept, 2),
+            outpoint(&installment, 2),
+        ],
+        vec![
+            burn_output(terms.lender_nft),
+            explicit_output(AssetId::from_slice(&[9; 32]).expect("asset"), 5_000),
+            explicit_output(terms.principal_asset, 1_000),
+        ],
+    );
+    index_block(&mut processor, 100, std::slice::from_ref(&c.tx)).await?;
+    index_block(&mut processor, 101, std::slice::from_ref(&accept)).await?;
+    index_block(&mut processor, 102, std::slice::from_ref(&installment)).await?;
+    index_block(&mut processor, 103, std::slice::from_ref(&liquidate)).await?;
+
+    let row = private_offer_row(&pool, c.tx.txid()).await?.expect("row");
+    assert_eq!(
+        (row.current_status, row.updated_at_height),
+        (PrivateOfferStatus::Liquidated, 103)
+    );
+    assert_utxos(
+        &pool,
+        row.id,
+        &[
+            (
+                PrivateUtxoType::PendingOffer,
+                outpoint(&c.tx, 3),
+                spent_by(&accept, 101),
+            ),
+            (
+                PrivateUtxoType::ActiveOffer,
+                outpoint(&accept, 0),
+                spent_by(&installment, 102),
+            ),
+            (PrivateUtxoType::Principal, outpoint(&accept, 1), None),
+            (
+                PrivateUtxoType::ActiveOffer,
+                outpoint(&installment, 1),
+                spent_by(&liquidate, 103),
+            ),
+            (
+                PrivateUtxoType::Installment,
+                outpoint(&installment, 2),
+                spent_by(&liquidate, 103),
+            ),
+        ],
+    )
+    .await;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn active_spend_that_matches_no_layout_is_refused() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let mut processor = block_processor(&pool).await?;
+    let c = creation();
+    let accept = acceptance_tx(&c);
+    // The loan at input 0 with nothing burned: neither a liquidation nor a borrower's branch.
+    let other = tx_with_input(
+        outpoint(&accept, 0),
+        vec![normal_output(), normal_output(), normal_output()],
+    );
+    index_block(&mut processor, 100, std::slice::from_ref(&c.tx)).await?;
+    index_block(&mut processor, 101, std::slice::from_ref(&accept)).await?;
+    index_block(&mut processor, 102, std::slice::from_ref(&other)).await?;
+
+    // The spend is recorded, since it happened, but the offer keeps its status and gains nothing.
+    let row = private_offer_row(&pool, c.tx.txid()).await?.expect("row");
+    assert_eq!(
+        (row.current_status, row.updated_at_height),
+        (PrivateOfferStatus::Active, 101)
+    );
+    assert_utxos(
+        &pool,
+        row.id,
+        &[
+            (
+                PrivateUtxoType::PendingOffer,
+                outpoint(&c.tx, 3),
+                spent_by(&accept, 101),
+            ),
+            (
+                PrivateUtxoType::ActiveOffer,
+                outpoint(&accept, 0),
+                spent_by(&other, 102),
+            ),
+            (PrivateUtxoType::Principal, outpoint(&accept, 1), None),
+        ],
+    )
+    .await;
+    Ok(())
+}
+
 #[tokio::test]
 #[serial]
 async fn offer_created_and_accepted_in_one_block_is_active() -> anyhow::Result<()> {
@@ -497,7 +768,8 @@ async fn acceptance_and_repayment_colliding_in_one_transaction_does_not_halt_ind
     assert_eq!(row_b.current_status, PrivateOfferStatus::Active);
     assert_eq!(utxo_count(&pool, outpoint(&t, 1)).await?, 1);
 
-    // The reverse order: the repayment is processed first and owns (T,1).
+    // The reverse order: the repayment is processed first and owns (T,1). The loan stays at input
+    // 1, where the full repayment spends it, behind an untracked input 0.
     let a2 = private_creation(
         &lending_key(1),
         &lending_key(2),
@@ -512,7 +784,11 @@ async fn acceptance_and_repayment_colliding_in_one_transaction_does_not_halt_ind
     index_block(&mut processor, 103, &[a2.tx.clone(), b2.tx.clone()]).await?;
     index_block(&mut processor, 104, std::slice::from_ref(&accept2)).await?;
     let t2 = tx_with_inputs(
-        vec![outpoint(&accept2, 0), outpoint(&b2.tx, 3)],
+        vec![
+            outpoint_with_txid_byte(0x36, 0),
+            outpoint(&accept2, 0),
+            outpoint(&b2.tx, 3),
+        ],
         vec![
             burn_output(a2.offer.signed_terms.terms.borrower_nft),
             normal_output(),

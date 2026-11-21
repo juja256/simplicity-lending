@@ -1,6 +1,7 @@
 //! The secrets of an offer: the borrower–lender shared secret and the values derived from it.
 
 use elements::confidential::{AssetBlindingFactor, Nonce, ValueBlindingFactor};
+use elements::hashes::{Hash, HashEngine, sha256};
 use elements::secp256k1_zkp::{PublicKey, SECP256K1, SecretKey, XOnlyPublicKey};
 
 use crate::{LendingKey, lift_lending_key, tagged_hash};
@@ -78,6 +79,12 @@ impl OfferSecrets {
         (abf, vbf)
     }
 
+    /// The salt of the offer's expiry hash ([`expiry_hash`]), which the liquidation's witness
+    /// reveals with the expiry.
+    pub fn expiry_salt(&self) -> [u8; 32] {
+        self.derive("expiry-salt")
+    }
+
     /// The value labelled `label`: `tagged_hash("simplicity-lending/private/v1/<label>",
     /// shared_secret)`.
     pub fn derive(&self, label: &str) -> [u8; 32] {
@@ -85,6 +92,18 @@ impl OfferSecrets {
 
         tagged_hash(&tag, &[&self.shared_secret.secret_bytes()])
     }
+}
+
+/// The expiry hash of the contract, `SHA-256(salt ‖ expiry)` with the expiry as a 4-byte
+/// big-endian block height: the hash the liquidation branch checks its witness's salt and expiry
+/// against. A spend through any other branch reveals a CMR that commits to the hash, so without the
+/// salt ([`OfferSecrets::expiry_salt`]) nobody can try candidate expiries against it.
+pub fn expiry_hash(salt: &[u8; 32], expiry: u32) -> [u8; 32] {
+    let mut engine = sha256::Hash::engine();
+    engine.input(salt);
+    engine.input(&expiry.to_be_bytes());
+
+    sha256::Hash::from_engine(engine).to_byte_array()
 }
 
 #[cfg(test)]
@@ -178,6 +197,41 @@ mod tests {
         assert_eq!(
             vbf.into_inner().as_ref().to_hex(),
             "65537b6c8aa26a483786b244e94816364bc69fe7966b2176a75acc5b9f7491e7"
+        );
+    }
+
+    /// The frozen salt of the same shared secret as [`view_tag_and_blinders_known_answers`], so a
+    /// change of tag or label fails.
+    #[test]
+    fn expiry_salt_known_answer() {
+        let secrets = OfferSecrets {
+            shared_secret: SecretKey::from_slice(&sequence(0x80)).unwrap(),
+        };
+
+        assert_eq!(
+            secrets.expiry_salt().to_hex(),
+            "b169c9d413aef8b85345f5bfd3df018b57d447f2d5295fb05246ba04fa9142ca"
+        );
+        let (borrower_side, lender_side) = both_sides(&[9; 32]);
+        assert_eq!(borrower_side.expiry_salt(), lender_side.expiry_salt());
+    }
+
+    #[test]
+    fn expiry_hash_is_sha256_of_salt_and_big_endian_height() {
+        let salt = sequence(0x80);
+        let preimage = [&salt[..], &[0x01, 0x02, 0x03, 0x04]].concat();
+
+        assert_eq!(
+            expiry_hash(&salt, 0x0102_0304),
+            sha256::Hash::hash(&preimage).to_byte_array()
+        );
+        assert_eq!(
+            expiry_hash(&salt, 0x0102_0304).to_hex(),
+            "a30290aaa7ce7f331be57c25d69cc17073efe0f552152020e462e76d9a0db79e"
+        );
+        assert_ne!(
+            expiry_hash(&salt, 0x0403_0201),
+            expiry_hash(&salt, 0x0102_0304)
         );
     }
 }

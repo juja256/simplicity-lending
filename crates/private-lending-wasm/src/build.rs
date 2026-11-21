@@ -78,7 +78,11 @@ impl NewOffer {
 
     #[wasm_bindgen(js_name = contractArguments)]
     pub fn contract_arguments(&self) -> ContractArguments {
-        ContractArguments::new(&self.inner.signed_terms.terms, &self.inner.pinned)
+        ContractArguments::new(
+            &self.inner.signed_terms.terms,
+            &self.inner.pinned,
+            &self.inner.secrets,
+        )
     }
 
     pub fn pinned(&self, role: PinnedRole) -> PinnedOutputInfo {
@@ -303,6 +307,7 @@ pub(crate) mod tests {
         assert_eq!(a.principal_commitment(), b.principal_commitment());
         assert_eq!(a.repayment_commitment(), b.repayment_commitment());
         assert_eq!(a.loan_expiration_time(), b.loan_expiration_time());
+        assert_eq!(a.expiry_hash(), b.expiry_hash());
         assert_eq!(opened.lender_public_key(), offer.lender_public_key());
     }
 

@@ -1,13 +1,14 @@
-// Query keys of the data read or opened with a session's lending key: the identity, the offers
-// and their terms. None of it may outlive the session, so the wallet provider drops it all
-// (`removePrivateSessionQueries`) when it frees the key. Free of React hooks, so the provider can
-// import it.
+// Query keys of the data read or opened with a session's lending key: the identity, the offers,
+// their terms and their loans. None of it may outlive the session, so the wallet provider drops it
+// all (`removePrivateSessionQueries`) when it frees the key. Free of React hooks, so the provider
+// can import it.
 import type { QueryClient } from '@tanstack/react-query'
 
 import { privateQueryKeys } from '@/api/indexer/queryKeys'
 
 const LENDING_KEY_IDENTITY_ROOT = 'lending-key-identity'
 const PRIVATE_OFFER_TERMS_ROOT = 'private-offer-terms'
+const PRIVATE_LOAN_ROOT = 'private-loan'
 const PRIVATE_LENDING_WASM_ROOT = 'private-lending-wasm'
 
 /** The private lending wasm module, loaded once. Not session data: it holds no key. */
@@ -30,9 +31,25 @@ export function privateOfferTermsQueryKey(
   return [PRIVATE_OFFER_TERMS_ROOT, network, apiBaseUrl, fingerprint, txid, role] as const
 }
 
+/**
+ * A loan read from its loan output (`useLoan`). What leads to a loan output never changes, so this
+ * key also stays off the per-block root: a new installment or a close is a new loan output.
+ */
+export function privateLoanQueryKey(
+  network: string,
+  apiBaseUrl: string,
+  fingerprint: string,
+  txid: string,
+  role: string,
+  loanOutpoint: string,
+) {
+  return [PRIVATE_LOAN_ROOT, network, apiBaseUrl, fingerprint, txid, role, loanOutpoint] as const
+}
+
 const SESSION_QUERY_ROOTS: readonly (readonly unknown[])[] = [
   privateQueryKeys.all(),
   [PRIVATE_OFFER_TERMS_ROOT],
+  [PRIVATE_LOAN_ROOT],
   [LENDING_KEY_IDENTITY_ROOT],
 ]
 

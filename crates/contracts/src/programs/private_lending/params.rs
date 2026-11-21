@@ -1,19 +1,21 @@
-use private_lending_core::{OfferPinned, OfferTerms};
+use private_lending_core::{OfferPinned, OfferSecrets, OfferTerms, expiry_hash};
 use simplex::{provider::SimplicityNetwork, simplicityhl::elements::AssetId};
 
 use crate::{
     artifacts::private_lending::derived_private_lending::PrivateLendingArguments,
     programs::{
         asset_auth::{AssetAuth, AssetAuthParameters},
+        private_lending::witness::commitment_witness,
         program::SimplexProgram,
     },
 };
 
 /// The parameters of a private offer: its NFTs, its expiration and the pinned outputs that carry
-/// its terms. The program sees only the commitments of the pinned outputs.
+/// its terms. The program sees only the commitments of the pinned outputs, the repayment's asset
+/// commitment `A`, under which every installment pays, and the expiration only as its salted hash.
 ///
 /// Build them with [`PrivateLendingParameters::from_terms`], so the NFTs and the expiration are
-/// those of the signed terms.
+/// those of the signed terms and the salt is the offer's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrivateLendingParameters {
     pub borrower_nft_asset_id: AssetId,
@@ -21,16 +23,20 @@ pub struct PrivateLendingParameters {
     pub pinned: OfferPinned,
     /// The block height at which the loan expires; the lender can liquidate after it.
     pub loan_expiration_time: u32,
+    /// The salt of the expiry hash, [`OfferSecrets::expiry_salt`]: the liquidation's witness
+    /// carries it with the expiration.
+    pub expiry_salt: [u8; 32],
     pub network: SimplicityNetwork,
 }
 
 impl PrivateLendingParameters {
     /// The parameters of the offer of `terms` whose outputs `pinned` pins: the NFTs and the
-    /// expiration come from the terms. The borrower creates the offer with them and the lender
-    /// verifies it with them, so both reach the same address.
+    /// expiration come from the terms and the expiry salt from `secrets`. The borrower creates
+    /// the offer with them and the lender verifies it with them, so both reach the same address.
     pub fn from_terms(
         terms: &OfferTerms,
         pinned: OfferPinned,
+        secrets: &OfferSecrets,
         network: SimplicityNetwork,
     ) -> PrivateLendingParameters {
         PrivateLendingParameters {
@@ -38,6 +44,7 @@ impl PrivateLendingParameters {
             lender_nft_asset_id: terms.lender_nft,
             pinned,
             loan_expiration_time: terms.loan_expiration_time,
+            expiry_salt: secrets.expiry_salt(),
             network,
         }
     }
@@ -62,6 +69,17 @@ impl PrivateLendingParameters {
         })
     }
 
+    /// An installment, unlocked by the lender NFT (kept), so that the lender can claim each
+    /// installment and keep the NFT for the next.
+    pub fn get_installment_output_asset_auth(&self) -> AssetAuth {
+        AssetAuth::new(AssetAuthParameters {
+            asset_id: self.lender_nft_asset_id,
+            asset_amount: 1,
+            with_asset_burn: false,
+            network: self.network,
+        })
+    }
+
     pub fn build_arguments(&self) -> PrivateLendingArguments {
         PrivateLendingArguments {
             borrower_nft_asset_id: self.borrower_nft_asset_id.into_inner().0,
@@ -70,9 +88,13 @@ impl PrivateLendingParameters {
             active_collateral_commitment: self.pinned.active_collateral.commitment_hash(),
             principal_commitment: self.pinned.principal.commitment_hash(),
             repayment_commitment: self.pinned.repayment.commitment_hash(),
-            loan_expiration_time: self.loan_expiration_time,
+            expiry_hash: expiry_hash(&self.expiry_salt, self.loan_expiration_time),
+            repayment_asset: commitment_witness(&self.pinned.repayment.asset_commitment()),
             principal_output_script_hash: self.get_principal_output_asset_auth().get_script_hash(),
             repayment_output_script_hash: self.get_repayment_output_asset_auth().get_script_hash(),
+            installment_output_script_hash: self
+                .get_installment_output_asset_auth()
+                .get_script_hash(),
         }
     }
 }

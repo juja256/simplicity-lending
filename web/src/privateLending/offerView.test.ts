@@ -3,10 +3,12 @@ import { describe, expect, it, vi } from 'vitest'
 import type { PrivateCandidateDetails, PrivateOfferStatus } from '@/api/indexer/private'
 import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
 
+import type { LoanFigures } from './hooks/useLoan'
 import type { PrivateOfferItem } from './hooks/usePrivateOffers'
 import { proposalExpiry, TERM_MARGIN_BLOCKS } from './lenderTerms'
 import {
   borrowerActions,
+  borrowerSendable,
   borrowerStatus,
   borrowerView,
   canStillAccept,
@@ -14,6 +16,7 @@ import {
   checkStillAcceptable,
   creationExpiredNote,
   creationSendable,
+  displayStatus,
   dueText,
   LENDER_ACTION_LABELS,
   type LenderAction,
@@ -329,6 +332,272 @@ describe("the borrower's loans", () => {
     expect(dueText(90)).toBe('due in 1 h')
     expect(dueText(0)).toBe('due now')
     expect(dueText(-2 * 1440)).toBe('overdue by 2 days')
+  })
+})
+
+const INSTALLMENT_TXID = '56'.repeat(32)
+const SECOND_INSTALLMENT_TXID = '78'.repeat(32)
+const INSTALLMENT_CLAIM_TXID = '9a'.repeat(32)
+const CLOSE_TXID = 'bc'.repeat(32)
+const FINAL_CLAIM_TXID = 'de'.repeat(32)
+const INSTALLMENT = `${INSTALLMENT_TXID}:2`
+
+/** Received, then an installment: the loan moved to its output 1, the installment at output 2. */
+const PAID_ONCE = [
+  utxo('pending_offer', TXID, 3, ACCEPT_TXID),
+  utxo('active_offer', ACCEPT_TXID, 0, INSTALLMENT_TXID),
+  utxo('principal', ACCEPT_TXID, 1, CLAIM_TXID),
+  utxo('active_offer', INSTALLMENT_TXID, 1),
+  utxo('installment', INSTALLMENT_TXID, 2),
+]
+
+/** The loan's figures after `installments`, as `useLoan` reads them. */
+function figures(
+  installments: { outpoint: string; amount: bigint | undefined }[],
+  remaining: bigint | undefined,
+  loanOutpoint = `${INSTALLMENT_TXID}:1`,
+): LoanFigures {
+  return {
+    loanOutpoint,
+    installments,
+    paid: installments.reduce((sum, { amount }) => sum + (amount ?? 0n), 0n),
+    remaining,
+  }
+}
+
+/** My loans' state of `item` at `tip` with its loan's figures, as the page computes it. */
+function paidLoanState(
+  item: OpenedOfferItem,
+  tip: number,
+  loan: LoanFigures | undefined,
+  txs: PrivateTxRecord[] = [],
+) {
+  return offerActionState(
+    txs,
+    item,
+    borrowerActions(AMOUNTS),
+    opened => borrowerView(opened, tip, loan),
+    borrowerSendable(tip),
+  )
+}
+
+describe("the borrower's installments", () => {
+  it('shows what was repaid of the repayment, and repays the rest', () => {
+    const item = own('active', PAID_ONCE)
+    const loan = figures([{ outpoint: INSTALLMENT, amount: 30_000n }], 80_000n)
+    expect(borrowerStatus(item, EXPIRY - 12 * 1440, loan)).toEqual({
+      kind: 'active',
+      blocksLeft: 12 * 1440,
+      paid: 30_000n,
+    })
+    expect(paidLoanState(item, EXPIRY - 1, loan).button).toMatchObject({
+      kind: 'open',
+      action: 'repay',
+    })
+  })
+
+  it('closes the loan once the installments paid the whole debt', () => {
+    const item = own('active', PAID_ONCE)
+    const loan = figures([{ outpoint: INSTALLMENT, amount: 110_000n }], 0n)
+    const view = borrowerView(item, EXPIRY - 1, loan)
+    expect(view.action).toBe('closeZeroDebt')
+    expect(borrowerActions(AMOUNTS).labels.closeZeroDebt).toBe('Close the loan')
+    expect(paidLoanState(item, EXPIRY - 1, loan).button).toMatchObject({
+      kind: 'open',
+      action: 'closeZeroDebt',
+      label: 'Close the loan',
+    })
+    // past the term too: the close takes the collateral back
+    expect(borrowerView(item, EXPIRY + 1, loan).action).toBe('closeZeroDebt')
+  })
+
+  it('offers no repayment while what is owed cannot be read', () => {
+    const item = own('active', PAID_ONCE)
+    const loan = figures([{ outpoint: INSTALLMENT, amount: undefined }], undefined)
+    const state = paidLoanState(item, EXPIRY - 1, loan)
+    expect(state.button).toBeNull()
+    expect(state.note).toContain('does not open with your key')
+  })
+
+  // Review focus 5: a retried installment is broadcast again as saved, or discarded; never built
+  // a second time, which could reuse its range proof's nonce.
+  it('gives an unsent installment only "Broadcast again", or "Discard" once the term ended', () => {
+    const item = own('active', PAID_ONCE)
+    const loan = figures([{ outpoint: INSTALLMENT, amount: 30_000n }], 80_000n)
+    const record = unsent(item, 'private_installment')
+    for (const tip of [EXPIRY - 1440, EXPIRY - 1]) {
+      expect(paidLoanState(item, tip, loan, [record]).button).toEqual({
+        kind: 'open',
+        action: 'repay',
+        item,
+        unsentTx: record,
+        label: 'Broadcast again',
+        variant: 'secondary',
+      })
+    }
+    // at the expiry the lender can liquidate and keep it: it is no longer sent
+    for (const tip of [EXPIRY, EXPIRY + 1]) {
+      const state = paidLoanState(item, tip, loan, [record])
+      expect(state.button).toEqual({
+        kind: 'discard',
+        record,
+        label: 'Discard',
+        variant: 'secondary',
+      })
+      expect(state.note).toContain('can no longer be sent')
+    }
+    // while the tip is unknown, neither
+    expect(paidLoanState(item, 0, loan, [record]).button).toBeNull()
+    // a zero-debt state does not lift the block either
+    const paidOff = figures([{ outpoint: INSTALLMENT, amount: 110_000n }], 0n)
+    expect(paidLoanState(item, EXPIRY - 1, paidOff, [record]).button).toMatchObject({
+      kind: 'open',
+      action: 'repay',
+      unsentTx: record,
+    })
+  })
+
+  it('broadcasts an unsent zero-debt close again', () => {
+    const item = own('active', PAID_ONCE)
+    const loan = figures([{ outpoint: INSTALLMENT, amount: 110_000n }], 0n)
+    const record = unsent(item, 'private_zero_debt_close')
+    expect(paidLoanState(item, EXPIRY + 1, loan, [record]).button).toMatchObject({
+      kind: 'open',
+      action: 'closeZeroDebt',
+      unsentTx: record,
+      label: 'Broadcast again',
+    })
+  })
+})
+
+const LOAN_ACTIONS: OfferActions<
+  LenderAction,
+  'private_claim_installments' | 'private_claim_repayment' | 'private_liquidate_offer'
+> = {
+  labels: LENDER_ACTION_LABELS,
+  danger: 'liquidate',
+  actionOfKind: {
+    private_claim_installments: 'claimInstallments',
+    private_claim_repayment: 'claimRepayment',
+    private_liquidate_offer: 'liquidate',
+  },
+}
+
+/** The lender's side of `own(status, utxos)`. */
+function lent(status: PrivateOfferStatus, utxos: ReturnType<typeof utxo>[]): OpenedOfferItem {
+  return { ...own(status, utxos), role: 'lender' }
+}
+
+/** The loan book's state of `item` at `tip` with its loan's figures. */
+function bookState(item: OpenedOfferItem, tip: number, loan?: LoanFigures) {
+  return offerActionState(
+    [],
+    item,
+    LOAN_ACTIONS,
+    opened => lenderView(opened, tip, loan),
+    lenderSendable(tip),
+  )
+}
+
+describe("the lender's installments and claims", () => {
+  it('claims an unclaimed installment that opens', () => {
+    const item = lent('active', PAID_ONCE)
+    const loan = figures([{ outpoint: INSTALLMENT, amount: 30_000n }], 80_000n)
+    expect(lenderView(item, EXPIRY - 1, loan).action).toBe('claimInstallments')
+    expect(bookState(item, EXPIRY - 1, loan).button).toMatchObject({
+      kind: 'open',
+      action: 'claimInstallments',
+      label: 'Claim',
+      variant: 'primary',
+    })
+  })
+
+  it('claims no installment that does not open, is claimed already, or is not read yet', () => {
+    const unopened = figures([{ outpoint: INSTALLMENT, amount: undefined }], undefined)
+    expect(lenderView(lent('active', PAID_ONCE), EXPIRY - 1, unopened).action).toBeUndefined()
+    expect(lenderView(lent('active', PAID_ONCE), EXPIRY - 1, undefined).action).toBeUndefined()
+    const claimed = PAID_ONCE.map(entry =>
+      entry.utxo_type === 'installment'
+        ? utxo('installment', INSTALLMENT_TXID, 2, INSTALLMENT_CLAIM_TXID)
+        : entry,
+    )
+    const loan = figures([{ outpoint: INSTALLMENT, amount: 30_000n }], 80_000n)
+    expect(lenderView(lent('active', claimed), EXPIRY - 1, loan)).toEqual({
+      note: `Liquidation opens after block #${EXPIRY}.`,
+    })
+  })
+
+  it('liquidates past the expiry, which sweeps the installments, rather than claiming them', () => {
+    const loan = figures([{ outpoint: INSTALLMENT, amount: 30_000n }], 80_000n)
+    expect(bookState(lent('active', PAID_ONCE), EXPIRY + 1, loan).button).toMatchObject({
+      action: 'liquidate',
+      label: 'Liquidate',
+      variant: 'danger-soft',
+    })
+  })
+
+  // Decision 2: the sweep after a full repayment and after a zero-debt close, and `claimed` once
+  // it ran.
+  it('claims the repayment after a full repayment, then shows the loan claimed', () => {
+    const closed = [
+      ...PAID_ONCE.slice(0, 3),
+      utxo('active_offer', INSTALLMENT_TXID, 1, CLOSE_TXID),
+      utxo('installment', INSTALLMENT_TXID, 2),
+      utxo('repayment', CLOSE_TXID, 1),
+    ]
+    const repaid = lent('repaid', closed)
+    expect(displayStatus(repaid.candidate)).toBe('repaid')
+    expect(bookState(repaid, EXPIRY + 1).button).toMatchObject({
+      action: 'claimRepayment',
+      label: 'Claim repayment',
+    })
+    const swept = closed.map(entry =>
+      entry.utxo_type === 'installment' || entry.utxo_type === 'repayment'
+        ? utxo(entry.utxo_type, entry.txid, entry.vout, FINAL_CLAIM_TXID)
+        : entry,
+    )
+    const claimed = lent('repaid', swept)
+    expect(displayStatus(claimed.candidate)).toBe('claimed')
+    expect(bookState(claimed, EXPIRY + 1).button).toBeNull()
+  })
+
+  it('claims the installments after a zero-debt close, then shows the loan claimed', () => {
+    // two installments paid the debt; the lender claimed the first; the close left no repayment
+    const closed = [
+      ...PAID_ONCE.slice(0, 3),
+      utxo('active_offer', INSTALLMENT_TXID, 1, SECOND_INSTALLMENT_TXID),
+      utxo('installment', INSTALLMENT_TXID, 2, INSTALLMENT_CLAIM_TXID),
+      utxo('active_offer', SECOND_INSTALLMENT_TXID, 1, CLOSE_TXID),
+      utxo('installment', SECOND_INSTALLMENT_TXID, 2),
+    ]
+    const repaid = lent('repaid', closed)
+    expect(displayStatus(repaid.candidate)).toBe('repaid')
+    expect(bookState(repaid, EXPIRY - 1).button).toMatchObject({
+      action: 'claimRepayment',
+      label: 'Claim repayment',
+    })
+    const swept = closed.map(entry =>
+      entry.utxo_type === 'installment' && entry.spent_txid === null
+        ? utxo('installment', entry.txid, entry.vout, FINAL_CLAIM_TXID)
+        : entry,
+    )
+    const claimed = lent('repaid', swept)
+    expect(displayStatus(claimed.candidate)).toBe('claimed')
+    expect(bookState(claimed, EXPIRY - 1).button).toBeNull()
+    expect(borrowerStatus(own('repaid', swept), EXPIRY - 1)).toEqual({ kind: 'repaid' })
+  })
+
+  it('broadcasts an unsent installment claim again', () => {
+    const item = lent('active', PAID_ONCE)
+    const record = unsent(item, 'private_claim_installments')
+    const state = offerActionState([record], item, LOAN_ACTIONS, opened =>
+      lenderView(opened, EXPIRY - 1),
+    )
+    expect(state.button).toMatchObject({
+      action: 'claimInstallments',
+      unsentTx: record,
+      label: 'Broadcast again',
+    })
   })
 })
 

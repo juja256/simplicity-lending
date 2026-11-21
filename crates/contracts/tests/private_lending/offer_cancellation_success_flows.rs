@@ -5,7 +5,7 @@ use lending_contracts::utils::confidential::ConfidentialTransaction;
 
 use super::setup::{
     broadcast, default_offer_parameters, find_explicit_utxo, find_pinned_utxo,
-    setup_pending_private_offer,
+    setup_pending_private_offer, simplicity_spend,
 };
 
 #[simplex::test]
@@ -42,7 +42,8 @@ fn private_offer_cancellation_returns_collateral(
         .with_blinding_key(borrower.get_blinding_public_key()),
     );
 
-    broadcast(&ctx, borrower)?;
+    let cancellation_tx = broadcast(&ctx, borrower)?;
+    simplicity_spend("OfferCancellation", &cancellation_tx, 0)?;
 
     assert!(
         provider

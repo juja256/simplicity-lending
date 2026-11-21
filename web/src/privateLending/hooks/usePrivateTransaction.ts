@@ -1,7 +1,8 @@
 // Runs a private lending transaction like `useStandardTransactionFlow` (build, sign, finalize,
 // broadcast, with the same progress steps), but saves the finalized transaction before it is
-// broadcast. A failed broadcast leaves it saved, and `retryBroadcast` sends that same hex again:
-// a creation draws fresh NFTs on every build, so rebuilding would make a different offer.
+// broadcast. A failed broadcast, or a failed check before it, leaves it saved, and
+// `retryBroadcast` sends that same hex again: a creation draws fresh NFTs on every build, so
+// rebuilding would make a different offer.
 import { Transaction } from 'lwk_wasm'
 import { useCallback } from 'react'
 
@@ -10,11 +11,14 @@ import { broadcastTx } from '@/api/esplora/methods'
 import { getStandardTransactionSteps } from '@/components/TransactionStepper/transactionSteps'
 import { useLatestRef } from '@/hooks/useLatestRef'
 import type { AsyncUpdatedPset, UpdatedPset } from '@/lwk/transaction'
+import { PrivateBroadcastError, sendSaved } from '@/privateLending/sendSaved'
 import type { CreationTerm, PrivateTxKind } from '@/providers/pendingTransactions/types'
 import { usePendingTransactions } from '@/providers/pendingTransactions/usePendingTransactions'
 import { useTxProgress } from '@/providers/txProgress/useTxProgress'
 import { useWallet } from '@/providers/wallet/useWallet'
-import { ErrorHandler } from '@/utils/errorHandler'
+
+// Defined beside `sendSaved`, which tests load without React; the modals import it from here.
+export { PrivateBroadcastError }
 
 /**
  * What the transaction acts on: a creation is its own offer, saved with the term the borrower
@@ -27,20 +31,6 @@ export type PrivateTransactionTarget =
 export interface PrivateTransactionResult<TSummary> {
   txid: string
   summary: TSummary
-}
-
-/**
- * The broadcast of a saved transaction failed. The transaction stays saved: offer
- * `retryBroadcast(txid)`, never a rebuild.
- */
-export class PrivateBroadcastError extends Error {
-  readonly txid: string
-
-  constructor(txid: string, cause: unknown) {
-    super(ErrorHandler.describe(cause), { cause })
-    this.name = 'PrivateBroadcastError'
-    this.txid = txid
-  }
 }
 
 // What a node answers for a transaction it already has: the earlier broadcast went through.
@@ -60,9 +50,9 @@ export interface PrivateTransaction {
   /**
    * Builds, signs (through the wallet), finalizes (awaiting an async finalize such as the
    * creation's self-check), saves, then broadcasts. Nothing is broadcast unless the finalized
-   * transaction was saved, and `beforeBroadcast` (if given) resolved just before: when it throws,
-   * the transaction stays saved and unsent. Throws `PrivateBroadcastError` if only the broadcast
-   * failed.
+   * transaction was saved, and `beforeBroadcast` (if given) resolved just before. Throws
+   * `PrivateBroadcastError` if the transaction was saved but `beforeBroadcast` or the broadcast
+   * failed: it stays saved and unsent, for `retryBroadcast`.
    */
   run: <TSummary>(
     target: PrivateTransactionTarget,
@@ -71,7 +61,8 @@ export interface PrivateTransaction {
   ) => Promise<PrivateTransactionResult<TSummary>>
   /**
    * Broadcasts the saved transaction `txid` again, as saved, once `beforeBroadcast` (if given)
-   * resolved. Resolves to `txid`.
+   * resolved. Resolves to `txid`; throws `PrivateBroadcastError` if `beforeBroadcast` or the
+   * broadcast failed.
    */
   retryBroadcast: (txid: string, beforeBroadcast?: () => Promise<void>) => Promise<string>
 }
@@ -133,9 +124,10 @@ export function usePrivateTransaction(): PrivateTransaction {
           )
         }
 
-        await beforeBroadcast?.()
-        await advance('broadcasting')
-        await broadcastSaved(txid, finalizedTx, txHex)
+        await sendSaved(txid, beforeBroadcast, async () => {
+          await advance('broadcasting')
+          await broadcastSaved(txid, finalizedTx, txHex)
+        })
         return { txid, summary }
       } catch (error) {
         setTxProgressError(error)
@@ -155,8 +147,7 @@ export function usePrivateTransaction(): PrivateTransaction {
         if (!record) throw new Error(`No saved transaction ${txid} for this wallet`)
         const tx = Transaction.fromString(record.txHex)
         if (tx.txid().toString() !== txid) throw new Error(`The saved transaction is not ${txid}`)
-        await beforeBroadcast?.()
-        await broadcastSaved(txid, tx, record.txHex)
+        await sendSaved(txid, beforeBroadcast, () => broadcastSaved(txid, tx, record.txHex))
         return txid
       } catch (error) {
         setTxProgressError(error)

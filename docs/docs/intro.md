@@ -34,13 +34,15 @@ place to put funds you care about.
 3. **The lender accepts the offer.** The lender's browser opens and verifies the terms, then
    supplies the principal. The principal is locked to the borrower's role token, and the borrower
    claims it in a separate transaction.
-4. **The borrower repays in full.** The repayment releases the collateral. The lender then claims
-   the repayment.
+4. **The borrower repays.** They can pay in installments, each claimed by the lender, and then the
+   rest in full. The full repayment releases the collateral, and the lender then claims it with
+   any installment not yet claimed.
 5. **Or the loan expires.** If the loan has not been repaid by the expiry height, the lender can
    liquidate it and claim the collateral.
 
 There is no protocol fee. The interest is the difference between the repayment and the principal,
-and the lender checks it before accepting. Partial repayments are not supported.
+and the lender checks it before accepting. Installments release no collateral, and they are not
+refunded if the loan is liquidated.
 
 Collateral never moves to the counterparty or to the protocol until the loan ends. It sits in a
 contract output, and a role token in your own wallet is what lets you act on the loan.

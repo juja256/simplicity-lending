@@ -1,38 +1,35 @@
-// The borrower's full repayment of a private loan (`attach_full_repayment` in the contracts'
-// private lending core):
-//   inputs   0 the borrower NFT, explicit; 1 the active offer (FullRepayment branch); 2… the
-//            borrower's principal coins, then its fee coins;
+// The borrower's full repayment of what a private loan still owes (`attach_full_repayment` in the
+// contracts' private lending core):
+//   inputs   0 the borrower NFT, explicit; 1 the loan (FullRepayment branch); 2… the borrower's
+//            principal coins, then its fee coins;
 //   outputs  0 burns the borrower NFT (OP_RETURN, explicit); 1 the repayment at asset_auth(lender
 //            NFT, 1, burn), pinned and blinded to the lender's key; 2 the collateral back to the
 //            borrower, blinded to its wallet; 3 the principal change to the wallet, if any; then
 //            the policy-asset change and the fee.
-// The covenant checks the borrower NFT burn (input 0 to output 0), the active collateral at input
-// 1 and the pinned repayment at output 1; it leaves the collateral to the spender. The borrower NFT
-// is an explicit output at a wallet address, which LWK does not list among the wallet's coins, so
-// it is spent as a plain input, not a wallet coin; the wallet still recognizes its script, and
-// signs it. `buildPset` adds only the policy-asset change, after the given outputs, so the builder
-// pays the principal change itself, at output 3.
+// The covenant checks that the witness's debt hash is the one the loan's storage holds, the
+// borrower NFT burn (input 0 to output 0) and that the repayment at output 1 has that debt hash; it
+// leaves the collateral to the spender. The repayment is the debt itself: the amount still owed
+// under the repayment's asset commitment `A`, with the debt's blinder, so that its value
+// commitment is the debt `D` of the loan's state. Before any installment, that is the pinned
+// repayment.
+// The borrower NFT is an explicit output at a wallet address, which LWK does not list among the
+// wallet's coins, so it is spent as a plain input, not a wallet coin; the wallet still recognizes
+// its script, and signs it. `buildPset` adds only the policy-asset change, after the given outputs,
+// so the builder pays the principal change itself, at output 3.
 // The covenant does not check that the principal was claimed, and the borrower NFT is the only key
 // to an unclaimed principal (asset_auth(borrower NFT, 1, no burn)): burning it first would strand
-// the principal forever. So the builder spends the NFT only from the principal claim's output 0,
-// checked on chain, whatever the indexer says.
+// the principal forever. So the builder spends the NFT only once it comes from the principal
+// claim, checked on chain (`principalClaimedBefore`), whatever the indexer says.
 import type { Address, WalletTxOut } from 'lwk_wasm'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
-import {
-  ACCEPTANCE_INPUT,
-  ACCEPTANCE_OUTPUT,
-  CREATION_OUTPUT,
-  NFT_AMOUNT,
-  PRINCIPAL_CLAIM_OUTPUT,
-  REPAYMENT_INPUT,
-  REPAYMENT_OUTPUT,
-} from '@/simplicity/private-lending/layout'
+import { NFT_AMOUNT, REPAYMENT_INPUT, REPAYMENT_OUTPUT } from '@/simplicity/private-lending/layout'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
 
 import type { PrivateFlowDeps } from '../deps'
 import { finalizePrivateOfferInput, pinnedAuthCovenant } from '../finalize'
+import { borrowerLoanInputs, type Loan } from '../loan'
 import { walletInputSecret } from '../secrets'
 import type { VerifiedOffer } from '../verify'
 import {
@@ -52,41 +49,14 @@ import {
   wasmStep,
 } from './shared'
 
-/**
- * The repayment refused before building: the borrower NFT outpoint is not output 0 of a
- * transaction that spends this offer's principal output, so the principal may be unclaimed, and
- * the repayment would burn the only key to it. The message is `"principal-not-claimed: …"`.
- */
-export class PrincipalNotClaimedError extends Error {
-  readonly code = 'principal-not-claimed'
-
-  constructor(
-    readonly borrowerNftOutpoint: string,
-    /** The offer's principal output, `"<acceptance txid>:1"`. */
-    readonly principalOutpoint: string,
-  ) {
-    super(
-      `principal-not-claimed: the borrower NFT at ${borrowerNftOutpoint} is not output ` +
-        `${PRINCIPAL_CLAIM_OUTPUT.borrowerNft} of a transaction that spends the principal ` +
-        `${principalOutpoint}. Claim the principal first: the repayment burns the borrower NFT, ` +
-        'the only key to it',
-    )
-    this.name = 'PrincipalNotClaimedError'
-  }
-}
+export { PrincipalNotClaimedError } from '../loan'
 
 export interface RepaymentParams {
   /**
-   * The active offer, `"<acceptance txid>:0"`. The builder checks that the transaction spends this
-   * offer's pending offer at input 0: the acceptance covenant then put the active offer at output
-   * 0; a cancellation burns there, which the script check rejects.
-   */
-  activeOfferOutpoint: string
-  /**
-   * The borrower NFT: an explicit output at a wallet address, `"<principal claim txid>:0"`. The
-   * builder checks on chain that this transaction spends the offer's principal output,
-   * `"<acceptance txid>:1"`, and throws `PrincipalNotClaimedError` otherwise: before the claim the
-   * NFT sits at `"<creation txid>:0"`, the only key to the principal.
+   * The borrower NFT, an explicit output at a wallet address: output 0 of the principal claim, or
+   * of the last installment after it. The builder walks it back on chain to the claim of this
+   * offer's principal and throws `PrincipalNotClaimedError` otherwise: before the claim the NFT
+   * sits at `"<creation txid>:0"`, the only key to the principal.
    */
   borrowerNftOutpoint: string
   /** The borrower's coins of the principal asset, which pay the repayment. */
@@ -103,51 +73,63 @@ export interface RepaymentSummary {
   /** The collateral back to the borrower: `"<txid>:2"`. */
   collateralOutpoint: string
   collateral: bigint
+  /** What this repayment pays: the amount the loan still owed. */
   repayment: bigint
-  /** Repayment − principal, in principal units. */
+  /** The loan's interest, its repayment amount − principal, in principal units. */
   interest: bigint
 }
 
 /**
- * Builds the borrower's full repayment of an accepted offer whose principal was claimed, blinded
- * and ready to sign. Throws `PrincipalNotClaimedError` before building unless the borrower NFT
- * comes from the principal claim. `finalize` finalizes the wallet inputs (the borrower NFT among
- * them), then the offer (FullRepayment), running the covenant on the transaction.
+ * Builds the borrower's full repayment of `loan.state.remaining` at `loan.state.loanOutpoint`,
+ * blinded and ready to sign. Throws `PrincipalNotClaimedError` before building unless the borrower
+ * NFT comes from the principal claim. `finalize` finalizes the wallet inputs (the borrower NFT
+ * among them), then the loan (FullRepayment), running the covenant on the transaction.
  */
 export async function buildPrivateRepayment(
   deps: PrivateFlowDeps,
   offer: VerifiedOffer,
+  loan: Loan,
   params: RepaymentParams,
 ): Promise<UpdatedPset<RepaymentSummary>> {
   const { lwk, wasm } = deps
   if (offer.role !== 'borrower') throw new Error('Only the borrower repays a loan')
   const opened = offer.opened
+  const { state } = loan
   const borrowerNft = opened.borrowerNft()
   const lenderNft = opened.lenderNft()
   const principalAsset = opened.principalAsset()
+  const owed = state.remaining
+  if (owed === undefined) {
+    throw new Error(
+      'The amount still owed is unknown: an installment of this loan does not open with this ' +
+        "wallet's key",
+    )
+  }
+  if (owed === 0n) throw new Error('Nothing is owed: the zero-debt close closes this loan')
+  // Read now: `finalize` may run after the loan's state is freed.
+  const debtHash = state.debtHash
+  const debtCommitment = state.debtCommitment
+  const collateral = state.collateral()
 
   // 1. The inputs.
   const nftRef = parseOutpoint(params.borrowerNftOutpoint)
-  const offerRef = parseOutpoint(params.activeOfferOutpoint)
+  const loanRef = parseOutpoint(state.loanOutpoint)
   const nftInput = `${nftRef.txid}:${nftRef.vout}`
-  const offerInput = `${offerRef.txid}:${offerRef.vout}`
+  const loanInput = `${loanRef.txid}:${loanRef.vout}`
   if (params.principalCoins.length === 0) throw new Error('A repayment needs a principal coin')
   if (params.feeCoins.length === 0) throw new Error('A repayment needs a fee coin')
   const walletCoins = [...params.principalCoins, ...params.feeCoins]
   const walletInputs = walletCoins.map(outpointOf)
-  const inputs = [nftInput, offerInput, ...walletInputs]
+  const inputs = [nftInput, loanInput, ...walletInputs]
   if (new Set(inputs).size !== inputs.length) {
-    throw new Error(
-      'The borrower NFT, the active offer, the principal and fee coins must be distinct',
-    )
+    throw new Error('The borrower NFT, the loan, the principal and fee coins must be distinct')
   }
-  const repayment = opened.pinned(wasm.PinnedRole.Repayment)
-  const activeCollateral = opened.pinned(wasm.PinnedRole.ActiveCollateral)
+  // `A`, which the repayment carries: the pinned repayment's asset commitment.
+  const repaymentAsset = opened.pinned(wasm.PinnedRole.Repayment)
   if (
-    repayment.asset !== principalAsset ||
-    repayment.amount !== opened.repaymentAmount() ||
-    activeCollateral.asset !== opened.collateralAsset() ||
-    activeCollateral.amount !== opened.collateralAmount()
+    repaymentAsset.asset !== principalAsset ||
+    collateral.asset !== opened.collateralAsset() ||
+    collateral.amount !== opened.collateralAmount()
   ) {
     throw new Error('The pinned outputs do not carry the offer terms')
   }
@@ -159,10 +141,8 @@ export async function buildPrivateRepayment(
     }
     principalIn += secrets.value()
   }
-  if (principalIn < repayment.amount) {
-    throw new Error('The principal coins hold less than the repayment')
-  }
-  const principalChange = principalIn - repayment.amount
+  if (principalIn < owed) throw new Error('The principal coins hold less than the repayment')
+  const principalChange = principalIn - owed
   for (const coin of params.feeCoins) {
     if (coin.unblinded().asset().toString() !== deps.assets.policy) {
       throw new Error(`Fee coin ${outpointOf(coin)} is not the policy asset`)
@@ -172,44 +152,20 @@ export async function buildPrivateRepayment(
     throw new Error('The collateral must go to a confidential address')
   }
 
-  // 2. The covenant input and the borrower NFT, fetched and tied to this offer.
-  const [offerTx, nftTx] = await Promise.all([
-    deps.fetchTx(offerRef.txid),
-    deps.fetchTx(nftRef.txid),
-  ])
-  // Only this offer's acceptance or cancellation spends its pending offer, at input 0.
-  const pendingOffer = `${offer.creationTx.txid().toString()}:${CREATION_OUTPUT.pendingOffer}`
-  const acceptanceOffer = offerTx.inputs[ACCEPTANCE_INPUT.offer]?.outpoint()
-  if (
-    offerRef.vout !== ACCEPTANCE_OUTPUT.activeOffer ||
-    acceptanceOffer === undefined ||
-    `${acceptanceOffer.txid().toString()}:${acceptanceOffer.vout()}` !== pendingOffer
-  ) {
-    throw new Error("The active offer outpoint is not output 0 of this offer's acceptance")
-  }
-  const offerOutput = requireOutput(offerTx, offerRef.vout, 'The active offer')
-  if (offerOutput.scriptPubkey().toString() !== offer.scripts.activeOffer.toString()) {
-    throw new Error("The active offer outpoint is not locked to the offer's active script")
-  }
-  // The NFT's transaction must be the principal claim: it spends the principal output this
-  // acceptance pinned, which only the borrower NFT unlocks, and pays the NFT back at its output 0.
-  const principalOutpoint = `${offerRef.txid}:${ACCEPTANCE_OUTPUT.principal}`
-  const claimsPrincipal = nftTx.inputs.some(input => {
-    const spent = input.outpoint()
-    return `${spent.txid().toString()}:${spent.vout()}` === principalOutpoint
-  })
-  if (nftRef.vout !== PRINCIPAL_CLAIM_OUTPUT.borrowerNft || !claimsPrincipal) {
-    throw new PrincipalNotClaimedError(nftInput, principalOutpoint)
-  }
-  const nftOutput = requireOutput(nftTx, nftRef.vout, 'The borrower NFT')
-  if (nftOutput.asset()?.toString() !== borrowerNft || nftOutput.value() !== NFT_AMOUNT) {
-    throw new Error('The borrower NFT outpoint does not hold exactly the borrower NFT, explicit')
-  }
+  // 2. The borrower NFT and the loan, fetched and tied to this offer, the NFT to the claim.
+  const { nftTx, loanTx, loanScript } = await borrowerLoanInputs(
+    deps,
+    offer,
+    loan,
+    nftInput,
+    'repayment',
+  )
 
-  // 3. The outputs: the pinned repayment carries the lender's blinding key.
+  // 3. The outputs: the repayment is the debt, pinned, and carries the lender's blinding key.
   const lenderBlindingKey = opened.lenderBlindingKey()
   const principalAuth = pinnedAuthCovenant(deps, offer, 'principal')
   const repaymentAuth = pinnedAuthCovenant(deps, offer, 'repayment')
+  const installmentAuth = pinnedAuthCovenant(deps, offer, 'installment')
   const repaymentAddress = new lwk.Address(
     wasmStep('The repayment output address', () =>
       wasm.confidentialAddress(
@@ -248,14 +204,21 @@ export async function buildPrivateRepayment(
       },
       {
         script: repaymentAuth.script.toString(),
-        asset: repayment.asset,
-        amount: repayment.amount,
-        blinding: { kind: 'pinned', blindingKey: lenderBlindingKey, pinned: repayment },
+        asset: principalAsset,
+        amount: owed,
+        blinding: {
+          kind: 'pinned',
+          blindingKey: lenderBlindingKey,
+          pinned: {
+            assetCommitment: repaymentAsset.assetCommitment,
+            valueCommitment: debtCommitment,
+          },
+        },
       },
       {
         script: collateralReceiver.scriptPubkey().toString(),
-        asset: activeCollateral.asset,
-        amount: activeCollateral.amount,
+        asset: collateral.asset,
+        amount: collateral.amount,
         blinding: { kind: 'fresh', receiver: collateralReceiver },
       },
       ...changeOutputs,
@@ -264,9 +227,11 @@ export async function buildPrivateRepayment(
     restrictedScripts: [
       offer.scripts.pendingOffer.toString(),
       offer.scripts.activeOffer.toString(),
+      loanScript.toString(),
       offer.scripts.lenderNftLock.toString(),
       principalAuth.script.toString(),
       repaymentAuth.script.toString(),
+      installmentAuth.script.toString(),
     ],
     policyAsset: deps.assets.policy,
   }
@@ -287,11 +252,11 @@ export async function buildPrivateRepayment(
         maxWeightToSatisfy: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
       },
       {
-        outpoint: new lwk.OutPoint(offerInput),
-        prevout: requireOutput(offerTx, offerRef.vout, 'The active offer'),
-        asset: lwk.AssetId.fromString(activeCollateral.asset),
-        amount: activeCollateral.amount,
-        secrets: pinnedTxOutSecrets(deps, activeCollateral),
+        outpoint: new lwk.OutPoint(loanInput),
+        prevout: requireOutput(loanTx, loanRef.vout, 'The loan'),
+        asset: lwk.AssetId.fromString(collateral.asset),
+        amount: collateral.amount,
+        secrets: pinnedTxOutSecrets(deps, collateral),
         maxWeightToSatisfy: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.FullRepayment,
       },
       ...walletCoins.map((coin, index) => walletCoinInput(deps, coin, walletPrevouts[index])),
@@ -300,14 +265,14 @@ export async function buildPrivateRepayment(
       { script: burn, amount: NFT_AMOUNT, asset: lwk.AssetId.fromString(borrowerNft) },
       {
         script: repaymentAddress.scriptPubkey(),
-        amount: repayment.amount,
-        asset: lwk.AssetId.fromString(repayment.asset),
+        amount: owed,
+        asset: lwk.AssetId.fromString(principalAsset),
         blindingPubkey: repaymentAddress.blindingPubkey(),
       },
       {
         script: collateralReceiver.scriptPubkey(),
-        amount: activeCollateral.amount,
-        asset: lwk.AssetId.fromString(activeCollateral.asset),
+        amount: collateral.amount,
+        asset: lwk.AssetId.fromString(collateral.asset),
         blindingPubkey: collateralReceiver.blindingPubkey(),
       },
       ...(principalChange > 0n
@@ -327,18 +292,18 @@ export async function buildPrivateRepayment(
   // 5. The layout of the unblinded PSET.
   assertSpendLayout(deps, unblinded, layout, false, 'Repayment')
 
-  // 6. Blinding: the repayment with its pinned blinders; the other outputs fresh.
+  // 6. Blinding: the repayment with the debt's opening; the other outputs fresh.
   const blindedBase64 = wasmStep('Blinding the repayment', () =>
     wasm.blindPset(
       unblinded.toString(),
       [
         wasm.InputSecret.explicit(REPAYMENT_INPUT.borrowerNft, borrowerNft, NFT_AMOUNT),
-        opened.inputSecret(wasm.PinnedRole.ActiveCollateral, REPAYMENT_INPUT.offer),
+        state.loanInputSecret(REPAYMENT_INPUT.offer),
         ...walletCoins.map((coin, index) =>
           walletInputSecret(deps, coin, REPAYMENT_INPUT.offer + 1 + index),
         ),
       ],
-      [opened.pinnedBlinding(wasm.PinnedRole.Repayment, REPAYMENT_OUTPUT.repayment)],
+      [state.repaymentBlinding(REPAYMENT_OUTPUT.repayment)],
     ),
   )
   const blinded = new lwk.Pset(blindedBase64)
@@ -348,9 +313,11 @@ export async function buildPrivateRepayment(
   const builtTxid = new lwk.Pset(blindedBase64).extractTx().txid().toString()
   const prevouts = () => [
     requireOutput(nftTx, nftRef.vout, 'The borrower NFT'),
-    requireOutput(offerTx, offerRef.vout, 'The active offer'),
+    requireOutput(loanTx, loanRef.vout, 'The loan'),
     ...prevoutsOf(walletPrevoutTxs, walletInputs),
   ]
+  const interest = opened.repaymentAmount() - opened.principalAmount()
+  const collateralAmount = collateral.amount
 
   // 8. Sign (by the caller), then finalize the wallet inputs and the covenant.
   return {
@@ -364,10 +331,10 @@ export async function buildPrivateRepayment(
         deps,
         signed,
         offer,
-        true,
+        offer.scripts.activeSpendInfoAt(debtHash),
         prevouts(),
         REPAYMENT_INPUT.offer,
-        'FullRepayment',
+        { branch: 'FullRepayment', debtHash },
       )
       const txid = finalizedTx.txid().toString()
       if (txid !== builtTxid) throw new Error('Finalizing changed the repayment')
@@ -378,9 +345,9 @@ export async function buildPrivateRepayment(
         summary: {
           repaymentOutpoint: `${txid}:${REPAYMENT_OUTPUT.repayment}`,
           collateralOutpoint: `${txid}:${REPAYMENT_OUTPUT.collateral}`,
-          collateral: activeCollateral.amount,
-          repayment: repayment.amount,
-          interest: repayment.amount - opened.principalAmount(),
+          collateral: collateralAmount,
+          repayment: owed,
+          interest,
         },
       }
     },
