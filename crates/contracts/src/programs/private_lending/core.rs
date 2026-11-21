@@ -261,8 +261,9 @@ impl PrivateLendingOffer {
     /// Spends the pending offer and the locked lender NFT (inputs 0 and 1) into the active offer
     /// (output 0) and the pinned principal (output 1), whose range proof carries the lender's
     /// `message` to the borrower, if any: signed by the lender's lending key for
-    /// [`MessagePhase::Acceptance`](private_lending_core::MessagePhase::Acceptance) of this offer,
-    /// which only the lender's key can check. The caller adds the lender NFT output (output 2).
+    /// [`MessagePhase::Acceptance`](private_lending_core::MessagePhase::Acceptance) of this offer.
+    /// The borrower reads it and checks the signature against the lender's key in the terms. The
+    /// caller adds the lender NFT output (output 2).
     ///
     /// # Panics
     /// Panics if the transaction already has inputs or outputs.

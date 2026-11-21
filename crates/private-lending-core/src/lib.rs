@@ -10,10 +10,9 @@
 //!
 //! Signing the terms ([`SignedTerms::sign`]) or a message ([`SignedMessage::sign`]) draws its
 //! auxiliary randomness from `rand`'s thread RNG, as does a caller that passes `rand::thread_rng()`
-//! to [`blind_pset`]. The thread RNG seeds
-//! from the operating system through `getrandom`, which on `wasm32-unknown-unknown` has no source
-//! unless its `js` feature is enabled: a wasm build must depend on `getrandom` 0.2 (the version
-//! `rand` 0.8 uses) with `features = ["js"]`.
+//! to [`blind_pset`]. The thread RNG seeds from the operating system through `getrandom`, which on
+//! `wasm32-unknown-unknown` has no source unless its `js` feature is enabled: a wasm build must
+//! depend on `getrandom` 0.2 (the version `rand` 0.8 uses) with `features = ["js"]`.
 
 mod blind;
 mod creation;

@@ -145,7 +145,8 @@ pub enum MessageError {
     NotUtf8,
     /// The signature does not sign the message for this sender, phase and offer.
     BadSignature,
-    /// The signature does not parse.
+    /// The signature does not parse. `SignedMessage::decode` never gives it: it takes exactly 64
+    /// bytes, and any 64 bytes parse as a Schnorr signature (only the check can refuse them).
     Malformed,
 }
 
