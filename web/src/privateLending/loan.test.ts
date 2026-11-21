@@ -292,7 +292,7 @@ describe('loadLoan', () => {
     expect(readBack({ ...expected, successorDebtHash: fixture.loan.debt_hashes[0] })).toThrow(
       refused,
     )
-    // read with the lender's key, as a build blinded to the wrong key would be
+    // the lender's key, not the one the loan was read with, is refused (`bad-input`)
     expect(() =>
       assertInstallmentReadsBack(offer, before, keys.lender, installmentHex, expected),
     ).toThrow()
