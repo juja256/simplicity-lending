@@ -11,6 +11,7 @@ import CancelPrivateOfferModal from '@/components/modals/private/CancelPrivateOf
 import ClaimPrincipalModal from '@/components/modals/private/ClaimPrincipalModal'
 import CloseZeroDebtModal from '@/components/modals/private/CloseZeroDebtModal'
 import CreatePrivateOfferModal from '@/components/modals/private/CreatePrivateOfferModal'
+import { MessagesLink } from '@/components/modals/private/LoanMessagesModal'
 import RepayPrivateOfferModal from '@/components/modals/private/RepayPrivateOfferModal'
 import Notice from '@/components/Notice'
 import { OffersLoadError } from '@/components/OffersLoadError'
@@ -190,8 +191,9 @@ interface LoanRowProps {
 }
 
 /**
- * One loan: its lender by name and key, what it lends against what, its status, and the one
- * action that applies now (`offerActionState`) with the note why or what it waits for.
+ * One loan: its lender by name and key, the link to its messages if it has any, what it lends
+ * against what, its status, and the one action that applies now (`offerActionState`) with the
+ * note why or what it waits for.
  */
 function LoanRow({ item, lenderName, tipHeight, loan, state, onOpen }: LoanRowProps) {
   const { discardPrivateTx } = usePendingTransactions()
@@ -213,6 +215,7 @@ function LoanRow({ item, lenderName, tipHeight, loan, state, onOpen }: LoanRowPr
               <KeyFingerprint fingerprint={lender.fingerprint} />
             </p>
           )}
+          {isOpenedOffer(item) && <MessagesLink item={item} />}
         </div>
         {status !== null && (
           <StatusLine tone={toneOf(status)} isProcessing={isProcessing}>

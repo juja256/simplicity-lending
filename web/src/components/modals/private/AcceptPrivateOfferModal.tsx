@@ -4,13 +4,14 @@ import { useId, useMemo, useState } from 'react'
 import { useBlockHeight } from '@/api/esplora/hooks'
 import { fetchLatestBlockHeight } from '@/api/esplora/methods'
 import MessageField from '@/components/MessageField'
+import { MessageEntry } from '@/components/MessageTimeline'
 import Notice from '@/components/Notice'
 import { OfferStatusChip } from '@/components/OfferStatusChip'
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { buildPrivateAcceptance } from '@/privateLending/flows/acceptance'
 import { openSentMessages } from '@/privateLending/hooks/usePrivateOffers'
-import { messageError, messageToSend } from '@/privateLending/messages'
+import { MESSAGE_NOTE, messageError, messageToSend } from '@/privateLending/messages'
 import { canStillAccept, checkStillAcceptable, TERM_PASSED_NOTE } from '@/privateLending/offerView'
 import type { TermsVerdict } from '@/privateLending/proposalCheck'
 import { recordingSent } from '@/privateLending/sentMessages'
@@ -35,6 +36,40 @@ function verdictReasons(verdict: Exclude<TermsVerdict, { kind: 'within' }>): str
   return verdict.reason === 'no-terms'
     ? ['you have no published terms to check it against']
     : ['your published terms do not verify, so it cannot be checked against them']
+}
+
+/**
+ * The borrower's message with the proposal, part of its signed terms: plain text, with its sender
+ * and the note that the contract does not enforce it.
+ */
+function ProposalMessage({
+  item,
+  borrowerName,
+}: {
+  item: PrivateOfferActionModalProps['item']
+  borrowerName: string | undefined
+}) {
+  const headingId = useId()
+  const { message } = item.terms
+  if (message === undefined) return null
+  return (
+    <section aria-labelledby={headingId} className='flex flex-col gap-2'>
+      <h3 id={headingId} className='text-foreground text-sm font-medium'>
+        Message from the borrower
+      </h3>
+      <MessageEntry
+        message={{
+          phase: 'creation',
+          from: 'borrower',
+          txid: item.txid,
+          state: 'verified',
+          text: message,
+        }}
+        sender={{ name: borrowerName, fingerprint: item.terms.borrowerFingerprint }}
+      />
+      <p className='text-muted text-xs'>{MESSAGE_NOTE}</p>
+    </section>
+  )
 }
 
 /**
@@ -94,9 +129,9 @@ interface AcceptPrivateOfferModalProps extends PrivateOfferActionModalProps {
  * The lender accepts a pending offer: it pays the principal, locked to the borrower NFT, and
  * receives the lender NFT at its wallet address. A proposal outside the lender's terms, or one
  * that could not be checked against them, lists why, and is accepted only once the lender ticks
- * "Accept outside my terms". The lender may add a private message to the borrower, which the
- * principal output carries; the acceptance is recorded with its text, or none, among the
- * messages this browser sent.
+ * "Accept outside my terms". The borrower's message, if any, shows above the terms. The lender
+ * may add a private message to the borrower, which the principal output carries; the acceptance
+ * is recorded with its text, or none, among the messages this browser sent.
  */
 export default function AcceptPrivateOfferModal({
   verdict,
@@ -185,6 +220,7 @@ export default function AcceptPrivateOfferModal({
       disabled={insufficientBalance || needsTick || messageTooLong}
       notice={
         <div className='flex flex-col gap-4'>
+          <ProposalMessage item={props.item} borrowerName={props.counterpartyName} />
           <TermsSection
             verdict={verdict}
             acceptOutside={acceptOutside}

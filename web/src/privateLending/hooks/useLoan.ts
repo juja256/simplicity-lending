@@ -4,12 +4,15 @@
 // holds its blinders, is freed once read. A loan output's history never changes, so a loan is read
 // once per loan output and session; a new installment or a close moves the loan to another one. A
 // read that failed is tried again every 30 seconds, as a transient esplora error must not hide the
-// loan's actions for good.
+// loan's actions for good. The same read copies out the messages of the acceptance and the
+// installments (`loanChainMessages`), which the loan's timeline shows; a message that does not
+// read never fails the loan.
 import { useQueries, useQuery, type UseQueryOptions } from '@tanstack/react-query'
 import { useCallback } from 'react'
 
 import { latestLoanUtxo, utxoOutpoint } from '@/privateLending/candidate'
 import { loadLoan, type Loan } from '@/privateLending/loan'
+import { type LoanChainMessages, loanChainMessages } from '@/privateLending/loanMessages'
 import type { OpenedOfferItem } from '@/privateLending/offerView'
 import { loadVerifiedOffer } from '@/privateLending/scan'
 import { useLwk } from '@/providers/lwk/useLwk'
@@ -33,6 +36,11 @@ export interface LoanFigures {
   remaining: bigint | undefined
 }
 
+/** What `useLoan` reads of a loan: its figures, and the messages of its transactions. */
+export interface LoanWithMessages extends LoanFigures {
+  messages: LoanChainMessages
+}
+
 /** The figures of `loan`, read from its state, which the caller still frees. */
 export function loanFigures(loan: Loan): LoanFigures {
   const { state } = loan
@@ -51,13 +59,13 @@ export function loanFigures(loan: Loan): LoanFigures {
 }
 
 /** The query of an item's loan, the same for `useLoan` and `useLoans`. */
-function useLoanQuery(): (item: OpenedOfferItem) => UseQueryOptions<LoanFigures> {
+function useLoanQuery(): (item: OpenedOfferItem) => UseQueryOptions<LoanWithMessages> {
   const { network } = useLwk()
   const { isReady, privateCapable, scriptPubkey, getLendingKey } = useWallet()
   const getDeps = usePrivateFlowDeps()
 
   return useCallback(
-    (item: OpenedOfferItem): UseQueryOptions<LoanFigures> => {
+    (item: OpenedOfferItem): UseQueryOptions<LoanWithMessages> => {
       const utxo = latestLoanUtxo(item.candidate)
       const loanOutpoint = utxo ? utxoOutpoint(utxo) : ''
       return {
@@ -82,7 +90,8 @@ function useLoanQuery(): (item: OpenedOfferItem) => UseQueryOptions<LoanFigures>
           try {
             const loan = await loadLoan(deps, offer, key, loanOutpoint)
             try {
-              return loanFigures(loan)
+              const messages = loanChainMessages(deps.wasm, offer, key, role, loan)
+              return { ...loanFigures(loan), messages }
             } finally {
               loan.state.free()
             }
@@ -97,9 +106,9 @@ function useLoanQuery(): (item: OpenedOfferItem) => UseQueryOptions<LoanFigures>
 }
 
 /**
- * The `Loan` of an opened offer, for either party, as its plain figures: read by `loadLoan` from
- * the loan output the indexer lists (`latestLoanUtxo`), and keyed by it. Disabled for an offer
- * that was never accepted.
+ * The `Loan` of an opened offer, for either party, as its plain figures and messages: read by
+ * `loadLoan` from the loan output the indexer lists (`latestLoanUtxo`), and keyed by it. Disabled
+ * for an offer that was never accepted.
  */
 export function useLoan(item: OpenedOfferItem) {
   const query = useLoanQuery()
