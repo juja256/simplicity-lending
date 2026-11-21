@@ -345,8 +345,8 @@ fn installment_releases_with_the_largest_remainder(
     Ok(())
 }
 
-/// The successor's amount and asset: `c' ± 1`, with the proof of that amount, and the asset
-/// commitment plus `2G` with the honest value commitment and proof.
+/// The successor's amount and asset: `c' ± 1`, with the proof of that amount or of the honest
+/// `c'`, and the asset commitment plus `2G` with the honest value commitment and proof.
 #[simplex::test]
 fn installment_refuses_another_successor(context: simplex::TestContext) -> anyhow::Result<()> {
     let borrower = context.get_default_signer();
@@ -358,21 +358,26 @@ fn installment_refuses_another_successor(context: simplex::TestContext) -> anyho
     let held = honest.successor_collateral.amount;
     let (x, y) = setup.secrets.release_blinders(step + 1);
 
-    // c' + 1 and c' − 1 under the step's blinder, each proved as if honest
+    // c' + 1 and c' − 1 under the step's blinder, each proved with the amount output 1 holds, so
+    // that E2 holds and E7 fails; then with the honest c', so that E7 holds and E2 (V2), which
+    // ties output 1's value commitment to the proved c', fails alone
     for amount in [held + 1, held - 1] {
-        let mut parts = InstallmentParts {
-            successor_collateral: setup.parameters.loan_collateral(
-                &setup.secrets,
-                step + 1,
-                amount,
-            ),
-            ..honest.clone()
-        };
-        let mut secrets = parts.honest_secrets(&setup, &loan, (x, y));
-        secrets.c_next = amount;
-        parts.prove(&setup, &secrets);
+        for claimed in [amount, held] {
+            let mut parts = InstallmentParts {
+                successor_collateral: setup.parameters.loan_collateral(
+                    &setup.secrets,
+                    step + 1,
+                    amount,
+                ),
+                ..honest.clone()
+            };
+            let mut secrets = parts.honest_secrets(&setup, &loan, (x, y));
+            assert_eq!(secrets.c_next, held);
+            secrets.c_next = claimed;
+            parts.prove(&setup, &secrets);
 
-        assert_parts_rejected(&setup, &loan, &parts, borrower)?;
+            assert_parts_rejected(&setup, &loan, &parts, borrower)?;
+        }
     }
 
     // the asset commitment two steps on, its value commitment and the proof the honest ones

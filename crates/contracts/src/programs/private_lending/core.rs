@@ -984,6 +984,9 @@ mod tests {
     #[test]
     fn program_checks_the_witness_points_on_the_curve() {
         let source = PrivateLendingProgram::SOURCE;
+        assert!(source.contains(
+            "fn check_on_curve(point: Ge) {\n    assert!(jet::ge_is_on_curve(point));\n}"
+        ));
         let check_m = source
             .find("fn check_blinder_commitment(")
             .expect("the program checks equation M");

@@ -25,15 +25,17 @@ use simplex::simplicityhl::elements::{
 
 use lending_contracts::artifacts::private_lending::derived_private_lending::PrivateLendingWitness;
 use lending_contracts::programs::private_lending::{
-    PrivateLendingOffer, PrivateLendingParameters, PrivateLendingWitnessBranch,
+    InstallmentRelease, PrivateLendingOffer, PrivateLendingParameters, PrivateLendingWitnessBranch,
 };
 use lending_contracts::programs::program::SimplexProgram;
+use lending_contracts::utils::confidential::ConfidentialTransaction;
 use lending_contracts::utils::confidential::PinnedOutput;
 use private_lending_core::{
-    BlinderTree, DebtOpening, LEAF_IV, LendingKey, NewOffer, OfferSecrets, OfferTerms,
+    BlinderTree, DebtOpening, LEAF_IV, LendingKey, MAX_STEPS, NewOffer, OfferSecrets, OfferTerms,
     ReleaseProof, ReleaseSecrets, ReleaseStatement, carry_remainder, collateral_at, debt_after,
     fold_path, prove, verify,
 };
+use simplex::transaction::UTXO;
 
 use super::setup::{blinder_commitment, statement_of};
 
@@ -134,6 +136,12 @@ impl OffChainLoan {
     /// The honest installment at `step` of a loan that owes `debt`, paying `payment`, with random
     /// blinders for the debt, the payment and the carries.
     fn installment(&self, step: u32, debt: u64, payment: u64) -> Installment {
+        self.installment_holding(step, debt, payment, 0)
+    }
+
+    /// [`Self::installment`] whose successor holds `extra` units more than `c'`, under the step's
+    /// blinders, proved with the honest secrets: E2 alone fails when `extra` is not 0.
+    fn installment_holding(&self, step: u32, debt: u64, payment: u64, extra: i64) -> Installment {
         let pinned = self.parameters.pinned;
         let (collateral, full) = (self.collateral(), self.repayment());
         let debt = if step == 0 {
@@ -169,7 +177,9 @@ impl OffChainLoan {
             successor: self.parameters.loan_collateral(
                 &self.secrets,
                 step + 1,
-                collateral_at(debt_left.amount, collateral, full),
+                collateral_at(debt_left.amount, collateral, full)
+                    .checked_add_signed(extra)
+                    .expect("a successor amount"),
             ),
             carries,
             y: blinder_commitment(&x, &y),
@@ -398,8 +408,9 @@ fn plus_one(scalar: &Scalar) -> Scalar {
 }
 
 /// The honest proof at the first and at a later step; each response one more; each commitment
-/// plus `G`; and each of the statement's points that the transaction carries changed after the
-/// proof: the program and the core agree on every one.
+/// plus `G`; each of the statement's points that the transaction carries changed after the proof;
+/// and a successor of `c' + 1` proved with `c'`, which only V2 refuses: the program and the core
+/// agree on every one.
 #[simplex::test]
 fn the_program_and_verify_agree_on_tampered_proofs(context: simplex::TestContext) {
     let loan = OffChainLoan::new(*context.get_network());
@@ -449,6 +460,18 @@ fn the_program_and_verify_agree_on_tampered_proofs(context: simplex::TestContext
             let pset = loan.transaction(&tampered);
             assert_verdicts(&format!("{name} changed"), &loan, &tampered, &pset, false);
         }
+
+        // output 1 holds c' + 1 under the step's blinder, and the proof is of that statement with
+        // the honest c': E3 and E7 hold, and only V2 ties V_s to the proved c'
+        let unproved = loan.installment_holding(step, debt, payment, 1);
+        let unproved_pset = loan.transaction(&unproved);
+        assert_verdicts(
+            "V_s of c' + 1, proved with c'",
+            &loan,
+            &unproved,
+            &unproved_pset,
+            false,
+        );
 
         // Y, which the tree binds
         let mut moved = honest;
@@ -535,4 +558,98 @@ fn the_program_refuses_points_off_the_curve(context: simplex::TestContext) {
 
         assert!(!program_accepts(&loan, &honest, &pset, &witness));
     }
+}
+
+/// The last step that has a leaf, 1023, whose Merkle path has every bit set: the honest
+/// installment passes both verifiers, a response one more and a successor of `c' + 1` proved with
+/// `c'` fail both.
+#[simplex::test]
+fn the_program_and_verify_agree_at_the_last_step(context: simplex::TestContext) {
+    let loan = OffChainLoan::new(*context.get_network());
+    let step = MAX_STEPS - 1;
+    assert!(loan.tree.path(step).iter().all(|(is_right, _)| *is_right));
+
+    let honest = loan.installment(step, 5_000, 100);
+    let pset = loan.transaction(&honest);
+    assert_verdicts("honest at step 1023", &loan, &honest, &pset, true);
+
+    let mut tampered = honest;
+    tampered.proof.z[3] = plus_one(&tampered.proof.z[3]);
+    assert_verdicts("z[3] + 1 at step 1023", &loan, &tampered, &pset, false);
+
+    let unproved = loan.installment_holding(step, 5_000, 100, 1);
+    let unproved_pset = loan.transaction(&unproved);
+    assert_verdicts(
+        "V_s of c' + 1 at step 1023",
+        &loan,
+        &unproved,
+        &unproved_pset,
+        false,
+    );
+}
+
+/// Step 1024 has no leaf for its successor's blinders: the witness refuses it.
+#[simplex::test]
+#[should_panic(expected = "A loan at step 1024 has no installment left")]
+fn the_witness_refuses_step_1024(context: simplex::TestContext) {
+    let loan = OffChainLoan::new(*context.get_network());
+    let honest = loan.installment(0, 11_000, 3_999);
+
+    PrivateLendingWitnessBranch::Installment {
+        debt: honest.debt.commitment(&loan.parameters.pinned.repayment),
+        step: MAX_STEPS,
+        blinder_commitment: honest.y,
+        path: loan.tree.path(0),
+        proof: honest.proof,
+    }
+    .build_witness();
+}
+
+/// After 1024 installments the builder offers only the full repayment.
+#[simplex::test]
+#[should_panic(expected = "The loan has had 1024 installments: only the full repayment is left")]
+fn the_builder_refuses_an_installment_at_step_1024(context: simplex::TestContext) {
+    let loan = OffChainLoan::new(*context.get_network());
+    let offer_pinned = loan.parameters.pinned;
+    let offer = PrivateLendingOffer::new_active_at(
+        loan.parameters,
+        offer_pinned.repayment.value_commitment(),
+        MAX_STEPS,
+    );
+    let coin = |vout: u32, txout: TxOut| UTXO {
+        outpoint: OutPoint::new(Txid::from_byte_array([0xdd; 32]), vout),
+        txout,
+        secrets: None,
+    };
+    let anyone = Script::from(vec![0x51]);
+    let key = SecretKey::from_slice(&[7; 32]).expect("a key");
+    let public_key = simplex::simplicityhl::elements::bitcoin::PublicKey::new(
+        PublicKey::from_secret_key(SECP256K1, &key),
+    );
+
+    offer.attach_installment(
+        &mut ConfidentialTransaction::new(),
+        coin(
+            0,
+            explicit(loan.parameters.borrower_nft_asset_id, 1, anyone.clone()),
+        ),
+        coin(
+            1,
+            pinned(offer_pinned.active_collateral, offer.get_script_pubkey()),
+        ),
+        anyone.clone(),
+        offer_pinned.repayment.with_amount(1),
+        public_key,
+        key,
+        None,
+        InstallmentRelease {
+            borrower: &loan.borrower,
+            secrets: &loan.secrets,
+            debt: DebtOpening::of(&offer_pinned.repayment),
+            principal_coins: Vec::new(),
+            carries: Vec::new(),
+            release_receiver: anyone,
+            release_blinding_key: public_key,
+        },
+    );
 }
