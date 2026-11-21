@@ -876,6 +876,9 @@ installment = ( debt: (bool, u256),           D in Elements' encoding, as in pha
 | Full repayment | 0 borrower NFT, 1 loan | 0 borrower NFT burn, 1 repayment | `h` |
 | Liquidation | 0 loan, 1 lender NFT | 0 lender NFT burn | `h`, salt, expiry |
 
+In the installment, the inputs from 2 on are the principal coins, then the carries, then the fee
+coins, so that input 2 is the first principal coin (see "Transactions").
+
 **The installment checks, in order** (run by the loan input at index 1):
 
 1. `jet::current_index()` is 1. Input 1's script hash is the storage address (active, `h(A, D)`)
@@ -898,7 +901,9 @@ installment = ( debt: (bool, u256),           D in Elements' encoding, as in pha
     curve points. The `T`s are checked to be on the curve.
 11. It computes the challenge and checks V1 to V7.
 
-Inputs from index 2 on, and outputs from index 5 on, are not constrained.
+Inputs from index 2 on, and outputs from index 5 on, are not constrained. The carry inputs are among
+them: `asset_auth` unlocks them through the borrower NFT at input 0 and output 0, whatever their
+index.
 
 **The other branches:**
 
@@ -938,10 +943,14 @@ for by its own witness. The program was about 6.0 kB and the witness 1.2 kB.
 
 - **Inputs:**
   - 0 the borrower NFT and 1 the loan.
-  - 2 and 3 the carries `W1_k` and `W2_k` of the previous installment. At the first installment
+  - From 2, the principal coins, as in phase 5. Input 2 is the first principal coin, from which
+    output 2's ephemeral key derives (phase 5's `installment_ephemeral_key`).
+  - Then the carries `W1_k` and `W2_k` of the previous installment. At the first installment
     there is one carry input: creation's output 4.
-  - Then the principal coins, then the fee coins.
-  - The carry inputs run `asset_auth` with the NFT at input 0 and output 0.
+  - Then the fee coins.
+  - The carry inputs run `asset_auth` with the NFT at input 0 and output 0, whatever their index.
+  - **A carry never occupies input 2.** Every build at a step spends the same carries, so a carry
+    at input 2 would give every rebuild the same output-2 key (proofs, O11).
 - **Outputs:**
   - 0 the borrower NFT and 1 the successor loan.
   - 2 the installment: under `A`, blinded to the lender with the derived ephemeral key, as in
@@ -962,8 +971,8 @@ for by its own witness. The program was about 6.0 kB and the witness 1.2 kB.
 
 **Full repayment.** The phase 5 layout, plus the carries:
 
-- The app also spends the two carries (with `asset_auth`; phase 5 notes that the no-burn lock
-  accepts the NFT's burn output).
+- The app also spends the two carries, after the principal coins as in the installment (with
+  `asset_auth`; phase 5 notes that the no-burn lock accepts the NFT's burn output).
 - It burns their `R + 1` units in one confidential `OP_RETURN`.
 - The collateral `c_k` goes to the borrower.
 - **The burns hide `R`.** Both confidential burns, `S − R − 1` at the first installment and `R + 1`
@@ -1018,8 +1027,8 @@ The borrower's app refuses to create an offer outside these bounds.
   point. Then only the link between the two builds is revealed (proofs, L1).
 - The app saves a build before its first broadcast and rebroadcasts it.
 - **A saved build that can no longer be broadcast** (a coin it spends was spent, or the fee must
-  rise) may be rebuilt only with the same amount `p`, and with a first wallet input (input 2) that
-  no saved, discarded or failed installment of the loan used.
+  rise) may be rebuilt only with the same amount `p`, and with a first wallet input (input 2, the
+  first principal coin) that no saved, discarded or failed installment of the loan used.
   - The fresh input keeps output 2's derived ephemeral key fresh. Phase 5 derives that key from the
     lending key, the loan outpoint, the first wallet input and output 0's script, so a rebuild on
     the same inputs would reuse it for a new commitment.
@@ -1131,6 +1140,11 @@ wasm tests.
 **Parity:** `pnpm parity` covers the new derivations, the witness encoding and the release
 arithmetic.
 
+**Flow (web):**
+
+- two same-amount builds of an installment at one step derive different output-2 ephemeral keys;
+- no build puts a carry at input 2 (proofs, O11).
+
 **Indexer:** the `carry` type, carry spends, and the creation layout.
 
 **e2e:**
@@ -1153,8 +1167,11 @@ arithmetic.
   `h₇`; `J` by try-and-increment; and the IVs and `FS_IV` with their tags.
 - **On-curve checks** of the witness's `T`s and `Y`. The spike did not check them. An off-curve
   point would break the group-law argument the proofs rely on.
-- **The layouts:** the installment's input and output indices with the borrower NFT, and the
-  zero-debt close removed, which reshapes the witness path.
+- **The layouts:**
+  - the installment's input and output indices with the borrower NFT;
+  - the carry inputs after the principal coins, so that input 2 stays the first principal coin, as
+    phase 5's output-2 key requires;
+  - the zero-debt close removed, which reshapes the witness path.
 
 ### Left to the builder
 

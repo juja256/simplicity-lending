@@ -1081,6 +1081,10 @@ The edges `e = 0` and `e = R − 1` give the carries `(1, R)` and `(R, 1)`. A re
       already enforces this: phase 6's `installmentTraceInputs` (`web/src/privateLending/
       repayPlan.ts`) keeps every such installment's first wallet input out of the loan's next
       build.
+    - This works only because input 2 is a wallet coin, the first principal coin, and never a
+      carry (O11). Every build at a step spends the same carries, so a carry at input 2 would
+      give every rebuild the same output-2 key. Coin selection excludes only wallet coins, so the
+      trace set could not prevent that.
     - Then the successor is the same point, and only the link leaks.
     - A build that never becomes public leaks nothing (by A3 and Theorem 5, not Theorem 7).
   - The same holds for anyone who sends an output with asset commitment `A_c + j·G` to the loan's
@@ -1195,6 +1199,16 @@ The proofs assume all of these:
   - The implementer confirms from Elements' source what such a proof's header reveals, and chooses
     the parameters accordingly.
   - The note's "Full repayment" lists this rule.
+- **O11, input 2 is never a carry.** In the installment, the inputs from 2 on are the principal
+  coins, then the carries (one at the first installment, two after), then the fee coins. So input
+  2 is the first principal coin, from which phase 5's `installment_ephemeral_key` derives output
+  2's ephemeral key.
+  - The program does not constrain inputs from index 2 on. `asset_auth` unlocks the carries
+    through the borrower NFT at input 0 and output 0, whatever their index.
+  - L1's rebuild rule depends on O11.
+  - **The test obligation:** two same-amount builds of an installment at one step derive different
+    output-2 ephemeral keys, and no build puts a carry at input 2. The note's done-when lists it
+    under "Flow (web)".
 
 ## 14. Map of the claims
 
@@ -1205,21 +1219,22 @@ revision.
 |---|---|---|---|
 | Special soundness, HVZK, shared responses | Thm 1 | E1–E7 669–679, V1–V7 732–759 | none |
 | The integer argument | Thm 2, Thm 4 | 704–730 | A1, A2, O9 |
-| No overpayment, release rule | Cor 4.1 | 628–637, 661–679, 1005–1011 | as Thm 4 |
+| No overpayment, release rule | Cor 4.1 | 628–637, 661–679, 1014–1020 | as Thm 4 |
 | Challenge as a random oracle | §6.1, Lem 6.1, Thm 3 | 761–785 | A4, A8 |
-| Binding of the index | Lem 5.1, 5.2 | checks 879–890; 990–1003 | A4, O9 |
-| Binding of the leaf | Lem 5.3, Cor 5.4 | 699–702, 787–798, check 892 | A5, A1 |
-| Soundness of the installment | Thm 4 | 661–730, checks 879–901 | A1, A2, A4, A5, A8 |
+| Binding of the index | Lem 5.1, 5.2 | checks 882–893; 999–1012 | A4, O9 |
+| Binding of the leaf | Lem 5.3, Cor 5.4 | 699–702, 787–798, check 895 | A5, A1 |
+| Soundness of the installment | Thm 4 | 661–730, checks 882–906 | A1, A2, A4, A5, A8 |
 | `J` nothing-up-my-sleeve | Lem 2.1 | 800–806 | A8 |
 | Zero knowledge | Thm 5 | 746–759, 812–821 | A7, A8 |
 | Nonce derivation | Thm 6 | 812–821 | A1, A7, A8 |
-| Hiding of `V_k` given `Y_k` | Lem 10.1, Thm 7 | 642–652, 956–957 | A3, A6, A7, A8 |
-| What the lender learns | Thm 7′ | 979–986, 1038–1043 | as Thm 5 |
-| The lender's search | Thm 8 | 979–986, 1038–1043 | as Thm 4 |
-| Completeness | Prop 9 | 937–961 | none |
-| The rebuild leak and its rule | L1 | 1013–1028 | A6 (freshness) |
-| The lender's checks at acceptance | O9 | 990–1003 | none |
-| The burns hide `R` | O10 | 953–954, 963–972 | A3 |
+| Hiding of `V_k` given `Y_k` | Lem 10.1, Thm 7 | 642–652, 965–966 | A3, A6, A7, A8 |
+| What the lender learns | Thm 7′ | 988–995, 1047–1052 | as Thm 5 |
+| The lender's search | Thm 8 | 988–995, 1047–1052 | as Thm 4 |
+| Completeness | Prop 9 | 942–970 | none |
+| The rebuild leak and its rule | L1 | 1022–1037 | A6 (freshness) |
+| The lender's checks at acceptance | O9 | 999–1012 | none |
+| The burns hide `R` | O10 | 962–963, 972–981 | A3 |
+| Input 2 is never a carry | O11 | 879–880, 904–906, 942–953, 1143–1146 | none |
 
 ## References
 
