@@ -361,7 +361,7 @@ fn nonces(
 }
 
 /// The curve point of a public key.
-fn to_point(key: &PublicKey) -> ProjectivePoint {
+pub(crate) fn to_point(key: &PublicKey) -> ProjectivePoint {
     let encoded =
         EncodedPoint::from_bytes(key.serialize()).expect("a compressed key is a SEC1 encoding");
     let affine: Option<AffinePoint> = AffinePoint::from_encoded_point(&encoded).into();
@@ -382,7 +382,7 @@ fn to_public_key(point: &ProjectivePoint) -> Option<PublicKey> {
 }
 
 /// A scalar for k256's arithmetic.
-fn to_k256(value: &Scalar) -> k256::Scalar {
+pub(crate) fn to_k256(value: &Scalar) -> k256::Scalar {
     Option::from(k256::Scalar::from_repr(value.to_be_bytes().into()))
         .expect("a scalar is below the curve order")
 }
@@ -398,7 +398,7 @@ fn blinder_scalar(blinder: &ValueBlindingFactor) -> Scalar {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use elements::AssetId;
     use elements::confidential::AssetBlindingFactor;
     use elements::hashes::{Hash, sha256};
@@ -430,12 +430,12 @@ mod tests {
     }
 
     /// A loan of the fixed offer: shared secret 0x80..=0x9f, as `release.rs`'s known answers.
-    struct Loan {
-        secrets: OfferSecrets,
-        pinned: OfferPinned,
+    pub(crate) struct Loan {
+        pub(crate) secrets: OfferSecrets,
+        pub(crate) pinned: OfferPinned,
     }
 
-    fn loan(collateral: u64, repayment: u64) -> Loan {
+    pub(crate) fn loan(collateral: u64, repayment: u64) -> Loan {
         let secrets =
             OfferSecrets::from_shared_secret(SecretKey::from_slice(&sequence(0x80)).unwrap());
         let terms = OfferTerms {
@@ -455,7 +455,7 @@ mod tests {
     /// What an installment's outputs hold, from which its statement follows. A tamper changes one
     /// field.
     #[derive(Clone, Copy)]
-    struct Installment {
+    pub(crate) struct Installment {
         /// `i`: the successor is at step `i + 1`.
         step: u32,
         debt_left: DebtOpening,
@@ -495,7 +495,7 @@ mod tests {
         }
 
         /// The honest installment at `step` that leaves `debt` owed.
-        fn installment(&self, step: u32, debt: u64) -> Installment {
+        pub(crate) fn installment(&self, step: u32, debt: u64) -> Installment {
             let (c, r) = (self.collateral(), self.repayment());
             let e = carry_remainder(debt, c, r);
             let (x, y) = self.secrets.release_blinders(step + 1);
@@ -512,7 +512,7 @@ mod tests {
         }
 
         /// The honest secrets of the honest installment at `step` that leaves `debt` owed.
-        fn secrets(&self, step: u32, debt: u64) -> ReleaseSecrets {
+        pub(crate) fn secrets(&self, step: u32, debt: u64) -> ReleaseSecrets {
             let ((_, w1), (_, w2)) = carry_blinders();
             ReleaseSecrets::new(
                 &self.pinned.active_collateral,
@@ -524,7 +524,7 @@ mod tests {
         }
 
         /// The outputs of `installment`: the successor and the two carries.
-        fn outputs(&self, installment: &Installment) -> [PinnedOutput; 3] {
+        pub(crate) fn outputs(&self, installment: &Installment) -> [PinnedOutput; 3] {
             let active = self.pinned.active_collateral;
             let next = k256::Scalar::from(u64::from(installment.step + 1));
             let a_c = to_k256(
@@ -556,7 +556,7 @@ mod tests {
 
         /// The statement of `installment`, its points read from the outputs' commitments as the
         /// program reads them.
-        fn statement(&self, installment: &Installment) -> ReleaseStatement {
+        pub(crate) fn statement(&self, installment: &Installment) -> ReleaseStatement {
             let (repayment, active) = (self.pinned.repayment, self.pinned.active_collateral);
             let [successor, w1, w2] = self.outputs(installment);
             let (x, y) = installment.y_opening;
@@ -585,7 +585,7 @@ mod tests {
     /// 8,000 owed, so `c' = 36,364` and `e = 4,000`.
     const KNOWN: (u64, u64, u32, u64) = (50_000, 11_000, 2, 8_000);
 
-    fn borrower() -> LendingKey {
+    pub(crate) fn borrower() -> LendingKey {
         LendingKey::from_master_blinding_key(&[1; 32])
     }
 
@@ -607,7 +607,7 @@ mod tests {
         (loan, installment, statement, secrets, proof)
     }
 
-    fn loan_fs_iv(statement: &ReleaseStatement) -> [u8; 32] {
+    pub(crate) fn loan_fs_iv(statement: &ReleaseStatement) -> [u8; 32] {
         fs_iv(&statement.a, &statement.a_c, &statement.v_c0, &statement.d0)
     }
 

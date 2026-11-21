@@ -102,7 +102,7 @@ impl OfferPinned {
 }
 
 /// `value` as a scalar. Every `u128` is below the curve order.
-fn small_scalar(value: u128) -> ValueBlindingFactor {
+pub(crate) fn small_scalar(value: u128) -> ValueBlindingFactor {
     let mut bytes = [0; 32];
     bytes[16..].copy_from_slice(&value.to_be_bytes());
 

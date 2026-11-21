@@ -1,13 +1,15 @@
 //! Cryptography of Simplicity Lending private offers: lending keys, per-offer secrets, signed
 //! terms, the marker, pinned outputs, building offers, and finding, opening and checking them in
 //! their creation transactions; a loan's debt as a curve point, with the installments that pay it;
-//! the release of collateral by installments, with the derived values of the liquidation repair
-//! and the borrower's proof of each release; the private messages of a loan's parties; and the
-//! terms lenders publish in the directory, with the check of a proposal against them.
+//! the release of collateral by installments, with the derived values of the liquidation repair,
+//! the borrower's proof of each release and the lender's search for the collateral it cannot read;
+//! the private messages of a loan's parties; and the terms lenders publish in the directory, with
+//! the check of a proposal against them.
 //!
 //! The crate depends only on `elements`, `rand` and `k256` (whose field arithmetic tells whether a
-//! commitment's `y` is a square, and whose group arithmetic proves and verifies the releases), so
-//! the contracts crate and the browser's wasm module run the same code.
+//! commitment's `y` is a square, and whose group arithmetic proves and verifies the releases and
+//! searches for the collateral), so the contracts crate and the browser's wasm module run the same
+//! code.
 //!
 //! Signing the terms ([`SignedTerms::sign`]) or a message ([`SignedMessage::sign`]) draws its
 //! auxiliary randomness from `rand`'s thread RNG, as does a caller that passes `rand::thread_rng()`
@@ -27,6 +29,7 @@ mod offer;
 mod pinned;
 mod release;
 mod release_proof;
+mod release_search;
 mod secrets;
 mod terms;
 
@@ -64,6 +67,7 @@ pub use release::{
     release_of,
 };
 pub use release_proof::{ReleaseProof, ReleaseSecrets, ReleaseStatement, challenge, prove, verify};
+pub use release_search::{collateral_opening, find_collateral};
 pub use secrets::{OfferSecrets, PinnedRole, expiry_hash};
 pub use terms::{OfferTerms, SignedTerms, TERMS_VERSION, TermsError};
 
