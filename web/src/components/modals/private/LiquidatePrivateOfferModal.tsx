@@ -7,6 +7,7 @@ import Notice from '@/components/Notice'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { utxoOutpoint } from '@/privateLending/candidate'
+import { findCollateralInWorker } from '@/privateLending/collateralSearch'
 import { findLenderNft } from '@/privateLending/flows/claimInstallments'
 import { buildPrivateLiquidation } from '@/privateLending/flows/liquidation'
 import { esploraSpentBy } from '@/privateLending/hooks/usePrivateFlowDeps'
@@ -65,6 +66,8 @@ export default function LiquidatePrivateOfferModal(props: PrivateOfferActionModa
       feeCoins,
       collateralReceiver: walletReceiver(deps),
       tipHeight: currentTip,
+      // when an installment does not open for the lender: off the page's thread
+      findCollateral: findCollateralInWorker,
     })
   }
 

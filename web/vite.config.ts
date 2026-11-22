@@ -67,6 +67,9 @@ export default defineConfig(({ command, mode }) => {
     optimizeDeps: {
       exclude: ['lwk_wasm'],
     },
+    // The lender's collateral search runs in a module worker (`privateLending/searchWorker.ts`),
+    // which imports the private lending wasm.
+    worker: { format: 'es' as const },
     // In every mode: `pnpm dev --mode demo` (the testnet demo, `pnpm demo:testnet`) reads `/api`.
     server: { proxy },
     // Local smoke testing of the production bundle against the same indexer.

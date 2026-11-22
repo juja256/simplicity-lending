@@ -9,7 +9,6 @@ import ArrowSquareOutIcon from '@/components/icons/ArrowSquareOutIcon'
 import KeyFingerprint from '@/components/KeyFingerprint'
 import CancelPrivateOfferModal from '@/components/modals/private/CancelPrivateOfferModal'
 import ClaimPrincipalModal from '@/components/modals/private/ClaimPrincipalModal'
-import CloseZeroDebtModal from '@/components/modals/private/CloseZeroDebtModal'
 import CreatePrivateOfferModal from '@/components/modals/private/CreatePrivateOfferModal'
 import { MessagesLink } from '@/components/modals/private/LoanMessagesModal'
 import RepayPrivateOfferModal from '@/components/modals/private/RepayPrivateOfferModal'
@@ -398,8 +397,6 @@ export default function MyLoansPage() {
         return <ClaimPrincipalModal key={key} {...props} />
       case 'repay':
         return <RepayPrivateOfferModal key={key} {...props} />
-      case 'closeZeroDebt':
-        return <CloseZeroDebtModal key={key} {...props} />
     }
   }
 

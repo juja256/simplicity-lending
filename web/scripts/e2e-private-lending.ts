@@ -1585,6 +1585,17 @@ async function loadE2eLoan(
   return loadLoan(flowDeps(wallet, ctx.chain), offer, wallet.lendingKey, loanOutpoint)
 }
 
+/**
+ * The loan's carries as its chain gives them. Task 10: take them from the indexer's candidate
+ * (`unspentCarries`), as the app does, so that the stage covers the check of the indexer's list.
+ */
+function chainCarryOutpoints(loan: Loan): string[] {
+  const carries = loan.state.carries()
+  const outpoints = carries.map(carry => carry.outpoint)
+  carries.forEach(carry => carry.free())
+  return outpoints
+}
+
 /** The installment's inputs that LWK sized with a max-weight-to-satisfy constant. */
 const INSTALLMENT_WEIGHTS: WeightedInput[] = [
   {
@@ -1630,13 +1641,14 @@ function assertInstallmentOutputs(
         nft.amountCommitment === null,
     ],
     [
-      "output 1 is the successor loan: the collateral's value commitment under a new asset " +
-        'commitment, blinded to the lender',
+      // Task 10: the successor holds `c_k` less the release now, with the next step's blinders.
+      'output 1 is the successor loan: the collateral, under a new asset commitment, blinded to ' +
+        'the lender',
       successor !== undefined &&
+        collateral !== undefined &&
         successor.script !== offer.scripts.activeOfferAt(loan.state.debtHash).toString() &&
         successor.asset === collateral.asset &&
-        successor.amount === collateral.amount &&
-        successor.amountCommitment === collateral.valueCommitment &&
+        successor.amount === collateral.amount - loan.state.releasePreview(amount) &&
         successor.assetCommitment !== null &&
         successor.assetCommitment !== collateral.assetCommitment &&
         successor.blindingKey === opened.lenderBlindingKey() &&
@@ -1758,6 +1770,8 @@ async function buildSignedInstallment(
     borrowerNftOutpoint: borrowerNftOutpoint(),
     principalCoins,
     feeCoins,
+    carryOutpoints: chainCarryOutpoints(loan),
+    earlierBuilds: [],
     lendingKey: borrower.lendingKey,
     tipHeight: await ctx.chain.tipHeight(),
     message,
@@ -2189,7 +2203,7 @@ function assertRepaymentOutputs(
       collateral !== undefined &&
         collateral.script === collateralReceiver.scriptPubkey().toString() &&
         collateral.asset === opened.collateralAsset() &&
-        collateral.amount === loan.state.collateral().amount &&
+        collateral.amount === loan.state.collateral()?.amount &&
         collateral.blindingKey !== null &&
         collateral.assetCommitment !== null &&
         collateral.amountCommitment !== null &&
@@ -2239,6 +2253,7 @@ async function buildSignedRepayment(
     borrowerNftOutpoint: borrowerNftOutpoint(),
     principalCoins,
     feeCoins,
+    carryOutpoints: chainCarryOutpoints(loan),
     collateralReceiver,
     lendingKey: borrower.lendingKey,
     message: REPAYMENT_MESSAGE,
@@ -2483,6 +2498,7 @@ async function repayHostileDryStage(ctx: Context): Promise<void> {
       borrowerNftOutpoint,
       principalCoins,
       feeCoins,
+      carryOutpoints: chainCarryOutpoints(loan),
       collateralReceiver,
       lendingKey: borrower.lendingKey,
     }).then(

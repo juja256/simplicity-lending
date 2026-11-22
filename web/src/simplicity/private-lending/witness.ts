@@ -143,20 +143,24 @@ export const PRIVATE_LENDING_BRANCH_SPENDS_ACTIVE: Record<PrivateLendingBranch, 
 
 // `PsetInputSpec.maxWeightToSatisfy` for the private lending covenant input, per branch: the
 // serialized script witness (witness data + program + CMR + control block, with length prefixes)
-// of a real broadcast transaction of this program, plus 10 %, rounded up. Each is a testnet
-// transaction of the private lending e2e or of the scripted demo.
+// of a real transaction of this program, plus 10 %, rounded up. The phase 5 values are testnet
+// transactions of the private lending e2e or of the scripted demo; the contracts' regtest tests of
+// proportional release (`installment_runs_within_the_cost_budget`, and the budgets of the other
+// branches, each `(weight + 50) · 1000` mWU) gave the same weights for the other branches, and
+// only the installment's grew.
 export const PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY: Record<PrivateLendingBranch, number> = {
-  // testnet acceptance 59289a8a…c607: 2 998 (1 + 2 861 + 32 + 97 bytes)
+  // testnet acceptance 59289a8a…c607: 2 998 (1 + 2 861 + 32 + 97 bytes); regtest 2 998
   OfferAcceptance: 3298,
-  // testnet cancellation 93e7cc4c…6634: 2 881 (1 + 2 744 + 32 + 97 bytes)
+  // testnet cancellation 93e7cc4c…6634: 2 881 (1 + 2 744 + 32 + 97 bytes); regtest 2 881
   OfferCancellation: 3170,
-  // testnet installment 6254ad10…104c: 4 095 (33 + 3 926 + 32 + 97 bytes). The pruned program
-  // varies with the branches its square-ness tests take: this is the largest of five testnet
-  // installments, which weighed 4 026 to 4 095
-  Installment: 4505,
-  // testnet repayment 9b7e98ee…7e2c: 2 971 (33 + 2 802 + 32 + 97 bytes)
+  // regtest installments with the release proof: 8 463 (the first, which burns the carry
+  // supply's leftover) and 8 537 (two carries in), the witness 1 220 bytes and the pruned program
+  // 7 105 to 7 179. The program varies with the branches its square-ness tests take, so this is
+  // the larger plus 10 %
+  Installment: 9391,
+  // testnet repayment 9b7e98ee…7e2c: 2 971 (33 + 2 802 + 32 + 97 bytes); regtest 2 932
   FullRepayment: 3269,
-  // testnet liquidation af4c39b7…e8d1: 2 816 (69 + 2 611 + 32 + 97 bytes)
+  // testnet liquidation af4c39b7…e8d1: 2 816 (69 + 2 611 + 32 + 97 bytes); regtest 2 816
   Liquidation: 3098,
 }
 

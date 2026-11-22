@@ -19,7 +19,7 @@ import {
 } from '@/privateLending/proposalCheck'
 import type { PrivateLendingWasm } from '@/privateLending/wasm'
 
-type FormWasm = Pick<PrivateLendingWasm, 'minCollateral' | 'minRepayment'>
+type FormWasm = Pick<PrivateLendingWasm, 'checkOfferBounds' | 'minCollateral' | 'minRepayment'>
 
 /**
  * The creation builder's limit (`flows/creation.ts`): the interest is at most 0xffff basis points
@@ -184,6 +184,9 @@ export function proposalOfForm(
       },
     }
   }
+  // The bounds of proportional release, which the lender checks before accepting.
+  const bounds = offerBoundsErrors(wasm, collateral, repayment)
+  if (bounds !== null) return { proposal: null, errors: bounds }
   return {
     proposal: {
       principal,
@@ -194,6 +197,35 @@ export function proposalOfForm(
       ...(message === undefined ? {} : { message }),
     },
     errors: null,
+  }
+}
+
+/** The collateral the lender accepts at most, in base units (`checkOfferBounds`). */
+const MAX_OFFER_COLLATERAL = 1n << 44n
+/** The full repayment the lender accepts at most, in base units (`checkOfferBounds`). */
+const MAX_OFFER_REPAYMENT = (1n << 50n) - 2n
+
+/**
+ * The fields of a proposal of `collateral` and full repayment `repayment` (base units) outside
+ * the bounds of proportional release, `1 ≤ C ≤ 2^44` and `1 ≤ R ≤ 2^50 − 2`, or null within them:
+ * the lender refuses such an offer, since the release proof is sound only within them, and the
+ * creation refuses to build it (`offerBoundsError`). The wasm's `checkOfferBounds` decides; the
+ * field named follows which bound fails.
+ */
+export function offerBoundsErrors(
+  wasm: Pick<PrivateLendingWasm, 'checkOfferBounds'>,
+  collateral: bigint,
+  repayment: bigint,
+): ProposalErrors | null {
+  try {
+    wasm.checkOfferBounds(collateral, repayment)
+    return null
+  } catch {
+    return collateral < 1n || collateral > MAX_OFFER_COLLATERAL
+      ? { collateral: 'The collateral is above what a lender can accept.' }
+      : repayment > MAX_OFFER_REPAYMENT
+        ? { aprPercent: 'The repayment is above what a lender can accept.' }
+        : { principal: 'A lender cannot accept these amounts.' }
   }
 }
 

@@ -411,21 +411,6 @@ describe("the borrower's installments", () => {
     }
   })
 
-  it('closes the loan once the installments paid the whole debt', () => {
-    const item = own('active', PAID_ONCE)
-    const loan = figures([{ outpoint: INSTALLMENT, amount: 110_000n }], 0n)
-    const view = borrowerView(item, EXPIRY - 1, loan)
-    expect(view.action).toBe('closeZeroDebt')
-    expect(borrowerActions(AMOUNTS).labels.closeZeroDebt).toBe('Close the loan')
-    expect(paidLoanState(item, EXPIRY - 1, loan).button).toMatchObject({
-      kind: 'open',
-      action: 'closeZeroDebt',
-      label: 'Close the loan',
-    })
-    // past the term too: the close takes the collateral back
-    expect(borrowerView(item, EXPIRY + 1, loan).action).toBe('closeZeroDebt')
-  })
-
   it('offers no repayment while what is owed cannot be read', () => {
     const item = own('active', PAID_ONCE)
     const loan = figures([{ outpoint: INSTALLMENT, amount: undefined }], undefined)
@@ -463,25 +448,6 @@ describe("the borrower's installments", () => {
     }
     // while the tip is unknown, neither
     expect(paidLoanState(item, 0, loan, [record]).button).toBeNull()
-    // a zero-debt state does not lift the block either
-    const paidOff = figures([{ outpoint: INSTALLMENT, amount: 110_000n }], 0n)
-    expect(paidLoanState(item, EXPIRY - 1, paidOff, [record]).button).toMatchObject({
-      kind: 'open',
-      action: 'repay',
-      unsentTx: record,
-    })
-  })
-
-  it('broadcasts an unsent zero-debt close again', () => {
-    const item = own('active', PAID_ONCE)
-    const loan = figures([{ outpoint: INSTALLMENT, amount: 110_000n }], 0n)
-    const record = unsent(item, 'private_zero_debt_close')
-    expect(paidLoanState(item, EXPIRY + 1, loan, [record]).button).toMatchObject({
-      kind: 'open',
-      action: 'closeZeroDebt',
-      unsentTx: record,
-      label: 'Broadcast again',
-    })
   })
 })
 

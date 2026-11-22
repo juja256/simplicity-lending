@@ -1,11 +1,29 @@
-import fs from 'node:fs'
-
 import type { Address, WalletTxOut } from 'lwk_wasm'
 import { describe, expect, it } from 'vitest'
 
 import { buildPset } from '@/lwk/psetBuilder'
 import { INSTALLMENT_OUTPUT } from '@/simplicity/private-lending/layout'
-import { lwk, sources } from '@/test/lwk'
+import { lwk } from '@/test/lwk'
+import {
+  acceptanceTxid,
+  BURN_SCRIPT,
+  creationTxid,
+  fakeChain,
+  fixture,
+  installmentHex,
+  installmentLock,
+  installmentTxid,
+  keys,
+  openOffer,
+  OTHER_ASSET,
+  pushLength,
+  reversed,
+  standIn,
+  type StandInOutput,
+  txidOf,
+  u64be,
+  WALLET_SCRIPT,
+} from '@/test/privateChain'
 import { wasm } from '@/test/wasm'
 import type { LoanState } from '@/wasm/private-lending/private_lending_wasm'
 
@@ -21,133 +39,9 @@ import {
 } from './flows/installment'
 import { buildPrivateLiquidation, ExpiryNotReachedError } from './flows/liquidation'
 import { buildPrivateRepayment } from './flows/repayment'
-import { buildZeroDebtClose } from './flows/zeroDebtClose'
 import { inspectPset } from './inspectPset'
 import { loadLoan, type Loan, principalClaimedBefore, PrincipalNotClaimedError } from './loan'
-import { openAndVerifyOffer, type VerifiedOffer } from './verify'
-
-// The parity fixture's offer and its loan on regtest: the acceptance, then one installment, which
-// takes the borrower NFT from the creation's output 0 (the principal is never claimed).
-interface Fixture {
-  borrower_master_blinding_key: string
-  lender_master_blinding_key: string
-  creation_tx: string
-  installment_output_script_hash: string
-  loan: {
-    acceptance_tx: string
-    installment_txs: string[]
-    loan_outpoint: string
-    remaining: number
-    debt_hashes: string[]
-    loan_script_pubkeys: string[]
-  }
-  other_offer: { creation_tx: string }
-  messages: { installment: string }
-}
-
-const fixture = JSON.parse(
-  fs.readFileSync(
-    new URL('../../scripts/fixtures/private-lending-parity.json', import.meta.url),
-    'utf-8',
-  ),
-) as Fixture
-
-const txidOf = (hex: string) => lwk.Transaction.fromString(hex).txid().toString()
-const creationTxid = txidOf(fixture.creation_tx)
-const acceptanceTxid = txidOf(fixture.loan.acceptance_tx)
-const installmentHex = fixture.loan.installment_txs[0]
-const installmentTxid = txidOf(installmentHex)
-const installmentLock = lwk.Transaction.fromString(installmentHex)
-  .outputs[2].scriptPubkey()
-  .toString()
-
-/** The fixture's transactions, and the ones a test adds, served by txid as esplora would. */
-function fakeChain(...extra: string[]): { deps: PrivateFlowDeps; fetched: string[] } {
-  const txs = new Map<string, string>()
-  for (const hex of [
-    fixture.creation_tx,
-    fixture.loan.acceptance_tx,
-    installmentHex,
-    fixture.other_offer.creation_tx,
-    ...extra,
-  ]) {
-    txs.set(txidOf(hex), hex)
-  }
-  const fetched: string[] = []
-  const deps = {
-    lwk,
-    wasm,
-    network: lwk.Network.regtestDefault(),
-    networkName: 'regtest',
-    sources,
-    assets: { policy: OTHER_ASSET },
-    // the flows read the fee rate only to build: a refusal before building never reaches it
-    get feeRate(): number {
-      throw new Error('the PSET build was reached')
-    },
-    fetchTx: async (txid: string) => {
-      fetched.push(txid)
-      const hex = txs.get(txid)
-      if (hex === undefined) throw new Error(`fake chain: no transaction ${txid}`)
-      return lwk.Transaction.fromString(hex)
-    },
-  } as unknown as PrivateFlowDeps
-  return { deps, fetched }
-}
-
-const keys = {
-  borrower: wasm.LendingKey.fromMasterBlindingKey(fixture.borrower_master_blinding_key),
-  lender: wasm.LendingKey.fromMasterBlindingKey(fixture.lender_master_blinding_key),
-}
-
-function openOffer(
-  role: 'borrower' | 'lender',
-  creationTx = fixture.creation_tx,
-): Promise<VerifiedOffer> {
-  return openAndVerifyOffer(fakeChain().deps, role, keys[role], creationTx)
-}
-
-const reversed = (hex: string) => (hex.match(/../g) ?? []).reverse().join('')
-const u32le = (n: number) => reversed(n.toString(16).padStart(8, '0'))
-const u64be = (n: bigint) => n.toString(16).padStart(16, '0')
-const pushLength = (hex: string) => (hex.length / 2).toString(16).padStart(2, '0')
-
-/** Any asset that is not one of the offer's NFTs. */
-const OTHER_ASSET = '5ac9f65c0efcc4775e0baec4ec03abdde22473cd3cf33c0419ca290e0751b225'
-const WALLET_SCRIPT = '0014' + '71'.repeat(20)
-/** `OP_RETURN "burn"`, as the flows burn an NFT. */
-const BURN_SCRIPT = '6a04' + Buffer.from('burn').toString('hex')
-
-interface StandInOutput {
-  script: string
-  /** The explicit asset, as `AssetId.toString()` shows it. */
-  asset?: string
-  value?: bigint
-}
-
-/**
- * A transaction that only stands in for a real one: explicit outputs and no witnesses, enough for
- * the walks, which read the outpoints its inputs spend and its outputs' scripts and assets.
- */
-function standIn(inputs: string[], outputs: StandInOutput[]): string {
-  const ins = inputs.map(outpoint => {
-    const [txid, vout] = outpoint.split(':')
-    return reversed(txid) + u32le(Number(vout)) + '00' + 'ffffffff'
-  })
-  const outs = outputs.map(({ script, asset = OTHER_ASSET, value = 1_000n }) => {
-    return '01' + reversed(asset) + '01' + u64be(value) + '00' + pushLength(script) + script
-  })
-  const count = (n: number) => n.toString(16).padStart(2, '0')
-  return (
-    '02000000' +
-    '00' +
-    count(ins.length) +
-    ins.join('') +
-    count(outs.length) +
-    outs.join('') +
-    '00000000'
-  )
-}
+import type { VerifiedOffer } from './verify'
 
 /**
  * The acceptance with input 0 spending another outpoint than the pending offer: its outputs, the
@@ -535,6 +429,8 @@ describe("the borrower's flows", () => {
           borrowerNftOutpoint: nft,
           principalCoins,
           feeCoins,
+          carryOutpoints: [],
+          earlierBuilds: [],
           lendingKey: keys.borrower,
           tipHeight: offer.opened.loanExpirationTime() - 1,
         }),
@@ -543,6 +439,7 @@ describe("the borrower's flows", () => {
           borrowerNftOutpoint: nft,
           principalCoins: [coin(`${'c1'.repeat(32)}:0`, offer.opened.principalAsset(), 8_000n)],
           feeCoins,
+          carryOutpoints: [],
           collateralReceiver: confidential,
           lendingKey: keys.borrower,
         }),
@@ -571,6 +468,8 @@ describe("the borrower's flows", () => {
         borrowerNftOutpoint: `${installmentTxid}:0`,
         principalCoins: [coin(`${'c1'.repeat(32)}:0`, offer.opened.principalAsset(), 5_000n)],
         feeCoins: [coin(`${'c2'.repeat(32)}:0`, OTHER_ASSET, 2_000n)],
+        carryOutpoints: [],
+        earlierBuilds: [],
         lendingKey: keys.borrower,
         tipHeight,
       }).catch((error: unknown) => error)
@@ -591,6 +490,8 @@ describe("the borrower's flows", () => {
       borrowerNftOutpoint: `${installmentTxid}:0`,
       principalCoins: [coin(`${'c1'.repeat(32)}:0`, offer.opened.principalAsset(), 5_000n)],
       feeCoins: [coin(`${'c2'.repeat(32)}:0`, OTHER_ASSET, 2_000n)],
+      carryOutpoints: [],
+      earlierBuilds: [],
       lendingKey: keys.borrower,
       tipHeight: offer.opened.loanExpirationTime() - 1,
       message: 'a'.repeat(3069),
@@ -598,39 +499,6 @@ describe("the borrower's flows", () => {
     expect(refusal).toBeInstanceOf(Error)
     expect((refusal as Error).message).toBe('The message is 3069 bytes; at most 3068 fit.')
     expect(fetched).toEqual([])
-  })
-
-  it('refuse a zero-debt close before the principal is claimed', async () => {
-    const offer = await openOffer('borrower')
-    const { deps: walk } = fakeChain()
-    const loan = await loadLoan(walk, offer, keys.borrower, fixture.loan.loan_outpoint)
-    // the fixture's loan owes 8 000: a stand-in of its state that owes nothing passes the close's
-    // amount check, so the borrower NFT's check is the one that refuses
-    const real = loan.state
-    const owingNothing = {
-      remaining: 0n,
-      loanOutpoint: real.loanOutpoint,
-      debtHash: real.debtHash,
-      debtCommitment: real.debtCommitment,
-      collateral: () => real.collateral(),
-      zeroDebtKey: () => '11'.repeat(32),
-      loanInputSecret: (index: number) => real.loanInputSecret(index),
-    } as unknown as LoanState
-    const nft = `${installmentTxid}:0`
-    const { deps, fetched } = fakeChain()
-    const refusal = await buildZeroDebtClose(
-      deps,
-      offer,
-      { ...loan, state: owingNothing },
-      {
-        borrowerNftOutpoint: nft,
-        feeCoins: [coin(`${'c2'.repeat(32)}:0`, OTHER_ASSET, 2_000n)],
-        collateralReceiver: confidential,
-      },
-    ).catch((error: unknown) => error)
-    expect(refusal).toBeInstanceOf(PrincipalNotClaimedError)
-    expect((refusal as PrincipalNotClaimedError).borrowerNftOutpoint).toBe(nft)
-    expect(fetched).toEqual([installmentTxid])
   })
 })
 
@@ -870,7 +738,7 @@ describe("the lender's flows", () => {
     ).rejects.toThrow('loan-mismatch')
   })
 
-  // Decision 1: after a zero-debt close whose installments were all claimed, the sweep is empty.
+  // Decision 1: after a close whose installments were all claimed, an empty sweep is refused.
   it('refuse a final claim with nothing left to sweep, before building', async () => {
     const { offer, loan } = await lenderLoan()
     const close = standIn(

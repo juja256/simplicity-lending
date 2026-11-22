@@ -15,6 +15,7 @@ import {
   editProposalForm,
   formatDay,
   loanAmounts,
+  offerBoundsErrors,
   openProposalForm,
   type ProposalFormState,
   proposalOfForm,
@@ -139,6 +140,36 @@ describe('proposalOfForm', () => {
       wasm.minRepayment(5000n * 10n ** 8n, 725, 90 * BLOCKS_PER_DAY),
     )
     expect(result.proposal?.aprBps).toBe(725)
+  })
+
+  // Review focus 3, O9: the lender refuses collateral above 2^44 base units and a full repayment
+  // above 2^50 − 2, so the borrower's form does too. 2^44 base units of an asset with 8 decimals
+  // are 175,921.86044416.
+  it('takes collateral of 2^44 base units, and refuses one more', () => {
+    const form = {
+      principal: '5000',
+      days: '90',
+      collateral: '175921.86044416',
+      aprPercent: '7.25',
+    }
+    expect(proposalOfForm(wasm, PAIR, PAIR_INFO, form).proposal?.collateral).toBe(1n << 44n)
+    expect(
+      proposalOfForm(wasm, PAIR, PAIR_INFO, { ...form, collateral: '175921.86044417' }),
+    ).toEqual({
+      proposal: null,
+      errors: { collateral: 'The collateral is above what a lender can accept.' },
+    })
+  })
+
+  // No pair of these terms reaches a repayment of 2^50 base units: the rule is checked directly.
+  it('takes a full repayment of 2^50 − 2 base units, and refuses one more', () => {
+    expect(offerBoundsErrors(wasm, 1n << 44n, (1n << 50n) - 2n)).toBeNull()
+    expect(offerBoundsErrors(wasm, 1n, (1n << 50n) - 1n)).toEqual({
+      aprPercent: 'The repayment is above what a lender can accept.',
+    })
+    expect(offerBoundsErrors(wasm, (1n << 44n) + 1n, (1n << 50n) - 1n)).toEqual({
+      collateral: 'The collateral is above what a lender can accept.',
+    })
   })
 
   it("refuses a message a byte over its limit with the counter's error, sends one at it", () => {

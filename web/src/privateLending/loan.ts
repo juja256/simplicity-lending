@@ -9,17 +9,22 @@ import type { Script, Transaction, TxOut } from 'lwk_wasm'
 import {
   ACCEPTANCE_INPUT,
   ACCEPTANCE_OUTPUT,
+  CARRY_SUPPLY,
+  CREATION_INPUT,
   CREATION_OUTPUT,
   INSTALLMENT_INPUT,
   INSTALLMENT_OUTPUT,
+  MAX_LOAN_INSTALLMENTS,
   NFT_AMOUNT,
   PRINCIPAL_CLAIM_INPUT,
   PRINCIPAL_CLAIM_OUTPUT,
 } from '@/simplicity/private-lending/layout'
-import type { LendingKey, LoanState } from '@/wasm/private-lending/private_lending_wasm'
+import { hexToBytes } from '@/utils/hex'
+import type { Carry, LendingKey, LoanState } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from './deps'
-import { parseOutpoint, requireOutput, wasmStep } from './flows/shared'
+import { pinnedAuthCovenant } from './finalize'
+import { fetchPrevoutTxs, parseOutpoint, prevoutsOf, requireOutput, wasmStep } from './flows/shared'
 import type { VerifiedOffer } from './verify'
 
 /** A loan of a verified offer, read by `loadLoan`. */
@@ -37,23 +42,24 @@ export interface Loan {
 }
 
 /**
- * The most installments a walk follows: far more than any loan makes, and a bound on the
+ * The most installments a walk follows: the most a loan can have, since the release proof's tree
+ * has 1024 leaves (the contract refuses an installment at step 1024), and a bound on the
  * transactions a hostile indexer can make the app fetch.
  */
-export const MAX_INSTALLMENTS = 200
+export const MAX_INSTALLMENTS = MAX_LOAN_INSTALLMENTS
 
 /**
  * A step refused before building: the borrower NFT outpoint does not come from the claim of this
  * offer's principal (`principalClaimedBefore`), so the principal may be unclaimed. The borrower NFT
- * is the only key to it: the full repayment and the zero-debt close burn the NFT, and the app pays
- * no installment before the claim either. The message is `"principal-not-claimed: …"`.
+ * is the only key to it: the full repayment burns the NFT, and the app pays no installment before
+ * the claim either. The message is `"principal-not-claimed: …"`.
  */
 export class PrincipalNotClaimedError extends Error {
   readonly code = 'principal-not-claimed'
 
   constructor(
     readonly borrowerNftOutpoint: string,
-    /** What was refused: `installment`, `repayment` or `zero-debt close`. */
+    /** What was refused: `installment` or `repayment`. */
     readonly action: string,
   ) {
     super(
@@ -72,7 +78,7 @@ function spentAt(tx: Transaction, input: number): string | undefined {
 
 /**
  * Whether `output` holds exactly one explicit unit of the borrower NFT, unburned: not at an
- * `OP_RETURN`, where the full repayment and the zero-debt close burn it.
+ * `OP_RETURN`, where the full repayment and the cancellation burn it.
  */
 function holdsBorrowerNft(offer: VerifiedOffer, output: TxOut | undefined): boolean {
   return (
@@ -246,7 +252,7 @@ export interface BorrowerLoanInputs {
 }
 
 /**
- * What the installment, the full repayment and the zero-debt close spend first: the borrower NFT
+ * What the installment and the full repayment spend first: the borrower NFT
  * at `borrowerNftOutpoint` and the loan output. Throws `PrincipalNotClaimedError` (naming `action`)
  * unless `principalClaimedBefore` holds, before anything else is fetched. Then the loan output
  * must be locked to the loan's script at its debt hash, and the NFT outpoint must hold exactly the
@@ -279,4 +285,199 @@ export async function borrowerLoanInputs(
     throw new Error('The borrower NFT outpoint does not hold exactly the borrower NFT, explicit')
   }
   return { nftInput, nftTx, loanInput, loanTx, loanScript }
+}
+
+/** The creation's carry supply: the loan's carry before its first installment. */
+export interface CarrySupply {
+  /** `"<creation txid>:4"`. */
+  outpoint: string
+  /** The carry token, issued at the creation's input 2. */
+  asset: string
+  /** `CARRY_SUPPLY` units, explicit. */
+  amount: bigint
+}
+
+/**
+ * The creation's carry supply of `offer`, checked on its creation transaction (the gate's): output
+ * 4 holds `CARRY_SUPPLY` explicit units of the asset that input 2 newly issues, exactly that many
+ * and no reissuance token, at the principal's asset_auth, which the borrower NFT unlocks. Throws
+ * otherwise: an offer without it cannot be cancelled nor take an installment.
+ */
+export function creationCarrySupply(deps: PrivateFlowDeps, offer: VerifiedOffer): CarrySupply {
+  const { lwk } = deps
+  const tx = offer.creationTx
+  const outpoint = `${tx.txid().toString()}:${CREATION_OUTPUT.carrySupply}`
+  const output = requireOutput(tx, CREATION_OUTPUT.carrySupply, 'The carry supply')
+  const issuance = newIssuance(tx.toString(), CREATION_INPUT.carryIssuance)
+  const issued =
+    issuance &&
+    lwk
+      .assetIdFromIssuance(
+        new lwk.OutPoint(issuance.outpoint),
+        lwk.ContractHash.fromBytes(issuance.contractHash),
+      )
+      .toString()
+  const asset = output.asset()?.toString()
+  if (
+    issued === undefined ||
+    issuance?.amount !== CARRY_SUPPLY ||
+    issuance.inflationKeys !== null ||
+    asset !== issued ||
+    output.value() !== CARRY_SUPPLY
+  ) {
+    throw new Error(
+      `The creation's output ${CREATION_OUTPUT.carrySupply} is not the carry supply: ` +
+        `${CARRY_SUPPLY} explicit units of the asset its input ${CREATION_INPUT.carryIssuance} ` +
+        'issues',
+    )
+  }
+  if (
+    output.scriptPubkey().toString() !==
+    pinnedAuthCovenant(deps, offer, 'principal').script.toString()
+  ) {
+    throw new Error("The carry supply is not locked to the offer's principal asset_auth")
+  }
+  return { outpoint, asset, amount: CARRY_SUPPLY }
+}
+
+/** A new issuance of a transaction input, read from its consensus encoding. */
+interface InputIssuance {
+  /** The outpoint the input spends, `"<txid>:<vout>"`. */
+  outpoint: string
+  /** The issuance's asset entropy field: for a new issuance, the contract hash (32 bytes). */
+  contractHash: Uint8Array
+  /** The explicit amount issued; null for none, `'confidential'` for a blinded one. */
+  amount: bigint | null | 'confidential'
+  inflationKeys: bigint | null | 'confidential'
+}
+
+/**
+ * The new issuance of input `index` of the transaction `txHex` (Elements' encoding), or undefined
+ * when it has none or reissues. LWK's `TxIn` does not expose issuances, so this reads the bytes.
+ */
+export function newIssuance(txHex: string, index: number): InputIssuance | undefined {
+  const bytes = hexToBytes(txHex)
+  let at = 0
+  const take = (length: number) => {
+    if (at + length > bytes.length) throw new Error('The transaction ends early')
+    const slice = bytes.subarray(at, at + length)
+    at += length
+    return slice
+  }
+  const le = (slice: Uint8Array) =>
+    slice.reduceRight((value, byte) => value * 256n + BigInt(byte), 0n)
+  const varInt = () => {
+    const first = take(1)[0]
+    if (first < 0xfd) return first
+    return Number(le(take(first === 0xfd ? 2 : first === 0xfe ? 4 : 8)))
+  }
+  const confidentialValue = (): bigint | null | 'confidential' => {
+    const prefix = take(1)[0]
+    if (prefix === 0) return null
+    if (prefix === 1) return [...take(8)].reduce((value, byte) => value * 256n + BigInt(byte), 0n)
+    take(32)
+    return 'confidential'
+  }
+  const hex = (slice: Uint8Array) =>
+    [...slice].map(byte => byte.toString(16).padStart(2, '0')).join('')
+  take(4) // version
+  take(1) // the witness flag
+  const inputs = varInt()
+  for (let input = 0; input < inputs; input += 1) {
+    const txid = hex(take(32).slice().reverse())
+    const vout = Number(le(take(4)))
+    take(varInt()) // scriptSig
+    take(4) // sequence
+    const hasIssuance = (vout & 0x80000000) !== 0
+    if (!hasIssuance) {
+      if (input === index) return undefined
+      continue
+    }
+    const nonce = take(32)
+    const contractHash = take(32).slice()
+    const amount = confidentialValue()
+    const inflationKeys = confidentialValue()
+    if (input === index) {
+      // a reissuance carries the token's blinding nonce; a new issuance a zero one
+      if (nonce.some(byte => byte !== 0)) return undefined
+      return { outpoint: `${txid}:${vout & 0x3fffffff}`, contractHash, amount, inflationKeys }
+    }
+  }
+  return undefined
+}
+
+/** A loan's carry, opened by the borrower from the chain and checked there. */
+export interface LoanCarry {
+  /** The wasm's carry, which gives its input secret: the caller frees it. */
+  carry: Carry
+  outpoint: string
+  asset: string
+  amount: bigint
+  /** The carry's output, as found on chain. */
+  prevout: TxOut
+}
+
+/**
+ * The carries the borrower's next installment or full repayment spends, verified on chain (review
+ * focus 4). The indexer, untrusted, names them (`indexerCarries`, `"<txid>:<vout>"`): they must be
+ * exactly the carries `loan.state.carries()` opens from the loan's own transactions, which
+ * `loadLoan` walked on chain: the creation's output 4 before the first installment (checked by
+ * `creationCarrySupply`), then the last installment's outputs 3 and 4. Each must be locked to the
+ * offer's principal asset_auth, which the borrower NFT unlocks. Throws otherwise, naming the carry
+ * the indexer got wrong. The caller frees each `carry`.
+ */
+export async function verifiedLoanCarries(
+  deps: PrivateFlowDeps,
+  offer: VerifiedOffer,
+  loan: Loan,
+  indexerCarries: readonly string[],
+): Promise<LoanCarry[]> {
+  const opened = wasmStep("Opening the loan's carries", () => loan.state.carries())
+  try {
+    const outpoints = opened.map(carry => carry.outpoint)
+    const named = new Set(
+      indexerCarries.map(outpoint => {
+        const { txid, vout } = parseOutpoint(outpoint)
+        return `${txid}:${vout}`
+      }),
+    )
+    for (const outpoint of named) {
+      if (!outpoints.includes(outpoint)) {
+        throw new Error(
+          `The indexer names ${outpoint} as a carry of this loan, but the loan's carries on chain ` +
+            `are ${outpoints.join(' and ')}`,
+        )
+      }
+    }
+    for (const outpoint of outpoints) {
+      if (!named.has(outpoint)) {
+        throw new Error(`The indexer does not list the loan's carry ${outpoint} as unspent`)
+      }
+    }
+    const step = loan.state.installmentCount
+    const expected =
+      step === 0
+        ? [creationCarrySupply(deps, offer).outpoint]
+        : [INSTALLMENT_OUTPUT.carry, INSTALLMENT_OUTPUT.secondCarry].map(
+            vout => `${loan.installmentTxids[step - 1]}:${vout}`,
+          )
+    if (outpoints.length !== expected.length || outpoints.some((o, i) => o !== expected[i])) {
+      throw new Error(`The loan's carries are not ${expected.join(' and ')}`)
+    }
+    const txs = await fetchPrevoutTxs(deps, outpoints)
+    const lock = pinnedAuthCovenant(deps, offer, 'principal').script.toString()
+    const prevouts = prevoutsOf(txs, outpoints)
+    return opened.map((carry, index) => {
+      const prevout = prevouts[index]
+      if (prevout.scriptPubkey().toString() !== lock) {
+        throw new Error(
+          `The carry ${carry.outpoint} is not locked to the offer's principal asset_auth`,
+        )
+      }
+      return { carry, outpoint: carry.outpoint, asset: carry.asset, amount: carry.amount, prevout }
+    })
+  } catch (error) {
+    opened.forEach(carry => carry.free())
+    throw error
+  }
 }

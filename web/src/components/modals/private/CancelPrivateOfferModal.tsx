@@ -8,6 +8,7 @@ import { borrowerNftOutpoint } from '@/privateLending/candidate'
 import { buildPrivateCancellation } from '@/privateLending/flows/cancellation'
 import { canStillAccept } from '@/privateLending/offerView'
 import { selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
+import { ASSET_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/asset-auth/witness'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
 import { SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/script-auth/witness'
 
@@ -16,12 +17,13 @@ import PrivateOfferActionShell, {
   type PrivateOfferActionModalProps,
 } from './PrivateOfferActionShell'
 
-// The pending offer (OfferCancellation), the lender NFT at its script_auth lock, and the borrower
-// NFT, a wallet output.
+// The pending offer (OfferCancellation), the lender NFT at its script_auth lock, the borrower
+// NFT, a wallet output, and the carry supply at its asset_auth.
 const CANCEL_WEIGHT_UNITS =
   PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.OfferCancellation +
   SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY +
-  EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY
+  EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY +
+  ASSET_AUTH_MAX_WEIGHT_TO_SATISFY
 
 /**
  * The borrower cancels a pending offer: both NFTs are burned and the collateral comes back. It

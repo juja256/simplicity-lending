@@ -100,6 +100,7 @@ export const PRIVATE_UTXO_LABEL: Record<PrivateUtxoType, string> = {
   principal: 'principal',
   repayment: 'repayment',
   installment: 'installment',
+  carry: 'carry',
 }
 
 /** The status an offer shows: the indexer's status, or `claimed` once the final claim ran. */
@@ -107,8 +108,7 @@ export type OfferStatus = PrivateOfferStatus | 'claimed'
 
 /**
  * The status to show for a candidate. A repaid offer shows as claimed once nothing of it is left
- * for the lender: no repayment and no installment unspent. The full repayment leaves a repayment
- * UTXO, and the zero-debt close none, so after the close only the installments count.
+ * for the lender: no repayment and no installment unspent.
  */
 export function displayStatus(candidate: PrivateCandidateDetails): OfferStatus {
   if (candidate.status !== 'repaid') return candidate.status
@@ -450,18 +450,17 @@ export function checkCreationSendable(term: CreationTerm | undefined, tipHeight:
   }
 }
 
-export type BorrowerAction = 'cancel' | 'claimPrincipal' | 'repay' | 'closeZeroDebt'
+export type BorrowerAction = 'cancel' | 'claimPrincipal' | 'repay'
 
 type BorrowerTxKind =
   | 'private_cancel_offer'
   | 'private_claim_principal'
   | 'private_installment'
   | 'private_repay_offer'
-  | 'private_zero_debt_close'
 
 /**
  * The borrower's actions on one loan, each named with what it moves: "Cancel", "Receive 20,000
- * TEST", "Repay 3,021.40 TEST", "Close the loan". `amounts` are the loan's principal and what it
+ * TEST", "Repay 3,021.40 TEST". `amounts` are the loan's principal and what it
  * still owes as the page writes them, or null when its terms are not open (it then gets no action
  * anyway). An installment and the full repayment share the repay form, and so its action.
  */
@@ -473,7 +472,6 @@ export function borrowerActions(
       cancel: 'Cancel',
       claimPrincipal: amounts ? `Receive ${amounts.receive}` : 'Receive',
       repay: amounts ? `Repay ${amounts.repay}` : 'Repay',
-      closeZeroDebt: 'Close the loan',
     },
     danger: 'cancel',
     actionOfKind: {
@@ -481,7 +479,6 @@ export function borrowerActions(
       private_claim_principal: 'claimPrincipal',
       private_installment: 'repay',
       private_repay_offer: 'repay',
-      private_zero_debt_close: 'closeZeroDebt',
     },
   }
 }
@@ -505,7 +502,8 @@ export function borrowerSendable(
  * What the borrower can do with its loan, from the indexer's view of it and `loan`, its figures
  * once read (untrusted: the action's builder checks every outpoint): cancel a pending proposal,
  * receive the principal while it is unspent, then repay an active loan, in installments or in
- * full, or close it once its installments paid the whole debt. Repaying burns the borrower NFT,
+ * full. An installment never pays the whole debt (the full repayment does), so a loan read never
+ * owes nothing. Repaying burns the borrower NFT,
  * the only key to an unclaimed principal, so it is offered only on positive evidence that the
  * principal was claimed (`repaymentBorrowerNftOutpoint`): a candidate that omits the principal gets
  * no Repay. The notes are in the borrower's words: no "offer", "NFT" or "lending key".
@@ -540,12 +538,6 @@ export function borrowerView(
           note:
             'A payment on this loan does not open with your key, so what it still owes is ' +
             'unknown and the app cannot repay it.',
-        }
-      }
-      if (loan?.remaining === 0n) {
-        return {
-          action: 'closeZeroDebt',
-          note: 'Your installments paid the debt: close the loan to get your collateral back.',
         }
       }
       // From the expiry block on, as the repay form refuses an installment.

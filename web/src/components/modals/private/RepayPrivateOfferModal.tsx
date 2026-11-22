@@ -14,10 +14,11 @@ import { useReadError } from '@/hooks/useReadError'
 import type { AsyncUpdatedPset } from '@/lwk/updatedPset'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { asBorrowerError } from '@/privateLending/borrowerErrors'
-import { loanBorrowerNftOutpoint, utxoOutpoint } from '@/privateLending/candidate'
+import { loanBorrowerNftOutpoint, unspentCarries, utxoOutpoint } from '@/privateLending/candidate'
 import {
   buildPrivateInstallment,
   type InstallmentSummary,
+  R2_EXTRA_OUTPUT_AMOUNT,
 } from '@/privateLending/flows/installment'
 import { buildPrivateRepayment, type RepaymentSummary } from '@/privateLending/flows/repayment'
 import { outpointOf } from '@/privateLending/flows/shared'
@@ -29,6 +30,7 @@ import { borrowerActions, borrowerTermEnded, offerTxState } from '@/privateLendi
 import {
   checkInstallmentTerm,
   installmentTraceInputs,
+  installmentTraces,
   repayBroadcast,
   type RepayPlan,
   repayPlan,
@@ -40,6 +42,7 @@ import { loadPrivateTxsForWallet } from '@/providers/pendingTransactions/storage
 import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
 import { usePendingTransactions } from '@/providers/pendingTransactions/usePendingTransactions'
 import { useWallet } from '@/providers/wallet/useWallet'
+import { ASSET_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/asset-auth/witness'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
 import { ErrorHandler } from '@/utils/errorHandler'
 
@@ -48,11 +51,27 @@ import PrivateOfferActionShell, {
   type PrivateOfferActionModalProps,
 } from './PrivateOfferActionShell'
 
-// The active offer (FullRepayment or Installment), and the borrower NFT, a wallet output.
+/**
+ * What a confidential output weighs, its range proof and surjection proof included: about 4.4 kWU
+ * in the contracts' regtest installments.
+ */
+const CONFIDENTIAL_OUTPUT_WEIGHT_UNITS = 4_400
+/** A loan has at most two carries: one before its first installment, two after. */
+const MAX_CARRIES = 2
+// The active offer (FullRepayment or Installment), the borrower NFT, a wallet output, and the
+// carries at their asset_auth. The full repayment adds the carries' confidential burn; the
+// installment the two new carries, the release (or R2's output in its place) and, at the first,
+// the burn of the leftover.
 const REPAY_WEIGHT_UNITS =
-  PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.FullRepayment + EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY
+  PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.FullRepayment +
+  EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY +
+  MAX_CARRIES * ASSET_AUTH_MAX_WEIGHT_TO_SATISFY +
+  CONFIDENTIAL_OUTPUT_WEIGHT_UNITS
 const INSTALLMENT_WEIGHT_UNITS =
-  PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.Installment + EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY
+  PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.Installment +
+  EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY +
+  MAX_CARRIES * ASSET_AUTH_MAX_WEIGHT_TO_SATISFY +
+  4 * CONFIDENTIAL_OUTPUT_WEIGHT_UNITS
 
 /** The kinds the repay form saves. */
 const REPAY_TX_KINDS = ['private_installment', 'private_repay_offer'] as const
@@ -97,6 +116,7 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
           symbol: principalAsset.symbol,
           tipHeight,
           expiry,
+          installmentCount: loan?.installments.length ?? 0,
         })
   // A saved transaction is broadcast as it was built: its kind, not the form's plan, decides
   // whether it is an installment, also when it was saved in this modal and its broadcast failed.
@@ -146,14 +166,15 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
       symbol: principalAsset.symbol,
       tipHeight: freshTip,
       expiry,
+      installmentCount: fresh.state.installmentCount,
     })
     if (freshPlan.kind === 'refused') throw new Error(freshPlan.message)
     if (freshPlan.kind !== plan.kind || freshPlan.amount !== plan.amount) {
       throw new Error('The loan changed since the form was filled: check the amount again')
     }
-    // The repayment and the zero-debt close burn the borrower NFT, the only key to an unclaimed
-    // principal: it needs the indexer's evidence of the claim, and never falls back to the NFT
-    // where the creation put it. After installments, it is at the last one's output 0.
+    // The repayment burns the borrower NFT, the only key to an unclaimed principal: it needs the
+    // indexer's evidence of the claim, and never falls back to the NFT where the creation put it.
+    // After installments, it is at the last one's output 0.
     const borrowerNft = loanBorrowerNftOutpoint(fresh.installmentTxids, item.txid, candidate)
     if (borrowerNft === undefined) {
       throw new Error(
@@ -165,6 +186,9 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
       throw new Error(`The loan's principal is not ${principalAsset.symbol}`)
     }
     const coins = deps.walletUtxos()
+    // The loan's carries as the indexer lists them: the builders take them only when they are the
+    // carries the loan opens on chain.
+    const carryOutpoints = unspentCarries(candidate)
     const sent = sentMessagesOf(network, lendingKey.fingerprint())
     const sentText = message === undefined ? {} : { text: message }
     const offerTxid = offer.creationTx.txid().toString()
@@ -186,6 +210,7 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
         borrowerNftOutpoint: borrowerNft,
         principalCoins,
         feeCoins,
+        carryOutpoints,
         collateralReceiver: walletReceiver(deps),
         lendingKey,
         message,
@@ -195,8 +220,9 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
     // An installment derives its key from the loan output, its first wallet input (input 2) and
     // the NFT's receiver script: it never starts from the first input of an earlier installment
     // of this loan saved here (discarded, or failed), which may have reached the network with the
-    // same key. The saved records are read again now, as another tab may have saved one since
-    // this tab loaded its list, and no installment is built if they cannot be read.
+    // same key, and it pays the same amount (the builder checks both: `earlierBuilds`). The saved
+    // records are read again now, as another tab may have saved one since this tab loaded its
+    // list, and no installment is built if they cannot be read.
     let stored: PrivateTxRecord[]
     try {
       if (scriptPubkey === null) throw new Error('No wallet is connected')
@@ -204,10 +230,10 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
     } catch (error) {
       throw new Error('Saved payments could not be read; reload the page', { cause: error })
     }
-    const traced = installmentTraceInputs(
-      deps.lwk,
-      [...stored, ...privateTxs, ...discardedTxs],
-      fresh.state.loanOutpoint,
+    const saved = [...stored, ...privateTxs, ...discardedTxs]
+    const traced = installmentTraceInputs(deps.lwk, saved, fresh.state.loanOutpoint)
+    const earlierBuilds = installmentTraces(deps.lwk, saved, fresh.state.loanOutpoint).map(
+      record => record.txHex,
     )
     const usable = coins.filter(coin => !traced.has(outpointOf(coin)))
     let principalCoins
@@ -228,12 +254,14 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
         { cause: error },
       )
     }
+    // the fee, and R2's output when the installment releases nothing
     const feeCoins = selectFeeCoins(
       coins,
       deps.assets.policy,
       INSTALLMENT_WEIGHT_UNITS,
       deps.feeRate,
       principalCoins,
+      R2_EXTRA_OUTPUT_AMOUNT,
     )
     // The loan's next installment, which the builder signs the message for.
     const installment = fresh.state.installmentCount + 1
@@ -242,6 +270,8 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
       borrowerNftOutpoint: borrowerNft,
       principalCoins,
       feeCoins,
+      carryOutpoints,
+      earlierBuilds,
       lendingKey,
       tipHeight: freshTip,
       message,

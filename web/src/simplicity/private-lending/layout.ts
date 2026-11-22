@@ -7,12 +7,33 @@ export const NFT_AMOUNT = 1n
 /** No reissuance token: the one unit issued is each NFT's whole supply. */
 export const NO_REISSUANCE_TOKEN = 0n
 
-/** The creation's outputs (`attach_creation`); change and fee follow. */
+/**
+ * The carry token's supply, `S = 2^50` units, which the creation issues for the loan at its input
+ * 2 and holds, explicit, at its output 4 (the wasm's `carrySupply()`).
+ */
+export const CARRY_SUPPLY = 1n << 50n
+
+/**
+ * The creation's inputs (`attach_creation`): input 0 issues the borrower NFT, input 1 the lender
+ * NFT, and input 2, the first collateral coin, the carry token; the other collateral coins follow.
+ */
+export const CREATION_INPUT = {
+  borrowerNftIssuance: 0,
+  lenderNftIssuance: 1,
+  carryIssuance: 2,
+} as const
+
+/**
+ * The creation's outputs (`attach_creation`): the NFTs, the marker, the pending offer, then the
+ * carry supply, explicit at the principal's asset_auth (borrower NFT, no burn); change and fee
+ * follow.
+ */
 export const CREATION_OUTPUT = {
   borrowerNft: 0,
   lenderNft: 1,
   marker: 2,
   pendingOffer: 3,
+  carrySupply: 4,
 } as const
 
 /** The acceptance's covenant inputs (`attach_acceptance`); the lender's coins follow. */
@@ -28,36 +49,53 @@ export const PRINCIPAL_CLAIM_INPUT = { principal: 0, borrowerNft: 1 } as const
 export const PRINCIPAL_CLAIM_OUTPUT = { borrowerNft: 0, principal: 1 } as const
 
 /**
+ * The most installments a loan has: the release proof's tree of blinder commitments has 1024
+ * leaves, so the contract refuses an installment at step 1024, where only the full repayment is
+ * left.
+ */
+export const MAX_LOAN_INSTALLMENTS = 1024
+
+/**
  * The installment's inputs (`attach_installment`): the borrower NFT and the loan, then the
- * borrower's principal coins and its fee coins. The installment's key derives from the first
- * wallet coin, input 2.
+ * borrower's principal coins, then the loan's carries, then its fee coins. The installment's key
+ * derives from the first wallet coin, input 2, the first principal coin: never a carry, which
+ * every build at one step spends (proofs, O11).
  */
 export const INSTALLMENT_INPUT = { borrowerNft: 0, loan: 1, firstWalletCoin: 2 } as const
 
 /**
  * The installment's outputs (`attach_installment`): the borrower NFT back to the borrower,
- * explicit, the successor loan and the installment at its asset_auth (lender NFT, no burn); the
- * principal change follows at 3 if any, then the policy-asset change and the fee.
+ * explicit, the successor loan, the installment at its asset_auth (lender NFT, no burn), and the
+ * carries `W1` and `W2` at the principal's asset_auth (borrower NFT, no burn). Output 5 is the
+ * collateral released to the borrower, or, when nothing is released, one more confidential
+ * output to the borrower, so that the count does not tell (proofs, R2). At the first installment
+ * output 6 burns the carry supply's leftover. The principal change follows if any, then the
+ * policy-asset change and the fee.
  */
-export const INSTALLMENT_OUTPUT = { borrowerNft: 0, loan: 1, installment: 2 } as const
+export const INSTALLMENT_OUTPUT = {
+  borrowerNft: 0,
+  loan: 1,
+  installment: 2,
+  carry: 3,
+  secondCarry: 4,
+  release: 5,
+  leftoverBurn: 6,
+} as const
 
 /** The full repayment's inputs (`attach_full_repayment`); the borrower's coins follow. */
 export const REPAYMENT_INPUT = { borrowerNft: 0, offer: 1 } as const
 
 /**
  * The full repayment's outputs: the borrower NFT burned and the repayment at its asset_auth
- * (`attach_full_repayment`), then the collateral back to the borrower; change and fee follow.
+ * (`attach_full_repayment`), the collateral back to the borrower, then the confidential burn of
+ * every carry unit (`attach_carry_sweep`); change and fee follow.
  */
-export const REPAYMENT_OUTPUT = { borrowerNftBurn: 0, repayment: 1, collateral: 2 } as const
-
-/** The zero-debt close's inputs (`attach_zero_debt_close`); the fee coins follow. */
-export const ZERO_DEBT_CLOSE_INPUT = { borrowerNft: 0, loan: 1 } as const
-
-/**
- * The zero-debt close's outputs: the borrower NFT burned, the `OP_RETURN` of the debt's blinder
- * `k` (`attach_zero_debt_close`), then the collateral back to the borrower; change and fee follow.
- */
-export const ZERO_DEBT_CLOSE_OUTPUT = { borrowerNftBurn: 0, key: 1, collateral: 2 } as const
+export const REPAYMENT_OUTPUT = {
+  borrowerNftBurn: 0,
+  repayment: 1,
+  collateral: 2,
+  carryBurn: 3,
+} as const
 
 /**
  * The lender's claims' inputs: the lender NFT, then the locked outputs it unlocks, from input 1:
@@ -74,15 +112,27 @@ export const CLAIM_OUTPUT = { lenderNft: 0, claimed: 1 } as const
 
 /**
  * The cancellation's inputs (`attach_cancellation`): the pending offer, the lender NFT at its
- * script_auth lock, then the borrower NFT; fee coins follow.
+ * script_auth lock, the borrower NFT, then the carry supply (the creation's output 4, unlocked by
+ * the borrower NFT); fee coins follow.
  */
-export const CANCELLATION_INPUT = { offer: 0, lenderNft: 1, borrowerNft: 2 } as const
+export const CANCELLATION_INPUT = {
+  offer: 0,
+  lenderNft: 1,
+  borrowerNft: 2,
+  carrySupply: 3,
+} as const
 
 /**
- * The cancellation's outputs: both NFTs burned (`attach_cancellation`), then the collateral back
- * to the borrower; change and fee follow.
+ * The cancellation's outputs: both NFTs and the carry supply burned (`attach_cancellation`, the
+ * supply explicit: it is the same for every loan), then the collateral back to the borrower;
+ * change and fee follow.
  */
-export const CANCELLATION_OUTPUT = { lenderNftBurn: 0, borrowerNftBurn: 1, collateral: 2 } as const
+export const CANCELLATION_OUTPUT = {
+  lenderNftBurn: 0,
+  borrowerNftBurn: 1,
+  carryBurn: 2,
+  collateral: 3,
+} as const
 
 /**
  * The liquidation's inputs (`attach_liquidation`): the loan, then the lender NFT, then from input

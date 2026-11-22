@@ -17,6 +17,18 @@ export function unspentUtxo(
   return candidate.utxos.find(utxo => utxo.utxo_type === type && utxo.spent_txid === null)
 }
 
+/**
+ * The loan's carries the indexer lists unspent, `"<txid>:<vout>"`: the creation's carry supply
+ * before the first installment, then the last installment's outputs 3 and 4. Untrusted: the
+ * installment and the full repayment take them only when they are exactly the carries the loan
+ * opens on chain (`verifiedLoanCarries`).
+ */
+export function unspentCarries(candidate: PrivateCandidateDetails): string[] {
+  return candidate.utxos
+    .filter(utxo => utxo.utxo_type === 'carry' && utxo.spent_txid === null)
+    .map(utxoOutpoint)
+}
+
 /** The acceptance transaction, as the indexer saw it: the one that created the active offer. */
 export function acceptanceTxid(candidate: PrivateCandidateDetails): string | undefined {
   return candidate.utxos.find(utxo => utxo.utxo_type === 'active_offer')?.txid
@@ -40,8 +52,8 @@ export function latestLoanUtxo(candidate: PrivateCandidateDetails): PrivateUtxo 
 }
 
 /**
- * The last loan output of a repaid offer, spent by its close (the full repayment or the zero-debt
- * close), as the indexer saw it: its `spent_txid` is the close. Undefined for an offer not repaid.
+ * The last loan output of a repaid offer, spent by its close (the full repayment), as the indexer
+ * saw it: its `spent_txid` is the close. Undefined for an offer not repaid.
  */
 export function closedLoanUtxo(candidate: PrivateCandidateDetails): PrivateUtxo | undefined {
   if (candidate.status !== 'repaid') return undefined
@@ -98,8 +110,8 @@ export function repaymentBorrowerNftOutpoint(
 }
 
 /**
- * The borrower NFT that the next installment, the full repayment or the zero-debt close of a loan
- * spends: output 0 of its last installment (`installmentTxids`, read on chain), or before any,
+ * The borrower NFT that the next installment or the full repayment of a loan spends: output 0 of
+ * its last installment (`installmentTxids`, read on chain), or before any,
  * `repaymentBorrowerNftOutpoint`. The builders walk it back on chain to the principal claim.
  */
 export function loanBorrowerNftOutpoint(
