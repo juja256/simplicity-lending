@@ -7,7 +7,7 @@ terms, a lender console and a borrower app) on upstream LWK, then add v2's contr
 changes: fresh addresses, the hidden expiry, partial repayment and private messages.
 
 **Architecture:** Six phases, run in order, each on its own branch and closed by one review
-(phase 7, item 3(b), is postponed; see its section). Phase 1 is broken into tasks here. Phases 2
+(phase 7, item 3(b), was postponed, then resumed and built on 2026-11-22; see its section). Phase 1 is broken into tasks here. Phases 2
 to 7 give their scope, files, done-when checks and
 decision gates, and each is broken into tasks (with this skill) when the phase before it is
 merged: phase 1 moves every private flow onto `psetBuilder.ts`, so file-level tasks written now
@@ -23,8 +23,8 @@ TypeScript and Vite with pnpm 10.33; upstream LWK (`lwk_wasm`, the `lwk` submodu
 
 ## Global Constraints
 
-- v2 covers items 1, 2, 3(a), 6, 7, 8, 9 and 10. Item 5 comes after v2, and item 3(b) waits
-  until the user brings it back (2026-11-14). Item 4 needs no
+- v2 covers items 1, 2, 3(a), 6, 7, 8, 9 and 10. Item 5 comes after v2. Item 3(b), postponed
+  on 2026-11-14, was built as phase 7 (2026-11-22). Item 4 needs no
   work beyond keeping acceptance hidden after expiry.
 - No migration: the app knows only the v2 contract, and v1 testnet loans are dropped.
 - One branch per phase, `v2/phase-<n>-<name>`, from the `v2` branch; one commit per task; pushes
@@ -2306,7 +2306,7 @@ creation message, its acceptance and installment carry signed ones);
 
 The phase review follows (whole branch, Opus).
 
-## Phase 7: Proportional collateral release (spec item 3b) — postponed
+## Phase 7: Proportional collateral release (spec item 3b) — built 2026-11-22
 
 **Postponed on 2026-11-14:** the demo repays in installments without releasing collateral
 (phase 5's item 3(a)). This phase starts only when the user brings it back; v2's final checks run
