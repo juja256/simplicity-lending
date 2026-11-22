@@ -11,7 +11,9 @@ import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { useKeyedModal } from '@/hooks/useKeyedModal'
 import { privateLendingWasmQueryKey } from '@/privateLending/hooks/queryKeys'
+import { useFoundCollaterals } from '@/privateLending/hooks/useCollateralLeft'
 import { useDirectory } from '@/privateLending/hooks/useDirectory'
+import { useLoans } from '@/privateLending/hooks/useLoan'
 import { usePrivateOffers } from '@/privateLending/hooks/usePrivateOffers'
 import {
   BLOCKS_PER_DAY,
@@ -213,7 +215,21 @@ export default function ProposalsPage() {
       ),
     [wasm, proposals, creationHeights, own],
   )
-  const summary = useMemo(() => bookSummary(opened, tipHeight), [opened, tipHeight])
+  // The collateral the active loans hold: read with each loan, or found by the lender's search,
+  // which the loan book shares; the strip says "at most" until every one is known.
+  const activeLoans = useMemo(
+    () => opened.filter(item => item.candidate.status === 'active'),
+    [opened],
+  )
+  const reads = useLoans(activeLoans)
+  const loanFigures = new Map(
+    activeLoans.flatMap(item => {
+      const figures = reads.get(item.txid)?.figures
+      return figures === undefined ? [] : [[item.txid, figures] as const]
+    }),
+  )
+  const found = useFoundCollaterals(loanFigures)
+  const summary = bookSummary(opened, tipHeight, loanFigures, found)
   const unopened = lending.length - opened.length
   const ownFailed = own === undefined && ownQuery.isError
   // Without the lender's terms or the app's loan rules, no proposal can be checked.

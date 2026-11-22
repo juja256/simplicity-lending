@@ -169,8 +169,10 @@ With no stage named, every stage below but `short-proposal` runs in this order.
   is replaced).
 - `create`: the borrower creates an offer to the lender of a 1-day term, as the borrower's form
   sets it: it expires 1 440 + 60 blocks after the tip (`proposalExpiry`). It builds twice from the
-  same coins and checks that the NFTs and the output 3 nonce differ, runs its self-check and
-  broadcasts; the lender then opens and verifies the offer. Its terms carry a private message,
+  same coins and checks that the NFTs, the carry token and the output 3 nonce differ, runs its
+  self-check and broadcasts; the lender then opens and verifies the offer, and finds the loan's
+  carry supply at output 4, 2^50 explicit units of the token input 2 issues, at the principal's
+  asset_auth (`creationCarrySupply`). Its terms carry a private message,
   Cyrillic with an emoji, which the lender reads back when it opens the offer, and the borrower
   when it opens its own from its seed. Counted by the term rule
   (`termBlocksOf`) from the block the creation confirmed in, the offer's term must be 1 day and
@@ -184,24 +186,36 @@ With no stage named, every stage below but `short-proposal` runs in this order.
 - `repay-partial`: the borrower pays two installments, each a third of what the loan owes then
   (records `repay-partial-1` and `repay-partial-2`), and between them the lender claims the first
   (record `claim-installment-1`): the lender NFT comes back to a lender address, and the lender's
-  wallet receives the installment. Each takes the loan's output, and the claim the unspent
-  installments, from the local testnet indexer (below), as the app does, and the stage checks them
-  against the records. Before saving an installment, both parties read the loan back with it from
-  their seeds: the borrower must rebuild what the loan owes, and the lender must open the
-  installment's amount. Each installment carries the borrower's message, which both parties must
-  read from the loan's state, verified for that installment, before saving and again from the
-  chain once it confirmed. The second installment is left unclaimed.
-- `repay`: the borrower repays the rest, `R` minus the installments, taking the loan's output from
-  the indexer as `repay-partial` does. The borrower NFT is burned, the repayment, whose value
-  commitment is the loan's debt, is locked to the lender NFT, and the collateral comes back. The
-  repayment carries the borrower's message, which the lender reads from the confirmed repayment,
-  verified, and the borrower cannot read back.
+  wallet receives the installment. Each takes the loan's output and its carries, and the claim the
+  unspent installments, from the local testnet indexer (below), as the app does, and the stage
+  checks them against the records; the carries must also be the ones the borrower opens on chain
+  (`verifiedLoanCarries`). Each installment releases the collateral it pays for, 6 654 and then
+  4 436 tL-sats: the stage checks the PSET's layout (the principal coins from input 2, then the
+  carries; the successor holding the collateral less the release; the carries at outputs 3 and 4,
+  holding `R + 1` units between them, blinded to the borrower; the release at output 5; at the
+  first installment the burn of the supply's leftover, `2^50 − R − 1`, at output 6), and once it
+  confirmed, that the borrower's wallet received the release, the amount the release rule gives
+  in the app's own arithmetic (`releaseForPayment`). Before saving an installment, both parties
+  read the loan back with it from their seeds: the borrower must rebuild what the loan owes, and
+  the lender must open the installment's amount, and both must find the collateral it left. Each
+  installment carries the borrower's message, which both parties must read from the loan's state,
+  verified for that installment, before saving and again from the chain once it confirmed. The
+  second installment is left unclaimed.
+- `repay`: the borrower repays the rest, `R` minus the installments, taking the loan's output and
+  its carries from the indexer as `repay-partial` does. The borrower NFT is burned, the
+  repayment, whose value commitment is the loan's debt, is locked to the lender NFT, the
+  collateral the installments left, 8 910 tL-sats, comes back to the borrower's wallet, and the
+  carries are spent and their `R + 1` units burned in one confidential `OP_RETURN` (output 3). The
+  releases and the collateral back must add up to the collateral exactly. The repayment carries the
+  borrower's message, which the lender reads from the confirmed repayment, verified, and the
+  borrower cannot read back.
 - `claim-repayment`: the lender's final claim, which burns its lender NFT. It reads the loan the
   repayment spent and the unspent installments from the indexer, and must sweep the unclaimed
   second installment, then the repayment, with the combined opening. The lender's wallet must then
   hold `R` from its two claims, which the stage prints one by one.
 - `cancel`: a new offer (record `cancel-create`), which the borrower cancels (record `cancel`).
-  Both NFTs are burned and the collateral comes back to the borrower.
+  Both NFTs and the carry supply (input 3, burned explicit at output 2) are burned, and the
+  collateral comes back to the borrower.
 - `liquidate`: a new offer that expires 3 blocks after the tip (`liquidate-create`), which the
   lender accepts (`liquidate-accept`). While the tip is below the expiry, a liquidation must be
   refused with `expiry-not-reached` before anything is fetched or built: it is tried once the
@@ -234,9 +248,14 @@ With no stage named, every stage below but `short-proposal` runs in this order.
   terms it must break the shortest term only. The stage stops there; the demo accepts and
   liquidates it.
 
-Each stage prints its txids and the PSET it built, with the checks it ran. It fails if a covenant
-or NFT input's witness outweighs the constant its builder gives LWK for the fee: on chain, and in
-every stage but `claim-principal` also before broadcasting. The liquidation must also carry the
+Each stage prints its txids and the PSET it built, with the checks it ran. It fails if a covenant,
+carry or NFT input's witness outweighs the constant its builder gives LWK for the fee: on chain,
+and in every stage but `claim-principal` also before broadcasting. An installment and the full
+repayment also fail if they pay a higher fee than the repay form reserves for them
+(`estimateFeeBudgetSats` of `INSTALLMENT_WEIGHT_UNITS` and `REPAY_WEIGHT_UNITS`). The stages print
+the weight, the discounted size, the fee and the reserve, and how the weight compares with the
+weight the reserve stands for before its margin; on chain they check the weight they read from the
+encoding against esplora's. The liquidation must also carry the
 expiry as its lock time, with sequence `0xfffffffe` on the offer input, and be mined after the
 expiry.
 
@@ -253,8 +272,15 @@ cancellation of the `cancel-create` offer, and `liquidate-dry` the liquidation o
 `liquidate-accept` one, which below the expiry checks the refusal instead. Before that,
 `liquidate-dry` builds the `create` loan's liquidation after its installments, at its expiry,
 which the tip has not reached, so it needs the `create` and `accept` records too. Finalizing it
-runs the covenant with the debt hash the loan holds after the installments, and the installments
-no claim took are swept. It is never broadcast.
+runs the covenant with the debt hash the loan holds after the installments, the installments no
+claim took are swept, and the lender gets the collateral they left. Before it, the lender's search
+(`findCollateral`, which the app runs in a Web Worker) must find that collateral from the loan
+output's commitments and the step's blinder alone. The builders get the search too, but call it
+only for an installment that does not open for the lender, which no e2e installment is. So the
+stage builds the liquidation again for a lender served the last installment with one byte of its
+output 2's range proof changed (the txid stays the same, and the amount no longer opens): the
+builder must search once, find the same collateral, sweep nothing it cannot open, and finalize.
+Neither is ever broadcast.
 
 `repay-hostile-dry` checks that a hostile indexer cannot lead the borrower to repay while the
 principal may be unclaimed, which would burn the only key to it. It reads the `create` offer's
@@ -379,9 +405,13 @@ part:
    it with a message of its own; the borrower's My loans links to "Messages (2)", whose timeline
    shows the proposal's message as its own and the lender's acceptance message, verified
    (screenshot `borrow-messages`); the borrower receives the principal; the repay form opens on
-   the whole repayment, and the borrower pays half of it as an installment, which the loan book
-   shows as repaid and claimable; the lender claims it; the borrower repays the rest, and the
-   lender's final claim takes that repayment, with no installment left to sweep: the loan book
+   the whole repayment, with nothing of the collateral released, and the borrower pays half of it
+   as an installment, which releases the collateral it pays for: the form's summary, My loans
+   (**Released**, **Left**) and the loan book (released and left under **Collateral**) show the
+   release the release rule gives (`releaseForPayment`), and the loan book's table fits its area at
+   1280 px with no sideways scroll; the loan book shows the installment as repaid and claimable;
+   the lender claims it; the borrower repays the rest, which gives back the collateral left, and
+   the lender's final claim takes that repayment, with no installment left to sweep: the loan book
    then shows the loan claimed, repaid in full, with nothing left to claim;
 5. once the short loan expired, the lender liquidates it, and the loan book shows it liquidated;
 6. each borrower page has no horizontal scroll at 375 px, and every page of both areas gets a

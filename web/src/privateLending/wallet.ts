@@ -29,8 +29,9 @@ export function selectAssetCoins(
 
 /**
  * Confirmed policy-asset coins covering the fee of a transaction whose covenant inputs weigh
- * `weightUnits`, at `feeRate` sat/kvb. Coins in `exclude` are left out, so every input of the
- * transaction stays distinct. Throws on an insufficient balance.
+ * `weightUnits`, at `feeRate` sat/kvb, and `extraSats` more that the transaction pays out of
+ * them. Coins in `exclude` are left out, so every input of the transaction stays distinct. Throws
+ * on an insufficient balance.
  */
 export function selectFeeCoins(
   coins: WalletTxOut[],
@@ -38,12 +39,13 @@ export function selectFeeCoins(
   weightUnits: number,
   feeRate: number,
   exclude: readonly WalletTxOut[] = [],
+  extraSats = 0n,
 ): WalletTxOut[] {
   const candidates = coins.filter(coin => !exclude.includes(coin))
   const picked = selectFeeUtxos(
     candidates,
     policyAsset,
-    estimateFeeBudgetSats(weightUnits, feeRate),
+    estimateFeeBudgetSats(weightUnits, feeRate) + extraSats,
     feeRate,
   )
   return candidates.filter(coin => picked.includes(coin))
@@ -51,10 +53,12 @@ export function selectFeeCoins(
 
 /**
  * What a creation weighs beyond the wallet's first input, its change and the base transaction:
- * two issuances, the two explicit NFT outputs, the marker and the blinded pending offer. Testnet
- * creation 6816e8b1…682d weighs 12 466 WU with 4 wallet inputs, about 5 300 above that base.
+ * three issuances (the NFTs and the carry token), the two explicit NFT outputs, the marker, the
+ * blinded pending offer and the explicit carry supply. Testnet creation 6816e8b1…682d, before the
+ * carry token, weighs 12 466 WU with 4 wallet inputs, about 5 300 above that base; the carry's
+ * issuance and explicit output add about 700 more.
  */
-const CREATION_EXTRA_WEIGHT_UNITS = 6000
+const CREATION_EXTRA_WEIGHT_UNITS = 7000
 
 /** A creation's fee reserve with `inputs` wallet inputs, at `feeRate` sat/kvb. */
 export function creationFeeBudgetSats(inputs: number, feeRate: number): bigint {

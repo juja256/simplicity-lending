@@ -9,6 +9,7 @@ import Notice from '@/components/Notice'
 import { OfferStatusChip } from '@/components/OfferStatusChip'
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
+import { ACCEPT_WEIGHT_UNITS } from '@/privateLending/actionWeights'
 import { buildPrivateAcceptance } from '@/privateLending/flows/acceptance'
 import { MESSAGE_NOTE, messageError, messageToSend } from '@/privateLending/messages'
 import { canStillAccept, checkStillAcceptable, TERM_PASSED_NOTE } from '@/privateLending/offerView'
@@ -17,17 +18,11 @@ import { recordingSent, sentMessagesOf } from '@/privateLending/sentMessages'
 import { selectAssetCoins, selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
 import { useLwk } from '@/providers/lwk/useLwk'
 import { useWallet } from '@/providers/wallet/useWallet'
-import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
-import { SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/script-auth/witness'
 
 import PrivateOfferActionShell, {
   type FreshOffer,
   type PrivateOfferActionModalProps,
 } from './PrivateOfferActionShell'
-
-// The covenant inputs: the pending offer and the lender NFT at its script_auth lock.
-const ACCEPT_WEIGHT_UNITS =
-  PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.OfferAcceptance + SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY
 
 /** Why a proposal is not known to be within the lender's terms, in plain words. */
 function verdictReasons(verdict: Exclude<TermsVerdict, { kind: 'within' }>): string[] {

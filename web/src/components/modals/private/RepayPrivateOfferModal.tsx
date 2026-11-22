@@ -12,12 +12,13 @@ import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { useReadError } from '@/hooks/useReadError'
 import type { AsyncUpdatedPset } from '@/lwk/updatedPset'
-import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { asBorrowerError } from '@/privateLending/borrowerErrors'
-import { loanBorrowerNftOutpoint, utxoOutpoint } from '@/privateLending/candidate'
+import { loanBorrowerNftOutpoint, unspentCarries, utxoOutpoint } from '@/privateLending/candidate'
+import { releaseForPayment } from '@/privateLending/collateralFigures'
 import {
   buildPrivateInstallment,
   type InstallmentSummary,
+  R2_EXTRA_OUTPUT_AMOUNT,
 } from '@/privateLending/flows/installment'
 import { buildPrivateRepayment, type RepaymentSummary } from '@/privateLending/flows/repayment'
 import { outpointOf } from '@/privateLending/flows/shared'
@@ -28,11 +29,15 @@ import { messageError, messageToSend } from '@/privateLending/messages'
 import { borrowerActions, borrowerTermEnded, offerTxState } from '@/privateLending/offerView'
 import {
   checkInstallmentTerm,
+  checkSameLoan,
   installmentTraceInputs,
+  installmentTraces,
+  LOAN_CHANGED_NOTE,
   repayBroadcast,
   type RepayPlan,
   repayPlan,
 } from '@/privateLending/repayPlan'
+import { INSTALLMENT_WEIGHT_UNITS, REPAY_WEIGHT_UNITS } from '@/privateLending/repayWeights'
 import { recordingSent, sentMessagesOf } from '@/privateLending/sentMessages'
 import { selectAssetCoins, selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
 import { useLwk } from '@/providers/lwk/useLwk'
@@ -40,19 +45,12 @@ import { loadPrivateTxsForWallet } from '@/providers/pendingTransactions/storage
 import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
 import { usePendingTransactions } from '@/providers/pendingTransactions/usePendingTransactions'
 import { useWallet } from '@/providers/wallet/useWallet'
-import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
 import { ErrorHandler } from '@/utils/errorHandler'
 
 import PrivateOfferActionShell, {
   type FreshOffer,
   type PrivateOfferActionModalProps,
 } from './PrivateOfferActionShell'
-
-// The active offer (FullRepayment or Installment), and the borrower NFT, a wallet output.
-const REPAY_WEIGHT_UNITS =
-  PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.FullRepayment + EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY
-const INSTALLMENT_WEIGHT_UNITS =
-  PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.Installment + EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY
 
 /** The kinds the repay form saves. */
 const REPAY_TX_KINDS = ['private_installment', 'private_repay_offer'] as const
@@ -97,6 +95,7 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
           symbol: principalAsset.symbol,
           tipHeight,
           expiry,
+          installmentCount: loan?.installments.length ?? 0,
         })
   // A saved transaction is broadcast as it was built: its kind, not the form's plan, decides
   // whether it is an installment, also when it was saved in this modal and its broadcast failed.
@@ -109,6 +108,23 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
     expiry,
   )
   const pays = plan?.kind === 'refused' ? undefined : plan?.amount
+  // The collateral the loan holds now, and what this payment releases of it: the whole for the
+  // full repayment, `c_k − ceil((d_k − p)·C/R)` for an installment (it can be 0). The figures are
+  // the form's: the build refuses a loan that moved to another output since the form read it, so
+  // they are those of the state it builds on.
+  const held = loan?.collateral
+  const release =
+    held === undefined || owed === undefined || pays === undefined
+      ? undefined
+      : releaseForPayment(
+          {
+            total: terms.collateralAmount,
+            repayment: terms.repaymentAmount,
+            owed,
+            held,
+          },
+          pays,
+        )
   const insufficientBalance =
     pays !== undefined && BigInt(confirmedBalances[principalAsset.id] ?? 0) < pays
   // From the expiry block on, as the plan refuses an installment.
@@ -130,6 +146,12 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
     const lendingKey = await getLendingKey()
     const message = messageToSend(messageText)
     const fresh = await loadLoan(deps, offer, lendingKey, utxoOutpoint(utxo))
+    try {
+      checkSameLoan(loan?.loanOutpoint, fresh.state.loanOutpoint)
+    } catch (error) {
+      fresh.state.free()
+      throw error
+    }
     const freshOwed = fresh.state.remaining
     if (freshOwed === undefined) {
       throw new Error(
@@ -146,14 +168,15 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
       symbol: principalAsset.symbol,
       tipHeight: freshTip,
       expiry,
+      installmentCount: fresh.state.installmentCount,
     })
     if (freshPlan.kind === 'refused') throw new Error(freshPlan.message)
     if (freshPlan.kind !== plan.kind || freshPlan.amount !== plan.amount) {
-      throw new Error('The loan changed since the form was filled: check the amount again')
+      throw new Error(LOAN_CHANGED_NOTE)
     }
-    // The repayment and the zero-debt close burn the borrower NFT, the only key to an unclaimed
-    // principal: it needs the indexer's evidence of the claim, and never falls back to the NFT
-    // where the creation put it. After installments, it is at the last one's output 0.
+    // The repayment burns the borrower NFT, the only key to an unclaimed principal: it needs the
+    // indexer's evidence of the claim, and never falls back to the NFT where the creation put it.
+    // After installments, it is at the last one's output 0.
     const borrowerNft = loanBorrowerNftOutpoint(fresh.installmentTxids, item.txid, candidate)
     if (borrowerNft === undefined) {
       throw new Error(
@@ -165,6 +188,9 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
       throw new Error(`The loan's principal is not ${principalAsset.symbol}`)
     }
     const coins = deps.walletUtxos()
+    // The loan's carries as the indexer lists them: the builders take them only when they are the
+    // carries the loan opens on chain.
+    const carryOutpoints = unspentCarries(candidate)
     const sent = sentMessagesOf(network, lendingKey.fingerprint())
     const sentText = message === undefined ? {} : { text: message }
     const offerTxid = offer.creationTx.txid().toString()
@@ -186,6 +212,7 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
         borrowerNftOutpoint: borrowerNft,
         principalCoins,
         feeCoins,
+        carryOutpoints,
         collateralReceiver: walletReceiver(deps),
         lendingKey,
         message,
@@ -195,8 +222,9 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
     // An installment derives its key from the loan output, its first wallet input (input 2) and
     // the NFT's receiver script: it never starts from the first input of an earlier installment
     // of this loan saved here (discarded, or failed), which may have reached the network with the
-    // same key. The saved records are read again now, as another tab may have saved one since
-    // this tab loaded its list, and no installment is built if they cannot be read.
+    // same key, and it pays the same amount (the builder checks both: `earlierBuilds`). The saved
+    // records are read again now, as another tab may have saved one since this tab loaded its
+    // list, and no installment is built if they cannot be read.
     let stored: PrivateTxRecord[]
     try {
       if (scriptPubkey === null) throw new Error('No wallet is connected')
@@ -204,10 +232,10 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
     } catch (error) {
       throw new Error('Saved payments could not be read; reload the page', { cause: error })
     }
-    const traced = installmentTraceInputs(
-      deps.lwk,
-      [...stored, ...privateTxs, ...discardedTxs],
-      fresh.state.loanOutpoint,
+    const saved = [...stored, ...privateTxs, ...discardedTxs]
+    const traced = installmentTraceInputs(deps.lwk, saved, fresh.state.loanOutpoint)
+    const earlierBuilds = installmentTraces(deps.lwk, saved, fresh.state.loanOutpoint).map(
+      record => record.txHex,
     )
     const usable = coins.filter(coin => !traced.has(outpointOf(coin)))
     let principalCoins
@@ -228,12 +256,14 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
         { cause: error },
       )
     }
+    // the fee, and R2's output when the installment releases nothing
     const feeCoins = selectFeeCoins(
       coins,
       deps.assets.policy,
       INSTALLMENT_WEIGHT_UNITS,
       deps.feeRate,
       principalCoins,
+      R2_EXTRA_OUTPUT_AMOUNT,
     )
     // The loan's next installment, which the builder signs the message for.
     const installment = fresh.state.installmentCount + 1
@@ -242,6 +272,8 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
       borrowerNftOutpoint: borrowerNft,
       principalCoins,
       feeCoins,
+      carryOutpoints,
+      earlierBuilds,
       lendingKey,
       tipHeight: freshTip,
       message,
@@ -270,30 +302,38 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
             },
             {
               label: 'Collateral back to you',
-              value: formatCollateralDisplay(terms.collateralAmount),
+              value: held === undefined ? 'What the loan holds' : formatCollateralDisplay(held),
             },
           ]
     }
     if (pays === undefined || owed === undefined) return []
-    return plan?.kind === 'full'
-      ? [
-          { label: 'You repay', value: formatPrincipalAmount(pays) },
-          {
-            label: 'Collateral back to you',
-            value: formatCollateralDisplay(terms.collateralAmount),
-          },
-        ]
-      : [
-          { label: 'You pay', value: formatPrincipalAmount(pays) },
-          { label: 'Still owed after it', value: formatPrincipalAmount(owed - pays) },
-        ]
+    if (plan?.kind === 'full') {
+      return [
+        { label: 'You repay', value: formatPrincipalAmount(pays) },
+        {
+          label: 'Collateral back to you',
+          value: held === undefined ? 'What the loan holds' : formatCollateralDisplay(held),
+        },
+      ]
+    }
+    return [
+      { label: 'You pay', value: formatPrincipalAmount(pays) },
+      { label: 'Still owed after it', value: formatPrincipalAmount(owed - pays) },
+      ...(release === undefined || held === undefined
+        ? []
+        : [
+            { label: 'Collateral released', value: formatCollateralDisplay(release) },
+            { label: 'Collateral left after it', value: formatCollateralDisplay(held - release) },
+          ]),
+    ]
   }, [
     unsentRecord,
     isInstallment,
     owed,
     pays,
+    held,
+    release,
     plan?.kind,
-    terms,
     formatCollateralDisplay,
     formatPrincipalAmount,
   ])
@@ -326,6 +366,15 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
             rows={[
               { label: 'Paid so far', value: formatPrincipalAmount(loan.paid) },
               { label: 'Still owed', value: formatPrincipalAmount(owed) },
+              ...(held === undefined
+                ? []
+                : [
+                    {
+                      label: 'Collateral released so far',
+                      value: formatCollateralDisplay(terms.collateralAmount - held),
+                    },
+                    { label: 'Collateral left', value: formatCollateralDisplay(held) },
+                  ]),
             ]}
           />
           <UiTextField
@@ -338,7 +387,8 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
             description={
               plan?.kind === 'full'
                 ? 'The whole debt: your collateral comes back to you.'
-                : 'Less than you owe pays an installment; the rest stays owed.'
+                : 'Less than you owe pays an installment, which releases part of your collateral; ' +
+                  'the rest stays owed.'
             }
             errorMessage={plan?.kind === 'refused' ? plan.message : undefined}
           />

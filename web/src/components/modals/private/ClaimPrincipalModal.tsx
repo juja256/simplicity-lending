@@ -4,21 +4,16 @@ import { useMemo } from 'react'
 import { loanAmounts } from '@/areas/borrow/proposalForm'
 import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
-import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
+import { CLAIM_PRINCIPAL_WEIGHT_UNITS } from '@/privateLending/actionWeights'
 import { borrowerNftOutpoint, utxoOutpoint } from '@/privateLending/candidate'
 import { buildPrincipalClaim } from '@/privateLending/flows/claimPrincipal'
 import { borrowerActions } from '@/privateLending/offerView'
 import { selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
-import { ASSET_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/asset-auth/witness'
 
 import PrivateOfferActionShell, {
   type FreshOffer,
   type PrivateOfferActionModalProps,
 } from './PrivateOfferActionShell'
-
-// The principal at its asset_auth (no burn), and the borrower NFT, a wallet output.
-const CLAIM_WEIGHT_UNITS =
-  ASSET_AUTH_MAX_WEIGHT_TO_SATISFY + EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY
 
 /**
  * The borrower claims the principal the lender paid at acceptance. The borrower NFT unlocks it and
@@ -36,7 +31,7 @@ export default function ClaimPrincipalModal(props: PrivateOfferActionModalProps)
     const feeCoins = selectFeeCoins(
       deps.walletUtxos(),
       deps.assets.policy,
-      CLAIM_WEIGHT_UNITS,
+      CLAIM_PRINCIPAL_WEIGHT_UNITS,
       deps.feeRate,
     )
     return buildPrincipalClaim(deps, offer, {

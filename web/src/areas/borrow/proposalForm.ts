@@ -19,7 +19,7 @@ import {
 } from '@/privateLending/proposalCheck'
 import type { PrivateLendingWasm } from '@/privateLending/wasm'
 
-type FormWasm = Pick<PrivateLendingWasm, 'minCollateral' | 'minRepayment'>
+type FormWasm = Pick<PrivateLendingWasm, 'checkOfferBounds' | 'minCollateral' | 'minRepayment'>
 
 /**
  * The creation builder's limit (`flows/creation.ts`): the interest is at most 0xffff basis points
@@ -184,6 +184,9 @@ export function proposalOfForm(
       },
     }
   }
+  // The bounds of proportional release, which the lender checks before accepting.
+  const bounds = offerBoundsErrors(wasm, collateral, repayment)
+  if (bounds !== null) return { proposal: null, errors: bounds }
   return {
     proposal: {
       principal,
@@ -195,6 +198,47 @@ export function proposalOfForm(
     },
     errors: null,
   }
+}
+
+/**
+ * The fields of a proposal of `collateral` and full repayment `repayment` (base units) outside
+ * the bounds of proportional release, `1 ≤ C ≤ 2^44` and `1 ≤ R ≤ 2^50 − 2`, or null within them:
+ * the lender refuses such an offer, since the release proof is sound only within them, and the
+ * creation refuses to build it (`offerBoundsError`). The wasm's `checkOfferBounds` decides, and
+ * says which field it is: an amount alone is out of bounds when the check fails with the other one
+ * at 1, within the bounds. The app holds no copy of the limits.
+ */
+export function offerBoundsErrors(
+  wasm: Pick<PrivateLendingWasm, 'checkOfferBounds'>,
+  collateral: bigint,
+  repayment: bigint,
+): ProposalErrors | null {
+  const within = (c: bigint, r: bigint) => {
+    try {
+      wasm.checkOfferBounds(c, r)
+      return true
+    } catch {
+      return false
+    }
+  }
+  if (within(collateral, repayment)) return null
+  if (!within(collateral, 1n)) {
+    return {
+      collateral:
+        collateral < 1n
+          ? 'The collateral must be more than zero.'
+          : 'The collateral is more than a lender can accept: ask for less.',
+    }
+  }
+  if (!within(1n, repayment)) {
+    return {
+      aprPercent:
+        repayment < 1n
+          ? 'The repayment must be more than zero.'
+          : 'The repayment is more than a lender can accept: lower the principal or the APR.',
+    }
+  }
+  return { principal: 'A lender cannot accept these amounts.' }
 }
 
 /**

@@ -2,7 +2,10 @@
 // as the Rust code. Run it with `pnpm parity`; it must pass before browser addresses are relied on.
 // It checks two offers, whose `A` has either prefix bit, and the first offer's loan after one
 // installment from regtest: the state both parties read (`checkLoanState`) and the loan's
-// scripts at each debt hash.
+// scripts at each debt hash. For the release of collateral (`checkRelease`): the arguments of the
+// release proof (its points, `FS_IV`, `BLINDER_ROOT`), the installment's witness with its proof,
+// the collateral and the release each party reads, the borrower's carries, the bounds and the
+// lender's search.
 // It also checks, offline, the lender terms arithmetic of the wasm against the core's vectors
 // (`checkLenderTerms`), the app's conversion of typed terms (`checkTermsConversion`), the check
 // of a directory entry the core signed (`checkDirectoryEntryParity`), the rules of the app's
@@ -66,6 +69,12 @@ interface FixtureArguments {
   expiry_hash: string
   repayment_asset_prefix_bit: number
   repayment_asset_x: string
+  repayment_asset_point: string
+  collateral_asset_point: string
+  collateral_value_point: string
+  starting_debt_point: string
+  fs_iv: string
+  blinder_root: string
 }
 
 interface Fixture {
@@ -80,17 +89,28 @@ interface Fixture {
   pending_offer_script_pubkey: string
   active_offer_script_pubkey: string
   lender_nft_script_pubkey: string
+  // The loan's carry token, issued by the creation at input 2 and held at its output 4.
+  carry_asset_id: string
   // `debt` is the 33-byte consensus encoding of a value commitment, hex, as the web's witness
-  // takes it; `debt_hash` is the debt hash of the loan each vector spends, `h(A, D)`.
+  // takes it; `debt_hash` is the debt hash of the loan each vector spends, `h(A, D)`. The
+  // installment's vector is at acceptance (index 0), with its release proof: points as `x ‖ y`.
   witness_vectors: {
-    installment: WitnessVector & { debt_hash: string; debt: string }
+    installment: WitnessVector & {
+      debt_hash: string
+      debt: string
+      index: number
+      blinder_commitment: string
+      path: { is_right: boolean; sibling: string }[]
+      commitments: string[]
+      responses: string[]
+    }
     full_repayment: WitnessVector & { debt_hash: string }
-    zero_debt_close: WitnessVector & { debt_hash: string; debt: string; k: string }
     liquidation: WitnessVector & { debt_hash: string; salt: string; expiry: number }
   }
   // The offer's loan on regtest, after its acceptance and one installment, which both parties
   // open; for each loan output (the acceptance's, then the installment's), the debt hash its
-  // storage holds and its script, from the contract.
+  // storage holds, its script and the collateral it holds, and the collateral the installment
+  // released.
   loan: {
     acceptance_tx: string
     installment_txs: string[]
@@ -101,6 +121,8 @@ interface Fixture {
     debt_commitment: string
     debt_hashes: string[]
     loan_script_pubkeys: string[]
+    collateral: [number, number]
+    release: number
   }
   // The private messages the loan carries, as the Rust test wrote them: the borrower's in the
   // creation's terms, the lender's on the acceptance's principal output and the borrower's on the
@@ -213,6 +235,12 @@ function expectedArguments(a: FixtureArguments = fixture.arguments): PrivateOffe
     expiryHash: a.expiry_hash,
     repaymentAssetPrefixBit: a.repayment_asset_prefix_bit,
     repaymentAssetX: a.repayment_asset_x,
+    repaymentAssetPoint: a.repayment_asset_point,
+    collateralAssetPoint: a.collateral_asset_point,
+    collateralValuePoint: a.collateral_value_point,
+    startingDebtPoint: a.starting_debt_point,
+    fsIv: a.fs_iv,
+    blinderRoot: a.blinder_root,
   }
 }
 
@@ -390,9 +418,23 @@ async function main(): Promise<void> {
     'the prefix bit of the repayment asset enters the program',
     !verifyOfferAddresses(privateOfferScripts(sources, otherBit, network), creationTx),
   )
+  // So do the release proof's arguments: the lender's address check covers them.
+  const other = fixture.other_offer.arguments
+  for (const [name, changed] of [
+    ['FS_IV', { ...expected, fsIv: tamperLastHexDigit(expected.fsIv) }],
+    ['BLINDER_ROOT', { ...expected, blinderRoot: tamperLastHexDigit(expected.blinderRoot) }],
+    ['STARTING_DEBT_POINT', { ...expected, startingDebtPoint: other.starting_debt_point }],
+    ['COLLATERAL_VALUE_POINT', { ...expected, collateralValuePoint: other.collateral_value_point }],
+  ] as const) {
+    check(
+      `another ${name} is another program`,
+      !verifyOfferAddresses(privateOfferScripts(sources, changed, network), creationTx),
+    )
+  }
 
   checkWitnessVectors(scripts, network)
   checkLoanState(scripts, { lender, asLender }, { borrower, asBorrower })
+  checkRelease({ lender, asLender }, { borrower, asBorrower })
   checkMessages({ lender, asLender }, { borrower, asBorrower })
   checkOtherPrefixBit(sources, network, lender, borrower)
 
@@ -414,12 +456,7 @@ async function main(): Promise<void> {
  * of a debt, cannot pass. A reversed debt x, debt hash, key or salt must fail to run.
  */
 function checkWitnessVectors(scripts: PrivateOfferScripts, network: lwk.Network): void {
-  const {
-    installment,
-    full_repayment: repayment,
-    zero_debt_close: close,
-    liquidation,
-  } = fixture.witness_vectors
+  const { installment, full_repayment: repayment, liquidation } = fixture.witness_vectors
   const reversed = (value: string) => Buffer.from(value, 'hex').reverse().toString('hex')
   // the debt's prefix, then its x reversed
   const reversedX = (debt: string) => debt.slice(0, 2) + reversed(debt.slice(2))
@@ -432,7 +469,7 @@ function checkWitnessVectors(scripts: PrivateOfferScripts, network: lwk.Network)
       'installment',
       installment,
       reverse => ({
-        branch: 'Installment',
+        ...installmentWitness(installment),
         debt: reverse ? reversedX(installment.debt) : installment.debt,
       }),
     ],
@@ -442,15 +479,6 @@ function checkWitnessVectors(scripts: PrivateOfferScripts, network: lwk.Network)
       reverse => ({
         branch: 'FullRepayment',
         debtHash: reverse ? reversed(repayment.debt_hash) : repayment.debt_hash,
-      }),
-    ],
-    [
-      'zero-debt close',
-      close,
-      reverse => ({
-        branch: 'ZeroDebtClose',
-        debt: close.debt,
-        key: reverse ? reversed(close.k) : close.k,
       }),
     ],
     [
@@ -484,6 +512,63 @@ function checkWitnessVectors(scripts: PrivateOfferScripts, network: lwk.Network)
       `${name} with a reversed 32-byte value fails`,
       throws(() => run(true)),
     )
+  }
+
+  // The installment's release proof and Merkle path: a reversed response or sibling, or `Y` with
+  // its coordinates swapped, must fail to run, and the honest witness runs.
+  const honest = installmentWitness(installment)
+  const swapped = (point: string) => point.slice(64) + point.slice(0, 64)
+  const tampers: [string, PrivateLendingWitness][] = [
+    [
+      'a reversed response',
+      { ...honest, responses: honest.responses.map((z, m) => (m === 3 ? reversed(z) : z)) },
+    ],
+    [
+      'a reversed path sibling',
+      {
+        ...honest,
+        path: honest.path.map((node, k) =>
+          k === 4 ? { ...node, sibling: reversed(node.sibling) } : node,
+        ),
+      },
+    ],
+    ['Y with x and y swapped', { ...honest, blinderCommitment: swapped(honest.blinderCommitment) }],
+    [
+      'a commitment with x and y swapped',
+      { ...honest, commitments: honest.commitments.map((t, m) => (m === 6 ? swapped(t) : t)) },
+    ],
+    ['another index', { ...honest, index: honest.index + 1 }],
+  ]
+  for (const [name, witness] of tampers) {
+    check(
+      `installment with ${name} fails`,
+      throws(() =>
+        scripts.program.run(
+          lwk.Transaction.fromString(installment.tx),
+          scripts.activeSpendInfoAt(installment.debt_hash).controlBlock(scripts.program.cmr),
+          lwk.Transaction.fromString(installment.prevouts_tx).outputs,
+          installment.input_index,
+          buildPrivateLendingWitness(witness),
+          network,
+          lwk.SimplicityLogLevel.None,
+        ),
+      ),
+    )
+  }
+}
+
+/** The installment's witness of the fixture's vector, as the web takes it from a plan. */
+function installmentWitness(
+  vector: Fixture['witness_vectors']['installment'],
+): PrivateLendingWitness & { branch: 'Installment' } {
+  return {
+    branch: 'Installment',
+    debt: vector.debt,
+    index: vector.index,
+    blinderCommitment: vector.blinder_commitment,
+    path: vector.path.map(node => ({ isRight: node.is_right, sibling: node.sibling })),
+    commitments: vector.commitments,
+    responses: vector.responses,
   }
 }
 
@@ -600,6 +685,197 @@ function checkLoanState(
         ...loan.installment_txs,
       ]),
     ),
+  )
+}
+
+/**
+ * The release of collateral, through the wasm:
+ * - the bounds of release at acceptance: `C = 2^44` and `R = 2^50 − 2` pass, one more of either
+ *   is `out-of-bounds`, and the fixture's offer is within them;
+ * - the collateral both parties read after the installment, `ceil(d_1·C/R)`, and the release the
+ *   installment made, which the borrower's preview gives before it;
+ * - the borrower's carries: the creation's supply, then the installment's outputs 3 and 4, of
+ *   `R + 1` units of the carry token; the lender opens none;
+ * - the borrower's plan at acceptance: its `Y` and Merkle path are the fixture's, and its witness
+ *   parses against the program's type;
+ * - the lender's search for the collateral at `2^24`, and the opening it gives.
+ */
+function checkRelease(
+  { lender, asLender }: { lender: wasm.LendingKey; asLender: wasm.OpenedOffer },
+  { borrower, asBorrower }: { borrower: wasm.LendingKey; asBorrower: wasm.OpenedOffer },
+): void {
+  const { loan, witness_vectors: vectors } = fixture
+  const [collateral, held] = loan.collateral.map(BigInt)
+  const repayment = asLender.repaymentAmount()
+
+  check('release: the carry supply is 2^50', wasm.carrySupply() === 2n ** 50n)
+  check(
+    'release: the fixture offer is within the bounds',
+    !throws(() => asLender.checkOfferBounds()),
+  )
+  check(
+    'release: C = 2^44 and R = 2^50 - 2 are within the bounds',
+    !throws(() => wasm.checkOfferBounds(2n ** 44n, 2n ** 50n - 2n)),
+  )
+  for (const [what, c, r] of [
+    ['C = 2^44 + 1', 2n ** 44n + 1n, 1n],
+    ['R = 2^50 - 1', 1n, 2n ** 50n - 1n],
+    ['C = 0', 0n, 1n],
+    ['R = 0', 1n, 0n],
+  ] as const) {
+    check(
+      `release: ${what} is out of bounds`,
+      throwsCode('out-of-bounds', () => wasm.checkOfferBounds(c, r)),
+    )
+  }
+
+  // the collateral each party reads, and the release
+  const amount = BigInt(loan.installment_amount)
+  const accepted = asBorrower.loanState(borrower, loan.acceptance_tx, [])
+  check(
+    'release: the borrower holds all the collateral at acceptance',
+    accepted.collateral()?.amount === collateral,
+    `${accepted.collateral()?.amount}`,
+  )
+  check(
+    "release: the borrower's preview of the installment is its release",
+    accepted.releasePreview(amount) === BigInt(loan.release),
+    `${accepted.releasePreview(amount)}`,
+  )
+  check(
+    'release: the full repayment releases all the collateral',
+    accepted.releasePreview(repayment) === collateral,
+  )
+  check(
+    'release: a preview above the debt is refused',
+    throwsCode('bad-input', () => accepted.releasePreview(repayment + 1n)),
+  )
+  for (const [who, state] of [
+    ['lender', asLender.loanState(lender, loan.acceptance_tx, loan.installment_txs)],
+    ['borrower', asBorrower.loanState(borrower, loan.acceptance_tx, loan.installment_txs)],
+  ] as const) {
+    const read = state.collateral()?.amount
+    check(
+      `release: the ${who} reads the collateral after the installment`,
+      read === held,
+      `${read}`,
+    )
+    check(
+      `release: the ${who} reads the release`,
+      read !== undefined && collateral - read === BigInt(loan.release),
+    )
+  }
+
+  // the borrower's carries
+  const creationTxid = lwk.Transaction.fromString(fixture.creation_tx).txid().toString()
+  const supply = accepted.carries()
+  check(
+    'release: before the first installment the carry is the creation supply',
+    supply.length === 1 &&
+      supply[0].outpoint === `${creationTxid}:4` &&
+      supply[0].asset === fixture.carry_asset_id &&
+      supply[0].amount === 2n ** 50n,
+  )
+  const installmentTxid = lwk.Transaction.fromString(loan.installment_txs[0]).txid().toString()
+  const carries = asBorrower.loanState(borrower, loan.acceptance_tx, loan.installment_txs).carries()
+  check(
+    "release: the installment's carries are its outputs 3 and 4, R + 1 carry units",
+    carries.length === 2 &&
+      carries[0].outpoint === `${installmentTxid}:3` &&
+      carries[1].outpoint === `${installmentTxid}:4` &&
+      carries.every(carry => carry.asset === fixture.carry_asset_id) &&
+      carries[0].amount + carries[1].amount === repayment + 1n,
+  )
+  check(
+    'release: the lender opens no carry',
+    throwsCode('bad-input', () =>
+      asLender.loanState(lender, loan.acceptance_tx, loan.installment_txs).carries(),
+    ),
+  )
+
+  // the borrower's plan at acceptance: `Y` and the path are the fixture's, whatever the blinders
+  const vector = vectors.installment
+  const plan = accepted.planInstallment(amount, loan.loan_outpoint, '0014' + '11'.repeat(20))
+  check('release: the plan is at index 0', plan.index === vector.index)
+  equal('release: the plan blinder commitment', plan.blinderCommitment, vector.blinder_commitment)
+  check(
+    'release: the plan Merkle path is the fixture one',
+    JSON.stringify(Array.from(plan.pathIsRight, bit => bit === 1)) ===
+      JSON.stringify(vector.path.map(node => node.is_right)) &&
+      JSON.stringify(plan.pathSiblings) === JSON.stringify(vector.path.map(node => node.sibling)),
+  )
+  check(
+    'release: the plan proof has 7 commitments and 11 responses',
+    plan.commitments.length === 7 && plan.responses.length === 11,
+  )
+  check(
+    'release: the plan witness parses against the program type',
+    buildsWitness({
+      branch: 'Installment',
+      debt: plan.debtWitness,
+      index: plan.index,
+      blinderCommitment: plan.blinderCommitment,
+      path: Array.from(plan.pathIsRight, (bit, k) => ({
+        isRight: bit === 1,
+        sibling: plan.pathSiblings[k],
+      })),
+      commitments: plan.commitments,
+      responses: plan.responses,
+    }),
+  )
+  check(
+    'release: the plan releases what the preview gives',
+    plan.release === accepted.releasePreview(amount) && plan.successor.amount === held,
+  )
+  check(
+    'release: the first installment burns the leftover S - R - 1',
+    plan.leftover === 2n ** 50n - repayment - 1n && plan.leftoverBlinding(6) !== undefined,
+  )
+  check(
+    'release: the carries are e + 1 and R - e',
+    plan.carry(0).amount + plan.carry(1).amount === repayment + 1n &&
+      plan.carry(0).asset === fixture.carry_asset_id,
+  )
+
+  // the lender's search, as a Web Worker runs it, at 2^24
+  const state = asLender.loanState(lender, loan.acceptance_tx, loan.installment_txs)
+  const search = state.collateralSearch()
+  check('release: the search is bounded by the collateral', search.max === collateral)
+  const found = wasm.findCollateral(
+    search.valueCommitment,
+    search.assetCommitment,
+    search.blinder,
+    2n ** 24n,
+  )
+  check('release: the search at 2^24 finds the collateral', found === held, `${found}`)
+  check(
+    'release: the search refuses a bound above 2^44',
+    throwsCode('bad-input', () =>
+      wasm.findCollateral(
+        search.valueCommitment,
+        search.assetCommitment,
+        search.blinder,
+        2n ** 44n + 1n,
+      ),
+    ),
+  )
+  check(
+    'release: the collateral set must open the loan output',
+    throwsCode('bad-input', () => state.setCollateral(held + 1n)),
+  )
+  state.setCollateral(held)
+  const opening = wasm.collateralOpening(
+    1,
+    held,
+    asLender.pinned(wasm.PinnedRole.ActiveCollateral).assetBlinder,
+    search.blinder,
+  )
+  const opened = state.collateral()
+  check(
+    'release: the opening of the found collateral is the loan output',
+    opened !== undefined &&
+      opening.assetBlinder === opened.assetBlinder &&
+      opening.valueBlinder === opened.valueBlinder,
   )
 }
 

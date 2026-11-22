@@ -24,7 +24,8 @@ interface SummaryStripProps {
 /** The lender's book in one row of figures, divided by rules. */
 export default function SummaryStrip({ summary, tipHeight }: SummaryStripProps) {
   const { formatCollateralDisplay, formatPrincipalAmount } = useFormatAmount()
-  const { waiting, active, lent, collateralHeld, dueWithin7Days, overdue } = summary
+  const { waiting, active, lent, collateralHeld, collateralHeldExact, dueWithin7Days, overdue } =
+    summary
 
   return (
     <dl className='border-separator flex flex-wrap border-y'>
@@ -33,7 +34,15 @@ export default function SummaryStrip({ summary, tipHeight }: SummaryStripProps) 
       </Figure>
       <Figure label='Active loans'>{active}</Figure>
       <Figure label='Lent out'>{formatPrincipalAmount(lent)}</Figure>
-      <Figure label='Collateral held'>{formatCollateralDisplay(collateralHeld)}</Figure>
+      <Figure label='Collateral held'>
+        {collateralHeldExact ? (
+          formatCollateralDisplay(collateralHeld)
+        ) : (
+          <span title='A loan is still being read, or the app is searching for the collateral it has left: until then it counts at its offer’s collateral.'>
+            at most {formatCollateralDisplay(collateralHeld)}
+          </span>
+        )}
+      </Figure>
       <Figure label='Due in 7 days / overdue'>
         {tipHeight > 0 ? (
           <>

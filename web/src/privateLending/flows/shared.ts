@@ -2,7 +2,7 @@
 import type { Address, Pset, Script, Transaction, TxOut, TxOutSecrets, WalletTxOut } from 'lwk_wasm'
 
 import { buildPset, type PsetInputSpec, type PsetOutputSpec } from '@/lwk/psetBuilder'
-import { NFT_AMOUNT, NO_REISSUANCE_TOKEN } from '@/simplicity/private-lending/layout'
+import { NO_REISSUANCE_TOKEN } from '@/simplicity/private-lending/layout'
 import type { PinnedOutputInfo } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from '../deps'
@@ -49,8 +49,33 @@ export function burnScript(deps: PrivateFlowDeps): Script {
   return deps.lwk.Script.newOpReturn(new TextEncoder().encode('burn'))
 }
 
+/** A pinned output's figures and blinders, copied out of the wasm's `PinnedOutputInfo`. */
+export type PinnedFigures = Pick<
+  PinnedOutputInfo,
+  'asset' | 'amount' | 'assetBlinder' | 'valueBlinder' | 'assetCommitment' | 'valueCommitment'
+>
+
+/**
+ * Copies `info` out and frees it: the wasm object holds the output's blinders, so it is freed as
+ * soon as it is read, rather than left to the garbage collector.
+ */
+export function takePinned(info: PinnedOutputInfo): PinnedFigures {
+  try {
+    return {
+      asset: info.asset,
+      amount: info.amount,
+      assetBlinder: info.assetBlinder,
+      valueBlinder: info.valueBlinder,
+      assetCommitment: info.assetCommitment,
+      valueCommitment: info.valueCommitment,
+    }
+  } finally {
+    info.free()
+  }
+}
+
 /** The LWK secrets of a pinned output, for the PSET input that spends it. */
-export function pinnedTxOutSecrets(deps: PrivateFlowDeps, info: PinnedOutputInfo): TxOutSecrets {
+export function pinnedTxOutSecrets(deps: PrivateFlowDeps, info: PinnedFigures): TxOutSecrets {
   const { lwk } = deps
   return new lwk.TxOutSecrets(
     lwk.AssetId.fromString(info.asset),
@@ -168,15 +193,16 @@ export interface SpendLayout {
   /** The prevouts, in input order. */
   inputs: string[]
   /**
-   * The NFT each input newly issues, by input index: exactly one explicit unit, no reissuance
-   * token, the issuance unblinded. An input with no entry (or `undefined`) issues nothing.
+   * The asset each input newly issues, by input index, and its amount: explicit, no reissuance
+   * token, the issuance unblinded (one unit for an NFT, the carry supply for the carry token). An
+   * input with no entry (or `undefined`) issues nothing.
    */
-  issuances?: (string | undefined)[]
+  issuances?: ({ asset: string; amount: bigint } | undefined)[]
   /** The leading outputs; change and the fee follow. */
   outputs: ExpectedOutput[]
   /**
-   * Assets no other output may carry: the offer's NFTs. The issued NFTs and their reissuance
-   * token ids are added to them.
+   * Assets no other output may carry: the offer's NFTs, and its carry token where the transaction
+   * moves it. The issued assets and their reissuance token ids are added to them.
    */
   restrictedAssets: string[]
   /** Scripts no other output may pay: the offer's covenants. */
@@ -226,19 +252,20 @@ export function assertSpendLayout(
     if (input.prevout !== layout.inputs[index]) {
       fail(`input ${index} spends ${input.prevout} instead of ${layout.inputs[index]}`)
     }
-    const nft = layout.issuances?.[index]
+    const expected = layout.issuances?.[index]
     const issuance = input.issuance
-    if (nft === undefined) {
+    if (expected === undefined) {
       if (issuance !== null) fail(`input ${index} issues ${issuance.assetId}`)
       return
     }
-    if (issuance === null) fail(`input ${index} does not issue ${nft}`)
-    issued.push(nft, issuance.tokenId)
-    if (issuance.assetId !== nft || issuance.isReissuance) {
-      fail(`input ${index} does not newly issue ${nft}`)
+    const { asset, amount } = expected
+    if (issuance === null) fail(`input ${index} does not issue ${asset}`)
+    issued.push(asset, issuance.tokenId)
+    if (issuance.assetId !== asset || issuance.isReissuance) {
+      fail(`input ${index} does not newly issue ${asset}`)
     }
-    if (issuance.amount !== NFT_AMOUNT || issuance.amountCommitment !== null) {
-      fail(`input ${index} does not issue exactly one explicit unit`)
+    if (issuance.amount !== amount || issuance.amountCommitment !== null) {
+      fail(`input ${index} does not issue exactly ${amount} explicit units`)
     }
     if (
       !(issuance.inflationKeys === null || issuance.inflationKeys === NO_REISSUANCE_TOKEN) ||

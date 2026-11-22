@@ -7,6 +7,7 @@ import type { LoanFigures } from './hooks/useLoan'
 import type { PrivateOfferItem } from './hooks/usePrivateOffers'
 import { proposalExpiry, TERM_MARGIN_BLOCKS } from './lenderTerms'
 import {
+  blockedNote,
   borrowerActions,
   borrowerSendable,
   borrowerStatus,
@@ -336,7 +337,6 @@ describe("the borrower's loans", () => {
 })
 
 const INSTALLMENT_TXID = '56'.repeat(32)
-const SECOND_INSTALLMENT_TXID = '78'.repeat(32)
 const INSTALLMENT_CLAIM_TXID = '9a'.repeat(32)
 const CLOSE_TXID = 'bc'.repeat(32)
 const FINAL_CLAIM_TXID = 'de'.repeat(32)
@@ -411,21 +411,6 @@ describe("the borrower's installments", () => {
     }
   })
 
-  it('closes the loan once the installments paid the whole debt', () => {
-    const item = own('active', PAID_ONCE)
-    const loan = figures([{ outpoint: INSTALLMENT, amount: 110_000n }], 0n)
-    const view = borrowerView(item, EXPIRY - 1, loan)
-    expect(view.action).toBe('closeZeroDebt')
-    expect(borrowerActions(AMOUNTS).labels.closeZeroDebt).toBe('Close the loan')
-    expect(paidLoanState(item, EXPIRY - 1, loan).button).toMatchObject({
-      kind: 'open',
-      action: 'closeZeroDebt',
-      label: 'Close the loan',
-    })
-    // past the term too: the close takes the collateral back
-    expect(borrowerView(item, EXPIRY + 1, loan).action).toBe('closeZeroDebt')
-  })
-
   it('offers no repayment while what is owed cannot be read', () => {
     const item = own('active', PAID_ONCE)
     const loan = figures([{ outpoint: INSTALLMENT, amount: undefined }], undefined)
@@ -463,25 +448,6 @@ describe("the borrower's installments", () => {
     }
     // while the tip is unknown, neither
     expect(paidLoanState(item, 0, loan, [record]).button).toBeNull()
-    // a zero-debt state does not lift the block either
-    const paidOff = figures([{ outpoint: INSTALLMENT, amount: 110_000n }], 0n)
-    expect(paidLoanState(item, EXPIRY - 1, paidOff, [record]).button).toMatchObject({
-      kind: 'open',
-      action: 'repay',
-      unsentTx: record,
-    })
-  })
-
-  it('broadcasts an unsent zero-debt close again', () => {
-    const item = own('active', PAID_ONCE)
-    const loan = figures([{ outpoint: INSTALLMENT, amount: 110_000n }], 0n)
-    const record = unsent(item, 'private_zero_debt_close')
-    expect(paidLoanState(item, EXPIRY + 1, loan, [record]).button).toMatchObject({
-      kind: 'open',
-      action: 'closeZeroDebt',
-      unsentTx: record,
-      label: 'Broadcast again',
-    })
   })
 })
 
@@ -551,8 +517,7 @@ describe("the lender's installments and claims", () => {
     })
   })
 
-  // Decision 2: the sweep after a full repayment and after a zero-debt close, and `claimed` once
-  // it ran.
+  // Decision 2: the sweep after a full repayment, and `claimed` once it ran.
   it('claims the repayment after a full repayment, then shows the loan claimed', () => {
     const closed = [
       ...PAID_ONCE.slice(0, 3),
@@ -574,32 +539,6 @@ describe("the lender's installments and claims", () => {
     const claimed = lent('repaid', swept)
     expect(displayStatus(claimed.candidate)).toBe('claimed')
     expect(bookState(claimed, EXPIRY + 1).button).toBeNull()
-  })
-
-  it('claims the installments after a zero-debt close, then shows the loan claimed', () => {
-    // two installments paid the debt; the lender claimed the first; the close left no repayment
-    const closed = [
-      ...PAID_ONCE.slice(0, 3),
-      utxo('active_offer', INSTALLMENT_TXID, 1, SECOND_INSTALLMENT_TXID),
-      utxo('installment', INSTALLMENT_TXID, 2, INSTALLMENT_CLAIM_TXID),
-      utxo('active_offer', SECOND_INSTALLMENT_TXID, 1, CLOSE_TXID),
-      utxo('installment', SECOND_INSTALLMENT_TXID, 2),
-    ]
-    const repaid = lent('repaid', closed)
-    expect(displayStatus(repaid.candidate)).toBe('repaid')
-    expect(bookState(repaid, EXPIRY - 1).button).toMatchObject({
-      action: 'claimRepayment',
-      label: 'Claim repayment',
-    })
-    const swept = closed.map(entry =>
-      entry.utxo_type === 'installment' && entry.spent_txid === null
-        ? utxo('installment', entry.txid, entry.vout, FINAL_CLAIM_TXID)
-        : entry,
-    )
-    const claimed = lent('repaid', swept)
-    expect(displayStatus(claimed.candidate)).toBe('claimed')
-    expect(bookState(claimed, EXPIRY - 1).button).toBeNull()
-    expect(borrowerStatus(own('repaid', swept), EXPIRY - 1)).toEqual({ kind: 'repaid' })
   })
 
   it('broadcasts an unsent installment claim again', () => {
@@ -648,5 +587,25 @@ describe("the borrower's saved creation", () => {
   it('waits while the tip is unknown', () => {
     expect(creationSendable(term, 0)).toBe('unknown')
     expect(() => checkCreationSendable(term, 0)).toThrow('The chain tip is not known')
+  })
+})
+
+describe('blockedNote', () => {
+  it('names the bounds of release for an offer the lender must refuse, not a failed check', () => {
+    const invalid = (code: string) =>
+      ({
+        txid: TXID,
+        role: 'lender',
+        result: 'invalid',
+        code,
+        candidate: null,
+        terms: null,
+      }) as PrivateOfferItem
+    expect(blockedNote(invalid('out-of-bounds'))).toBe(
+      'Its collateral or its repayment is outside what a lender can accept: no action is possible.',
+    )
+    expect(blockedNote(invalid('address-mismatch'))).toBe(
+      'It failed verification: no action is possible.',
+    )
   })
 })

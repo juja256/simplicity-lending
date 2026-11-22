@@ -5,7 +5,7 @@
 import type { Transaction } from 'lwk_wasm'
 
 import { FINALIZED_THRESHOLD, type PrivateTxRecord } from '@/providers/pendingTransactions/types'
-import { INSTALLMENT_INPUT } from '@/simplicity/private-lending/layout'
+import { INSTALLMENT_INPUT, MAX_LOAN_INSTALLMENTS } from '@/simplicity/private-lending/layout'
 
 /** What the rules below need of LWK, which the app loads at run time (`getLwk`). */
 type LwkTransactions = { Transaction: typeof Transaction }
@@ -31,12 +31,19 @@ export interface RepayPlanInput {
   tipHeight: number
   /** The loan's expiry, a block height. */
   expiry: number
+  /** The installments the loan has had: at `MAX_LOAN_INSTALLMENTS` only the full repayment. */
+  installmentCount: number
 }
 
 /** Why no installment is paid from the expiry block on. */
 export const INSTALLMENT_AFTER_TERM_NOTE =
   'The term has ended: the lender can take the collateral at any time. Repay in full to get it ' +
   'back.'
+
+/** Why no installment is paid once the loan has had its last one. */
+export const INSTALLMENT_LIMIT_NOTE =
+  `This loan has had ${MAX_LOAN_INSTALLMENTS.toLocaleString('en-US')} installments, the most it ` +
+  'can have: repay the rest in full.'
 
 /** Why no installment is paid while the tip is not known. */
 export const INSTALLMENT_TIP_UNKNOWN_NOTE =
@@ -72,8 +79,9 @@ function grouped(units: bigint, decimals: number): string {
 
 /**
  * The plan of the amount the borrower typed, on a loan that owes `remaining`. Below it, an
- * installment, which is refused from the expiry block on and while the tip is unknown; equal to
- * it, the full repayment, which takes the collateral back at any time; zero or above it, refused.
+ * installment, which is refused from the expiry block on, while the tip is unknown, and once the
+ * loan has had `MAX_LOAN_INSTALLMENTS`; equal to it, the full repayment, which takes the
+ * collateral back at any time; zero or above it, refused.
  */
 export function repayPlan(input: RepayPlanInput): RepayPlan {
   const { remaining, decimals, symbol } = input
@@ -97,11 +105,28 @@ export function repayPlan(input: RepayPlanInput): RepayPlan {
     }
   }
   if (amount === remaining) return { kind: 'full', amount }
+  if (input.installmentCount >= MAX_LOAN_INSTALLMENTS) {
+    return { kind: 'refused', message: INSTALLMENT_LIMIT_NOTE }
+  }
   if (input.tipHeight === 0) return { kind: 'refused', message: INSTALLMENT_TIP_UNKNOWN_NOTE }
   if (!installmentTermOpen(input.tipHeight, input.expiry)) {
     return { kind: 'refused', message: INSTALLMENT_AFTER_TERM_NOTE }
   }
   return { kind: 'installment', amount }
+}
+
+/** Why a payment is refused when the loan moved on since the form read it. */
+export const LOAN_CHANGED_NOTE =
+  'The loan changed since the form was filled: check the amount again'
+
+/**
+ * Refuses a build on another loan state than the form's: `formLoan` is the loan output the form
+ * read its figures from (what the loan owes, the collateral released and left), `freshLoan` the one
+ * the build read again. Another installment confirmed in between moves the loan to a new output,
+ * and the form's figures would not be those of the payment built.
+ */
+export function checkSameLoan(formLoan: string | undefined, freshLoan: string): void {
+  if (formLoan !== freshLoan) throw new Error(LOAN_CHANGED_NOTE)
 }
 
 /** Why a saved installment is no longer broadcast once the term ended: only Discard is offered. */
@@ -140,12 +165,30 @@ export function keepsDiscardTrace(record: Pick<PrivateTxRecord, 'kind'>): boolea
 }
 
 /**
- * The first wallet inputs (input 2, `"<txid>:<vout>"`) of every installment this browser saved
- * that spent the loan at `loanOutpoint`, whatever became of it: discarded, failed (its tracking
- * timed out, as for a transaction the network dropped), or still waiting. The next installment of
- * that loan leaves these coins out, so that it never starts from one of them: any of them may
- * have reached the network under the key a rebuild would derive again. A waiting one blocks a
- * new build anyway, and a confirmed one spent the loan output, so neither costs a coin.
+ * Every installment this browser saved that spent the loan at `loanOutpoint`, whatever became of
+ * it: discarded, failed (its tracking timed out, as for a transaction the network dropped), or
+ * still waiting, each once (by txid). Any of them may have reached the network. The next build of
+ * that loan state is a rebuild of them, which the design note's rule constrains
+ * (`installmentRebuildRefusal`): the builder takes their transactions (`earlierBuilds`).
+ */
+export function installmentTraces(
+  lwk: LwkTransactions,
+  saved: readonly PrivateTxRecord[],
+  loanOutpoint: string,
+): PrivateTxRecord[] {
+  const traces = new Map<string, PrivateTxRecord>()
+  for (const record of saved) {
+    if (!keepsDiscardTrace(record) || traces.has(record.txid)) continue
+    if (installmentInputs(lwk, record).loan === loanOutpoint) traces.set(record.txid, record)
+  }
+  return [...traces.values()]
+}
+
+/**
+ * The first wallet inputs (input 2, `"<txid>:<vout>"`) of `installmentTraces`. The next
+ * installment of that loan leaves these coins out, so that it never starts from one of them: any
+ * of them may have reached the network under the key a rebuild would derive again. A waiting one
+ * blocks a new build anyway, and a confirmed one spent the loan output, so neither costs a coin.
  */
 export function installmentTraceInputs(
   lwk: LwkTransactions,
@@ -153,12 +196,60 @@ export function installmentTraceInputs(
   loanOutpoint: string,
 ): Set<string> {
   const inputs = new Set<string>()
-  for (const record of saved) {
-    if (!keepsDiscardTrace(record)) continue
-    const { loan, firstWalletCoin } = installmentInputs(lwk, record)
-    if (loan === loanOutpoint && firstWalletCoin !== undefined) inputs.add(firstWalletCoin)
+  for (const record of installmentTraces(lwk, saved, loanOutpoint)) {
+    const { firstWalletCoin } = installmentInputs(lwk, record)
+    if (firstWalletCoin !== undefined) inputs.add(firstWalletCoin)
   }
   return inputs
+}
+
+/** An earlier build of an installment at one loan state, as read back by the borrower. */
+export interface EarlierInstallment {
+  /** Its txid, to name it. */
+  txid: string
+  /** Its first wallet input, input 2, `"<txid>:<vout>"`. */
+  firstWalletInput: string | undefined
+  /** What it pays, read back with the borrower's key; undefined when it does not read back. */
+  amount: bigint | undefined
+}
+
+/**
+ * Why an installment of `amount` from `firstWalletInput` must not be built at a loan state that
+ * `earlier` builds already used, or undefined when it may (the design note's "Never rebuild an
+ * index with another amount", proofs L1). Two builds at one step share the successor's blinder
+ * `x_(k+1)`, so with different amounts their successors differ by a multiple of `A_c` that anyone
+ * holding both can search for; with the same amount they are the same point, and only the link
+ * between the builds leaks, provided output 2's key is fresh, which a first wallet input no
+ * earlier build used gives. So a rebuild pays exactly the amount of every earlier build, from
+ * another first wallet input, and an earlier build whose amount does not read back stops it.
+ */
+export function installmentRebuildRefusal(
+  earlier: readonly EarlierInstallment[],
+  amount: bigint,
+  firstWalletInput: string,
+): string | undefined {
+  for (const build of earlier) {
+    if (build.amount === undefined) {
+      return (
+        `An earlier installment of this loan that did not go through (${build.txid}) does not ` +
+        'read back with your key, so a new one could reveal what you pay. Repay in full.'
+      )
+    }
+    if (build.amount !== amount) {
+      return (
+        `An earlier installment of this loan that did not go through paid ${build.amount} base ` +
+        'units: a new one must pay exactly that, or the two would reveal how much collateral ' +
+        'each released. Pay that amount, or repay in full.'
+      )
+    }
+    if (build.firstWalletInput === firstWalletInput) {
+      return (
+        `An earlier installment of this loan that did not go through started from the coin ` +
+        `${firstWalletInput}: a new one must not.`
+      )
+    }
+  }
+  return undefined
 }
 
 /** The loan output (input 1) a saved installment spends, `"<txid>:<vout>"`. */

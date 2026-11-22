@@ -15,8 +15,9 @@ import {
   copyMessage,
   type LoanMessage,
 } from '@/privateLending/loanMessages'
+import { openedOffersOf } from '@/privateLending/offerCache'
 import type { OpenedOfferItem } from '@/privateLending/offerView'
-import { loadVerifiedOffer } from '@/privateLending/scan'
+import { withVerifiedOffer } from '@/privateLending/scan'
 import { type SentMessage, sentMessagesOf } from '@/privateLending/sentMessages'
 import { useLwk } from '@/providers/lwk/useLwk'
 import { useWallet } from '@/providers/wallet/useWallet'
@@ -43,9 +44,8 @@ const REPAYMENT_RETRY_MS = 30_000
 /**
  * The full repayment `repaymentTxid`, if it closes the loan output `loanOutpoint` (spends it at
  * input 1), with its message read for the lender, which also requires output 1 at the repayment
- * lock (a zero-debt close's is not). The borrower cannot read its own (its nonce is random), so
- * for the borrower it is only the txid its record is matched by: the zero-debt close records no
- * message. Undefined for a transaction that does not close this loan.
+ * lock. The borrower cannot read its own (its nonce is random), so for the borrower it is only the
+ * txid its record is matched by. Undefined for a transaction that does not close this loan.
  */
 async function readRepayment(
   deps: PrivateFlowDeps,
@@ -60,23 +60,29 @@ async function readRepayment(
     return undefined
   }
   if (item.role === 'borrower') return { txid: repaymentTxid }
-  const offer = await loadVerifiedOffer(deps, key, item.txid, item.role, PRIVATE_API_BASE_URL)
-  try {
-    const lock = tx.outputs[REPAYMENT_OUTPUT.repayment]?.scriptPubkey().jet_sha256_hex()
-    if (lock !== offer.scripts.repaymentOutputScriptHash) return undefined
-    const read = copyMessage(() =>
-      offer.opened.readMessage(
-        key,
-        item.txid,
-        tx.toString(),
-        REPAYMENT_OUTPUT.repayment,
-        deps.wasm.MessagePhase.FullRepayment,
-      ),
-    )
-    return { txid: repaymentTxid, read }
-  } finally {
-    offer.opened.free()
-  }
+  // The session's cache owns the opened offer.
+  return withVerifiedOffer(
+    openedOffersOf(key),
+    deps,
+    key,
+    item.txid,
+    item.role,
+    PRIVATE_API_BASE_URL,
+    (offer): ChainMessage | undefined => {
+      const lock = tx.outputs[REPAYMENT_OUTPUT.repayment]?.scriptPubkey().jet_sha256_hex()
+      if (lock !== offer.scripts.repaymentOutputScriptHash) return undefined
+      const read = copyMessage(() =>
+        offer.opened.readMessage(
+          key,
+          item.txid,
+          tx.toString(),
+          REPAYMENT_OUTPUT.repayment,
+          deps.wasm.MessagePhase.FullRepayment,
+        ),
+      )
+      return { txid: repaymentTxid, read }
+    },
+  )
 }
 
 /**

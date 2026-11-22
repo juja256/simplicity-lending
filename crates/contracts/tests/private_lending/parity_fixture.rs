@@ -2,7 +2,8 @@
 //! transaction from regtest, the keys that open it, the contract's expected arguments and scripts,
 //! and the serialized witnesses of the branches the web builds, from synthetic spends of the offer.
 //! The offer's loan, also from regtest, has its acceptance and one installment, with the debt and
-//! the loan's scripts the contract gives for them. The offer carries the borrower's message in its
+//! the loan's scripts the contract gives for them; the installment releases collateral, with its
+//! release proof and carries. The offer carries the borrower's message in its
 //! terms, the acceptance the lender's on the principal, and the installment the borrower's, each
 //! signed for its phase. A second offer's `A` has the other prefix bit, so that the web's
 //! conversion of the bit is checked both ways.
@@ -27,16 +28,18 @@ use lending_contracts::programs::private_lending::{
 use lending_contracts::programs::program::SimplexProgram;
 use lending_contracts::programs::script_auth::ScriptAuth;
 use private_lending_core::{
-    DebtOpening, LendingKey, Message, MessagePhase, OfferSecrets, PinnedOutput, SignedMessage,
-    debt_after, debt_hash, open_installment, open_installment_with_extra_data, rewind,
-    zero_debt_key,
+    BlinderTree, DebtOpening, LendingKey, Message, MessagePhase, OfferSecrets, PinnedOutput,
+    ReleaseSecrets, SignedMessage, carry_remainder, collateral_at, debt_after, debt_hash,
+    open_installment, open_installment_with_extra_data, prove, rewind,
 };
+use simplex::simplicityhl::elements::confidential::AssetBlindingFactor;
+use simplex::simplicityhl::elements::secp256k1_zkp::PublicKey;
 
 use super::offer_installment_flows::{prefix_bit, random_payment};
 use super::setup::{
-    Loan, accept_private_offer_with, borrower_blinding_key, default_offer_parameters,
-    pay_installment_with, repayment_output, setup_pending_private_offer,
-    setup_pending_private_offer_with,
+    CARRY_SUPPLY_OUTPUT, Loan, accept_private_offer_with, blinder_commitment,
+    borrower_blinding_key, default_offer_parameters, pay_installment_with, repayment_output,
+    setup_pending_private_offer, setup_pending_private_offer_with, statement_of,
 };
 
 const FIXTURE: &str = include_str!("../../../../web/scripts/fixtures/private-lending-parity.json");
@@ -62,11 +65,14 @@ const INSTALLMENT_MESSAGE: &str = "The first installment.\nThe rest next month."
 /// each has it with probability 1/2.
 const MAX_OTHER_OFFERS: usize = 16;
 
-/// The value blinders of the witness vectors' installment and zero debt `k·G`: fixed, so that the
-/// contract's check of the fixture gives the same vectors, and not palindromes, so that the web's
-/// check of a reversed key spends with another key.
+/// The value blinder of the witness vectors' installment and the blinders of its carries: fixed,
+/// so that the contract's check of the fixture gives the same vectors, and not palindromes, so
+/// that the web's check of a reversed value spends with another value.
 const VECTOR_INSTALLMENT_BLINDER: [u8; 32] = counting_from(0x50);
-const VECTOR_ZERO_DEBT_BLINDER: [u8; 32] = counting_from(0x60);
+const VECTOR_CARRY_BLINDERS: [([u8; 32], [u8; 32]); 2] = [
+    (counting_from(0x10), counting_from(0x30)),
+    (counting_from(0x20), counting_from(0x40)),
+];
 
 /// The 32 bytes that count up from `first`.
 const fn counting_from(first: u8) -> [u8; 32] {
@@ -190,12 +196,22 @@ fn witness_vector(
     })
 }
 
-/// The witness vectors of the installment, the full repayment, the zero-debt close and the
-/// liquidation of the loan the offer of `parameters` starts. The installment, the full repayment
-/// and the liquidation spend the loan at acceptance, whose debt is `D₀`; the zero-debt close
-/// spends the loan after an installment that left the debt `k·G`, which owes nothing.
-fn witness_vectors(parameters: &PrivateLendingParameters) -> Value {
+/// A curve point as the fixture writes it: its `x ‖ y`, hex.
+fn point_hex(point: &PublicKey) -> String {
+    hex::encode(&point.serialize_uncompressed()[1..])
+}
+
+/// The witness vectors of the installment, the full repayment and the liquidation of the loan the
+/// offer of `parameters` starts, at acceptance, whose debt is `D₀`. The installment's release proof
+/// is the borrower's, with `secrets` and the borrower's lending key; its carries spend the carry
+/// supply, whose asset is `carry_asset`.
+fn witness_vectors(
+    parameters: &PrivateLendingParameters,
+    secrets: &OfferSecrets,
+    carry_asset: AssetId,
+) -> Value {
     let pinned = parameters.pinned;
+    let (collateral, full) = (pinned.active_collateral.amount, pinned.repayment.amount);
     let active = PrivateLendingOffer::new_active(*parameters);
     let anyone = Script::from(vec![0x51]);
     let burn = Script::new_op_return(b"burn");
@@ -203,17 +219,70 @@ fn witness_vectors(parameters: &PrivateLendingParameters) -> Value {
     let debt = active.get_debt();
     let debt_hash = active.get_debt_hash();
     let expiry = parameters.loan_expiration_time;
+    let carry_lock = parameters
+        .get_principal_output_asset_auth()
+        .get_script_pubkey();
 
     // the installment passes the borrower NFT to output 0, puts the successor loan at `D₀ − V`
-    // with the collateral after one step at output 1, and pays `V` to the installment lock at
-    // output 2
+    // with the collateral of step 1 at output 1, pays `V` to the installment lock at output 2, and
+    // the carries `e + 1` and `R − e` to the principal's lock at outputs 3 and 4
     let payment = PinnedOutput {
         amount: INSTALLMENT_AMOUNT,
         value_blinding_factor: blinder(VECTOR_INSTALLMENT_BLINDER),
         ..pinned.repayment
     };
-    let debt_left = debt_after(&debt, &payment.value_commitment()).expect("debt is left");
-    let successor = PrivateLendingOffer::new_active_at(*parameters, debt_left, 1);
+    let debt_left = DebtOpening::of(&pinned.repayment)
+        .after(DebtOpening::of(&payment))
+        .expect("debt is left");
+    let successor = PrivateLendingOffer::new_active_at(
+        *parameters,
+        debt_after(&debt, &payment.value_commitment()).expect("debt is left"),
+        1,
+    );
+    let held = collateral_at(debt_left.amount, collateral, full);
+    let e = carry_remainder(debt_left.amount, collateral, full);
+    let carries = [e + 1, full - e]
+        .into_iter()
+        .zip(VECTOR_CARRY_BLINDERS)
+        .map(|(amount, (asset_blinder, value_blinder))| PinnedOutput {
+            asset_id: carry_asset,
+            amount,
+            asset_blinding_factor: AssetBlindingFactor::from_slice(&asset_blinder)
+                .expect("a scalar below the curve order"),
+            value_blinding_factor: blinder(value_blinder),
+        })
+        .collect::<Vec<_>>();
+    let (x, y) = secrets.release_blinders(1);
+    let borrower = LendingKey::from_master_blinding_key(&BORROWER_MASTER_BLINDING_KEY);
+    let tree = BlinderTree::new(secrets);
+    let successor_collateral = parameters.loan_collateral(secrets, 1, held);
+    let y_point = blinder_commitment(&x, &y);
+    let statement = statement_of(
+        parameters,
+        &debt,
+        &payment.value_commitment(),
+        &successor_collateral.value_commitment(),
+        [carries[0], carries[1]].map(|carry| (carry.asset_commitment(), carry.value_commitment())),
+        y_point,
+    );
+    let release_secrets = ReleaseSecrets::new(
+        &pinned.active_collateral,
+        &pinned.repayment,
+        debt_left,
+        (x, y),
+        (
+            carries[0].value_blinding_factor,
+            carries[1].value_blinding_factor,
+        ),
+    );
+    let proof = prove(&statement, &release_secrets, &borrower);
+    let branch = PrivateLendingWitnessBranch::Installment {
+        debt,
+        step: 0,
+        blinder_commitment: y_point,
+        path: tree.path(0),
+        proof,
+    };
     let mut installment = witness_vector(
         &active,
         vec![
@@ -222,19 +291,40 @@ fn witness_vectors(parameters: &PrivateLendingParameters) -> Value {
         ],
         vec![
             explicit_output(parameters.borrower_nft_asset_id, 1, anyone.clone()),
-            pinned_output(successor.get_collateral(), successor.get_script_pubkey()),
+            pinned_output(successor_collateral, successor.get_script_pubkey()),
             pinned_output(
                 payment,
                 parameters
                     .get_installment_output_asset_auth()
                     .get_script_pubkey(),
             ),
+            pinned_output(carries[0], carry_lock.clone()),
+            pinned_output(carries[1], carry_lock),
         ],
         0,
         1,
-        PrivateLendingWitnessBranch::Installment { debt },
+        branch,
     );
     installment["debt"] = json!(hex::encode(serialize(&debt)));
+    installment["index"] = json!(0);
+    installment["blinder_commitment"] = json!(point_hex(&y_point));
+    installment["path"] = json!(
+        tree.path(0)
+            .iter()
+            .map(|(is_right, sibling)| json!({
+                "is_right": is_right,
+                "sibling": hex::encode(sibling),
+            }))
+            .collect::<Vec<_>>()
+    );
+    installment["commitments"] = json!(proof.t.iter().map(point_hex).collect::<Vec<_>>());
+    installment["responses"] = json!(
+        proof
+            .z
+            .iter()
+            .map(|z| hex::encode(z.to_be_bytes()))
+            .collect::<Vec<_>>()
+    );
 
     let full_repayment = witness_vector(
         &active,
@@ -255,41 +345,6 @@ fn witness_vectors(parameters: &PrivateLendingParameters) -> Value {
         1,
         PrivateLendingWitnessBranch::FullRepayment { debt_hash },
     );
-
-    // the zero-debt close burns the borrower NFT at output 0 and reveals `k` at output 1. Its debt
-    // `k·G` or `−k·G` has the other prefix bit than `D₀`, so that the vectors' debts take both.
-    let k = blinder(VECTOR_ZERO_DEBT_BLINDER);
-    let zero_debt = [k, -k]
-        .map(|blinder| DebtOpening { amount: 0, blinder })
-        .into_iter()
-        .find(|opening| prefix_bit(&opening.commitment(&pinned.repayment)) != prefix_bit(&debt))
-        .expect("k·G and −k·G have either prefix bit");
-    let k = zero_debt_key(&zero_debt).expect("a zero debt of a nonzero blinder");
-    let closed =
-        PrivateLendingOffer::new_active_at(*parameters, zero_debt.commitment(&pinned.repayment), 1);
-    let mut zero_debt_close = witness_vector(
-        &closed,
-        vec![
-            explicit_output(parameters.borrower_nft_asset_id, 1, anyone.clone()),
-            pinned_output(closed.get_collateral(), closed.get_script_pubkey()),
-        ],
-        vec![
-            explicit_output(parameters.borrower_nft_asset_id, 1, burn.clone()),
-            explicit_output(
-                parameters.borrower_nft_asset_id,
-                0,
-                Script::new_op_return(&k),
-            ),
-        ],
-        0,
-        1,
-        PrivateLendingWitnessBranch::ZeroDebtClose {
-            debt: closed.get_debt(),
-            key: k,
-        },
-    );
-    zero_debt_close["debt"] = json!(hex::encode(serialize(&closed.get_debt())));
-    zero_debt_close["k"] = json!(hex::encode(k));
 
     let mut liquidation = witness_vector(
         &active,
@@ -312,9 +367,13 @@ fn witness_vectors(parameters: &PrivateLendingParameters) -> Value {
     json!({
         "installment": installment,
         "full_repayment": full_repayment,
-        "zero_debt_close": zero_debt_close,
         "liquidation": liquidation,
     })
+}
+
+/// A point argument, `(x, y)`, as its `x ‖ y`, hex.
+fn point_words((x, y): ([u8; 32], [u8; 32])) -> String {
+    hex::encode([x, y].concat())
 }
 
 /// The contract's arguments of the offer of `parameters`, as the web takes them.
@@ -332,6 +391,12 @@ fn arguments_json(parameters: &PrivateLendingParameters) -> Value {
         "expiry_hash": hex::encode(arguments.expiry_hash),
         "repayment_asset_prefix_bit": u8::from(repayment_asset_prefix_bit),
         "repayment_asset_x": hex::encode(repayment_asset_x),
+        "repayment_asset_point": point_words(arguments.repayment_asset_point),
+        "collateral_asset_point": point_words(arguments.collateral_asset_point),
+        "collateral_value_point": point_words(arguments.collateral_value_point),
+        "starting_debt_point": point_words(arguments.starting_debt_point),
+        "fs_iv": hex::encode(arguments.fs_iv),
+        "blinder_root": hex::encode(arguments.blinder_root),
     })
 }
 
@@ -352,8 +417,9 @@ fn other_offer_json(parameters: &PrivateLendingParameters, creation_tx: &Transac
 
 /// The loan of the offer of `parameters` after its acceptance and one installment: the
 /// transactions, the installment's amount as the lender opens it, and for each loan output (the
-/// acceptance's, then the installment's) the debt hash its storage holds and its script. The debt
-/// after the installment comes from the chain, `D₀ − V`, and the scripts from the contract.
+/// acceptance's, then the installment's) the debt hash its storage holds, its script and the
+/// collateral it holds. The debt after the installment comes from the chain, `D₀ − V`, the
+/// scripts from the contract and the collateral from the core's arithmetic.
 fn loan_json(
     parameters: &PrivateLendingParameters,
     acceptance: &Transaction,
@@ -374,6 +440,11 @@ fn loan_json(
         PrivateLendingOffer::new_active_at(*parameters, debt, 1),
     ];
     let installment_txid = installment.txid();
+    let collateral = parameters.pinned.active_collateral.amount;
+    let held = [
+        collateral,
+        collateral_at(repayment.amount - amount, collateral, repayment.amount),
+    ];
 
     Ok(json!({
         "acceptance_tx": hex::encode(serialize(acceptance)),
@@ -386,16 +457,23 @@ fn loan_json(
         "debt_hashes": loans.each_ref().map(|loan| hex::encode(loan.get_debt_hash())),
         "loan_script_pubkeys":
             loans.each_ref().map(|loan| hex::encode(loan.get_script_pubkey().as_bytes())),
+        "collateral": held,
+        "release": held[0] - held[1],
     }))
 }
 
-/// The fixture that the contract's values give for the offers of `parameters` and
-/// `other_parameters` and the transactions `txs`.
+/// The fixture that the contract's values give for the offers of `parameters`, whose secrets are
+/// `secrets`, and `other_parameters`, and the transactions `txs`.
 fn expected_fixture(
     parameters: &PrivateLendingParameters,
+    secrets: &OfferSecrets,
     other_parameters: &PrivateLendingParameters,
     txs: &FixtureTransactions,
 ) -> anyhow::Result<Value> {
+    let carry_asset = txs.creation.output[CARRY_SUPPLY_OUTPUT]
+        .asset
+        .explicit()
+        .ok_or_else(|| anyhow::anyhow!("the carry supply is not explicit"))?;
     let pending = PrivateLendingOffer::new_pending(*parameters);
     let active = PrivateLendingOffer::new_active(*parameters);
     let lender_nft_lock = ScriptAuth::from_simplex_program(&pending);
@@ -415,7 +493,8 @@ fn expected_fixture(
         "pending_offer_script_pubkey": hex::encode(pending.get_script_pubkey().as_bytes()),
         "active_offer_script_pubkey": hex::encode(active.get_script_pubkey().as_bytes()),
         "lender_nft_script_pubkey": hex::encode(lender_nft_lock.get_script_pubkey().as_bytes()),
-        "witness_vectors": witness_vectors(parameters),
+        "carry_asset_id": carry_asset.to_string(),
+        "witness_vectors": witness_vectors(parameters, secrets, carry_asset),
         "loan": loan_json(parameters, &txs.acceptance, &txs.installment)?,
         "messages": {
             "creation": CREATION_MESSAGE,
@@ -484,7 +563,7 @@ fn write_private_lending_parity_fixture(context: simplex::TestContext) -> anyhow
     let borrower_key = borrower_blinding_key(&setup);
     let acceptance =
         accept_private_offer_with(&context, &mut setup, &lender, borrower_key, Some(&accepted))?;
-    let loan = Loan::accepted(parameters, &acceptance);
+    let loan = Loan::accepted(&setup, &acceptance);
     let payment = installment_of_the_other_bit(&loan)?;
     let paid = SignedMessage::sign(
         Message::text(INSTALLMENT_MESSAGE)?,
@@ -506,7 +585,7 @@ fn write_private_lending_parity_fixture(context: simplex::TestContext) -> anyhow
         installment,
         other_creation: other.creation_tx,
     };
-    let fixture = expected_fixture(&parameters, &other.parameters, &txs)?;
+    let fixture = expected_fixture(&parameters, &setup.secrets, &other.parameters, &txs)?;
     std::fs::write(
         FIXTURE_PATH,
         format!("{}\n", serde_json::to_string_pretty(&fixture)?),
@@ -552,7 +631,12 @@ fn parity_fixture_verifies_against_the_contract(
     // the arguments, script hashes, script pubkeys, program id and the loan's values
     assert_eq!(
         fixture,
-        expected_fixture(&lender_parameters, &other_parameters, &txs)?
+        expected_fixture(
+            &lender_parameters,
+            &as_lender.secrets,
+            &other_parameters,
+            &txs
+        )?
     );
 
     // the outputs of the creation transactions are the ones the fixture names

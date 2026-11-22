@@ -39,20 +39,46 @@ The indexer reads only this public data and never verifies or opens the offer, s
 
 #### Private Offer States
 
-An offer starts `pending`. Each spend of a tracked UTXO moves it on, and the spending transaction's layout decides which way: the input that spends the UTXO and the transaction's outputs 0 and 1.
+An offer starts `pending`. Each spend of a tracked UTXO moves it on, and the spending transaction
+decides which way: the input that spends the UTXO, the NFT at its output 0, and the scripts the
+contract pins at its outputs. The scripts are the `asset_auth` locks of one NFT unit, which the
+indexer computes from the two NFT ids it stored at creation (an offer that verifies takes them from
+its terms): the repayment lock (the lender NFT, burned), the installment lock (the lender NFT, kept)
+and the carry lock (the borrower NFT, kept, which also locks the principal). A burn is one explicit
+unit of the NFT at a null-data script, as the contract's burn check reads it: `OP_RETURN` followed
+only by pushes.
 
 | Spent UTXO | Spent at input | Spending transaction | New status | New UTXOs |
 |---|---|---|---|---|
-| `pending_offer` | any | output 0 an `OP_RETURN` burning the lender NFT (explicit asset) | `cancelled` | none |
-| `pending_offer` | any | anything else | `active` | `active_offer` at output 0, `principal` at output 1 |
-| `active_offer` | 1 | output 0 the borrower NFT (explicit asset), not an `OP_RETURN`, and at least 3 outputs: an installment | unchanged | `active_offer` at output 1, `installment` at output 2 |
-| `active_offer` | 1 | output 0 an `OP_RETURN` burning the borrower NFT, output 1 not an `OP_RETURN`: the full repayment | `repaid` | `repayment` at output 1 |
-| `active_offer` | 1 | output 0 an `OP_RETURN` burning the borrower NFT, output 1 an `OP_RETURN`: the zero-debt close | `repaid` | none |
-| `active_offer` | 0 | output 0 an `OP_RETURN` burning the lender NFT: the liquidation | `liquidated` | none |
+| `pending_offer` | any | output 0 burns the lender NFT: the cancellation | `cancelled` | none |
+| `pending_offer` | any | anything else: the acceptance | `active` | `active_offer` at output 0, `principal` at output 1 |
+| `active_offer` | 1 | output 0 the borrower NFT, burned, and output 1 at the repayment lock: the full repayment | `repaid` | `repayment` at output 1 |
+| `active_offer` | 1 | output 0 the borrower NFT, burned or not, output 1 not at the repayment lock, output 2 at the installment lock, outputs 3 and 4 at the carry lock: an installment | unchanged | `active_offer` at output 1, `installment` at output 2, `carry` at outputs 3 and 4 |
+| `active_offer` | 0 | output 0 burns the lender NFT: the liquidation | `liquidated` | none |
 | `active_offer` | any | anything else | unchanged | none (logged and skipped) |
+| `carry` | any | any (an installment, the full repayment or the cancellation) | unchanged | none |
 | `principal`, `repayment`, `installment` | any | any | unchanged | none |
 
-The spent UTXO is marked spent in every case. `active` means the debt is outstanding, and the loan is the one unspent `active_offer`: each installment spends it and leaves its successor. Repayments are a list of UTXOs: the `installment` ones and, after the full repayment, its `repayment`; a zero-debt close adds none. A status change sets `updated_at_height`, and an installment, which changes no status, does not. A spend of `active_offer` that matches no layout of the contract cannot come from a real loan, so the indexer leaves the status alone instead of guessing. These statuses mean something only for offers that verify: the indexer never checks the contract, so for a fake candidate they are meaningless. No SSE event is emitted for private offers, and clients refetch on `block_indexed`.
+The creation also records its output 4, the carry supply, as the offer's first `carry`. The spent
+UTXO is marked spent in every case. `active` means the debt is outstanding, and the loan is the one
+unspent `active_offer`: each installment spends it and leaves its successor. Repayments are a list
+of UTXOs: the `installment` ones and, after the full repayment, its `repayment`. The unspent `carry`
+UTXOs are the ones the borrower's next installment or full repayment spends; the liquidation leaves
+them. A status change sets `updated_at_height`, and an installment, which changes no status, does
+not.
+
+**The borrower's two branches are told apart by output 1.** The contract pins the full repayment's
+output 1 at the repayment lock and an installment's output 1 at the loan's own address, at the
+storage of the debt it leaves, which no `asset_auth` lock can be. It does not pin output 0's script
+in an installment, only the borrower NFT's asset and amount there, so an installment can burn the
+borrower NFT. The indexer records such an installment as an installment: the loan stays active and
+liquidatable at its successor, although the borrower can no longer pay it. Output 1 is read before
+output 2, since the full repayment leaves its outputs after 1 free.
+
+A spend of `active_offer` that matches no row cannot come from a spend the contract accepts, so the
+indexer leaves the status alone instead of guessing. These statuses mean something only for offers
+that verify: the indexer never checks the contract, so for a fake candidate they are meaningless. No
+SSE event is emitted for private offers, and clients refetch on `block_indexed`.
 
 ### API Service
 

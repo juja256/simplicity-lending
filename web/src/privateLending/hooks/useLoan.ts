@@ -11,10 +11,12 @@ import { useQueries, useQuery, type UseQueryOptions } from '@tanstack/react-quer
 import { useCallback } from 'react'
 
 import { latestLoanUtxo, utxoOutpoint } from '@/privateLending/candidate'
+import type { CollateralSearchInput } from '@/privateLending/flows/liquidation'
 import { loadLoan, type Loan } from '@/privateLending/loan'
 import { type LoanChainMessages, loanChainMessages } from '@/privateLending/loanMessages'
+import { openedOffersOf } from '@/privateLending/offerCache'
 import type { OpenedOfferItem } from '@/privateLending/offerView'
-import { loadVerifiedOffer } from '@/privateLending/scan'
+import { withVerifiedOffer } from '@/privateLending/scan'
 import { useLwk } from '@/providers/lwk/useLwk'
 import { useWallet } from '@/providers/wallet/useWallet'
 
@@ -34,6 +36,17 @@ export interface LoanFigures {
   paid: bigint
   /** What the loan owes after them, when every one opened; undefined otherwise. */
   remaining: bigint | undefined
+  /**
+   * The collateral the loan output holds, `c_k`, when the party can compute it: always for the
+   * borrower, and for the lender while every installment opens. Undefined otherwise: the lender
+   * finds it by `collateralSearch`.
+   */
+  collateral?: bigint | undefined
+  /**
+   * What the lender's search for `c_k` takes, when `collateral` is unknown: plain values, with the
+   * step's blinder, a secret of the offer that stays in this browser.
+   */
+  collateralSearch?: CollateralSearchInput | undefined
 }
 
 /** What `useLoan` reads of a loan: its figures, and the messages of its transactions. */
@@ -50,11 +63,34 @@ export function loanFigures(loan: Loan): LoanFigures {
     installments.push({ outpoint: installment.outpoint, amount: installment.amount })
     installment.free()
   }
+  // the wasm's object holds the collateral's blinders: freed once read
+  const held = state.collateral()
+  const collateral = held?.amount
+  held?.free()
   return {
     loanOutpoint: state.loanOutpoint,
     installments,
     paid: state.paid,
     remaining: state.remaining,
+    collateral,
+    collateralSearch: collateral === undefined ? searchInputOf(state) : undefined,
+  }
+}
+
+/** What the search for the collateral takes, as plain values; undefined if the state gives none. */
+function searchInputOf(state: Loan['state']): CollateralSearchInput | undefined {
+  try {
+    const search = state.collateralSearch()
+    const input = {
+      valueCommitment: search.valueCommitment,
+      assetCommitment: search.assetCommitment,
+      blinder: search.blinder,
+      max: search.max,
+    }
+    search.free()
+    return input
+  } catch {
+    return undefined
   }
 }
 
@@ -86,18 +122,24 @@ function useLoanQuery(): (item: OpenedOfferItem) => UseQueryOptions<LoanWithMess
         queryFn: async () => {
           const [deps, key] = await Promise.all([getDeps(), getLendingKey()])
           const { txid, role } = item
-          const offer = await loadVerifiedOffer(deps, key, txid, role, PRIVATE_API_BASE_URL)
-          try {
-            const loan = await loadLoan(deps, offer, key, loanOutpoint)
-            try {
-              const messages = loanChainMessages(deps.wasm, offer, key, role, loan)
-              return { ...loanFigures(loan), messages }
-            } finally {
-              loan.state.free()
-            }
-          } finally {
-            offer.opened.free()
-          }
+          // The session's cache owns the opened offer, which stays for the next read.
+          return withVerifiedOffer(
+            openedOffersOf(key),
+            deps,
+            key,
+            txid,
+            role,
+            PRIVATE_API_BASE_URL,
+            async offer => {
+              const loan = await loadLoan(deps, offer, key, loanOutpoint)
+              try {
+                const messages = loanChainMessages(deps.wasm, offer, key, role, loan)
+                return { ...loanFigures(loan), messages }
+              } finally {
+                loan.state.free()
+              }
+            },
+          )
         },
       }
     },

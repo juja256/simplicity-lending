@@ -27,10 +27,14 @@ pub use lender_terms::{
     apr_bps, check_proposal, decode_lender_terms, encode_lender_terms, min_collateral,
     min_repayment, principal_per_collateral,
 };
-pub use loan::{InstallmentInfo, InstallmentPlan, LoanState, Sweep};
+pub use loan::{
+    Carry, CarrySweep, CollateralOpening, CollateralSearch, InstallmentInfo, InstallmentPlan,
+    LoanState, Sweep, collateral_opening_hex, find_collateral_hex,
+};
 pub use open::{
     ContractArguments, MessagePhase, OpenedOffer, PinnedOutputInfo, PinnedRole, ReadMessage,
-    SignedMessage, open_creation_as_borrower_hex, open_creation_as_lender_hex, sign_message,
+    SignedMessage, carry_supply, check_offer_bounds, open_creation_as_borrower_hex,
+    open_creation_as_lender_hex, sign_message,
 };
 pub use scan::{is_own_candidate, private_lending_program_id, view_tag_matches};
 

@@ -71,8 +71,8 @@ export function pinnedAuthCovenant(
 /**
  * Finalizes the offer's input `inputIndex` with `witness`. `spendInfo` is that of the output the
  * input spends: the pending offer (`pendingSpendInfo`, acceptance and cancellation) or the loan
- * output at its debt hash (`activeSpendInfoAt(debtHash)`, the installment, the full repayment, the
- * zero-debt close and the liquidation). It must give the script of the input's prevout.
+ * output at its debt hash (`activeSpendInfoAt(debtHash)`, the installment, the full repayment and
+ * the liquidation). It must give the script of the input's prevout.
  */
 export function finalizePrivateOfferInput(
   deps: PrivateFlowDeps,

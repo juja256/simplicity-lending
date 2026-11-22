@@ -1,19 +1,23 @@
-//! Opening offers from their creation transactions, and the private messages of their loans.
+//! Opening offers from their creation transactions, the contract's arguments and bounds, and the
+//! private messages of their loans.
+
+use std::cell::OnceCell;
+use std::rc::Rc;
 
 use elements::encode::deserialize;
 use elements::hex::ToHex;
-use elements::secp256k1_zkp::XOnlyPublicKey;
-use elements::{OutPoint, Transaction, Txid, confidential};
+use elements::secp256k1_zkp::{PublicKey, XOnlyPublicKey};
+use elements::{OutPoint, Transaction, TxOut, Txid, confidential};
 use private_lending_core::{
-    CreationError, MAX_SIGNED_MESSAGE_BYTES, Message, MessageError,
+    BlinderTree, CARRY_SUPPLY, CreationError, MAX_SIGNED_MESSAGE_BYTES, Message, MessageError,
     MessagePhase as CoreMessagePhase, OfferPinned, OfferSecrets, OfferTerms,
     OpenedOffer as CoreOpenedOffer, PinnedOutput, PinnedRole as CorePinnedRole,
-    SignedMessage as CoreSignedMessage, expiry_hash, lift_lending_key, open_creation_as_borrower,
-    open_creation_as_lender, rewind,
+    SignedMessage as CoreSignedMessage, asset_point, check_bounds, expiry_hash, fs_iv,
+    lift_lending_key, open_creation_as_borrower, open_creation_as_lender, rewind, value_point,
 };
 use wasm_bindgen::prelude::*;
 
-use crate::error::{bad_input, creation_error, decode_hex, encode_hex};
+use crate::error::{bad_input, creation_error, decode_hex, encode_hex, out_of_bounds};
 use crate::keys::LendingKey;
 use crate::scan::parse;
 
@@ -169,6 +173,35 @@ pub(crate) fn unreadable(error: MessageError) -> String {
     bad_input(format!("unreadable message: {error}"))
 }
 
+/// The creation's output that holds the carry supply, `S = 2^50` units of the loan's carry token.
+const CREATION_CARRY_OUTPUT: u32 = 4;
+
+/// An offer's tree of blinder commitments, built at most once and shared by the offer, its
+/// contract's arguments, its loan states and their plans: building it takes 2,048 scalar
+/// multiplications.
+pub(crate) type SharedTree = Rc<OnceCell<BlinderTree>>;
+
+/// The tree of `shared`, built from `secrets` on first use.
+pub(crate) fn tree_of<'a>(shared: &'a SharedTree, secrets: &OfferSecrets) -> &'a BlinderTree {
+    shared.get_or_init(|| BlinderTree::new(secrets))
+}
+
+/// Whether an offer of `collateral` and full repayment `repayment` (base units) is within the
+/// bounds of proportional release, `1 ≤ C ≤ 2^44` and `1 ≤ R ≤ 2^50 − 2`: `out-of-bounds`
+/// otherwise. The lender checks them before accepting (`OpenedOffer.checkOfferBounds`), and the
+/// borrower's form before building an offer (`NewOffer.build` refuses one outside them too).
+#[wasm_bindgen(js_name = checkOfferBounds)]
+pub fn check_offer_bounds(collateral: u64, repayment: u64) -> Result<(), String> {
+    check_bounds(collateral, repayment).map_err(out_of_bounds)
+}
+
+/// The carry token's supply, `S = 2^50` units, which the creation transaction issues at input 2
+/// and holds, explicit, at output 4.
+#[wasm_bindgen(js_name = carrySupply)]
+pub fn carry_supply() -> u64 {
+    CARRY_SUPPLY
+}
+
 /// The party of an offer: its borrower or its lender.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Party {
@@ -186,6 +219,10 @@ pub struct OpenedOffer {
     creation_txid: Txid,
     first_input: String,
     party: Party,
+    /// The creation's output 4, the carry supply, when it has one: the loan's carry before its
+    /// first installment.
+    carry_supply: Option<(OutPoint, TxOut)>,
+    tree: SharedTree,
 }
 
 impl OpenedOffer {
@@ -203,17 +240,35 @@ impl OpenedOffer {
         self.creation_txid
     }
 
+    /// The creation's output 4 and its outpoint, when it has one.
+    pub(crate) fn carry_supply_output(&self) -> Option<(OutPoint, TxOut)> {
+        self.carry_supply.clone()
+    }
+
+    /// The offer's tree, shared.
+    pub(crate) fn shared_tree(&self) -> SharedTree {
+        Rc::clone(&self.tree)
+    }
+
     fn new(offer: CoreOpenedOffer, tx: &Transaction, party: Party) -> Result<Self, String> {
         let outpoint = tx
             .input
             .first()
             .ok_or_else(|| bad_input("the transaction has no inputs"))?
             .previous_output;
+        let carry_supply = tx.output.get(CREATION_CARRY_OUTPUT as usize).map(|output| {
+            (
+                OutPoint::new(tx.txid(), CREATION_CARRY_OUTPUT),
+                output.clone(),
+            )
+        });
         Ok(Self {
             offer,
             creation_txid: tx.txid(),
             first_input: outpoint_string(&outpoint),
             party,
+            carry_supply,
+            tree: SharedTree::default(),
         })
     }
 }
@@ -242,18 +297,24 @@ fn open(
     OpenedOffer::new(offer, &tx, party)
 }
 
-/// Opens the offer of a creation transaction as the lender it is addressed to.
+/// Opens the offer of a creation transaction as the lender it is addressed to: `out-of-bounds`
+/// for an offer outside the bounds of release (`checkOfferBounds`), which the lender never
+/// accepts (proofs, O9).
 #[wasm_bindgen(js_name = openCreationAsLender)]
 pub fn open_creation_as_lender_hex(
     lender: &LendingKey,
     creation_tx_hex: &str,
 ) -> Result<OpenedOffer, String> {
-    open(creation_tx_hex, Party::Lender, |tx| {
+    let offer = open(creation_tx_hex, Party::Lender, |tx| {
         open_creation_as_lender(lender.inner(), tx, crate::program_id())
-    })
+    })?;
+    offer.check_offer_bounds()?;
+
+    Ok(offer)
 }
 
-/// Opens the offer of a creation transaction as the borrower who created it.
+/// Opens the offer of a creation transaction as the borrower who created it, even outside the
+/// bounds of release, so that the borrower can cancel it.
 #[wasm_bindgen(js_name = openCreationAsBorrower)]
 pub fn open_creation_as_borrower_hex(
     borrower: &LendingKey,
@@ -353,13 +414,29 @@ impl OpenedOffer {
         lifted(&self.offer.signed_terms.borrower)
     }
 
-    /// The arguments of the offer's contract.
+    /// The arguments of the offer's contract, all recomputed from the shared secret and the
+    /// terms: with them the address check (`verifyOfferAddresses`) covers the release proof's
+    /// points, `FS_IV` and `BLINDER_ROOT` too. The first call builds the offer's tree of blinder
+    /// commitments, which the offer keeps.
     #[wasm_bindgen(js_name = contractArguments)]
-    pub fn contract_arguments(&self) -> ContractArguments {
+    pub fn contract_arguments(&self) -> Result<ContractArguments, String> {
         ContractArguments::new(
             &self.offer.signed_terms.terms,
             &self.offer.pinned,
             &self.offer.secrets,
+            tree_of(&self.tree, &self.offer.secrets),
+        )
+    }
+
+    /// Whether the offer is within the bounds of proportional release, `1 ≤ C ≤ 2^44` and
+    /// `1 ≤ R ≤ 2^50 − 2` (`out-of-bounds` otherwise): the lender's check before accepting, with
+    /// the address check. The release proof is sound only within them, and nothing on chain
+    /// bounds `R`.
+    #[wasm_bindgen(js_name = checkOfferBounds)]
+    pub fn check_offer_bounds(&self) -> Result<(), String> {
+        check_offer_bounds(
+            self.offer.pinned.active_collateral.amount,
+            self.offer.pinned.repayment.amount,
         )
     }
 
@@ -440,8 +517,56 @@ pub(crate) fn pinned_output(pinned: &OfferPinned, role: PinnedRole) -> &PinnedOu
     }
 }
 
-/// The script-independent arguments of the offer's contract, each the hex to hand to
-/// `SimplicityTypedValue.fromU256Hex`.
+/// The release proof's points that are fixed for a loan, read from the pinned outputs'
+/// commitments as the program reads them, as the contracts' `PrivateLendingParameters` reads them.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LoanPoints {
+    /// `A`, of the repayment's asset commitment.
+    pub(crate) repayment_asset: PublicKey,
+    /// `A_c`, of the active collateral's asset commitment.
+    pub(crate) collateral_asset: PublicKey,
+    /// `V_c0`, of the active collateral's value commitment.
+    pub(crate) collateral_value: PublicKey,
+    /// `D₀`, of the repayment's value commitment.
+    pub(crate) starting_debt: PublicKey,
+}
+
+impl LoanPoints {
+    /// The points of the offer whose outputs `pinned` pins. A pinned output is always
+    /// confidential, so the error is a bug's, not the caller's.
+    pub(crate) fn of(pinned: &OfferPinned) -> Result<LoanPoints, String> {
+        let (repayment, active) = (pinned.repayment, pinned.active_collateral);
+        let point = |point: Result<PublicKey, _>| {
+            point.map_err(|e| bad_input(format!("a pinned output is not a commitment: {e}")))
+        };
+
+        Ok(LoanPoints {
+            repayment_asset: point(asset_point(&repayment.asset_commitment()))?,
+            collateral_asset: point(asset_point(&active.asset_commitment()))?,
+            collateral_value: point(value_point(&active.value_commitment()))?,
+            starting_debt: point(value_point(&repayment.value_commitment()))?,
+        })
+    }
+
+    /// `FS_IV`, the chaining value of the release proof's challenge, over the points and `J`.
+    pub(crate) fn fs_iv(&self) -> [u8; 32] {
+        fs_iv(
+            &self.repayment_asset,
+            &self.collateral_asset,
+            &self.collateral_value,
+            &self.starting_debt,
+        )
+    }
+}
+
+/// A curve point as the program takes it, a `Ge`: its affine `x ‖ y`, each 32 bytes big-endian,
+/// hex.
+pub(crate) fn point_hex(point: &PublicKey) -> String {
+    encode_hex(&point.serialize_uncompressed()[1..])
+}
+
+/// The script-independent arguments of the offer's contract: the 32-byte values are the hex to
+/// hand to `SimplicityTypedValue.fromU256Hex`, and the points (`Ge`) their `x ‖ y`.
 #[wasm_bindgen]
 pub struct ContractArguments {
     borrower_nft_asset_id: String,
@@ -454,12 +579,27 @@ pub struct ContractArguments {
     expiry_hash: String,
     repayment_asset_prefix_bit: u8,
     repayment_asset_x: String,
+    repayment_asset_point: String,
+    collateral_asset_point: String,
+    collateral_value_point: String,
+    starting_debt_point: String,
+    fs_iv: String,
+    blinder_root: String,
 }
 
 impl ContractArguments {
-    pub(crate) fn new(terms: &OfferTerms, pinned: &OfferPinned, secrets: &OfferSecrets) -> Self {
+    /// The arguments of the offer of `terms`, whose outputs `pinned` pins and whose secrets and
+    /// tree are `secrets` and `tree`: the contracts' `PrivateLendingParameters::from_terms` and
+    /// `build_arguments`, from the same functions of the core.
+    pub(crate) fn new(
+        terms: &OfferTerms,
+        pinned: &OfferPinned,
+        secrets: &OfferSecrets,
+        tree: &BlinderTree,
+    ) -> Result<Self, String> {
         let repayment_asset = elements::encode::serialize(&pinned.repayment.asset_commitment());
-        Self {
+        let points = LoanPoints::of(pinned)?;
+        Ok(Self {
             borrower_nft_asset_id: encode_hex(&terms.borrower_nft.into_inner().0),
             lender_nft_asset_id: encode_hex(&terms.lender_nft.into_inner().0),
             pending_collateral_commitment: encode_hex(&pinned.pending_collateral.commitment_hash()),
@@ -473,7 +613,13 @@ impl ContractArguments {
             )),
             repayment_asset_prefix_bit: repayment_asset[0] & 1,
             repayment_asset_x: encode_hex(&repayment_asset[1..]),
-        }
+            repayment_asset_point: point_hex(&points.repayment_asset),
+            collateral_asset_point: point_hex(&points.collateral_asset),
+            collateral_value_point: point_hex(&points.collateral_value),
+            starting_debt_point: point_hex(&points.starting_debt),
+            fs_iv: encode_hex(&points.fs_iv()),
+            blinder_root: encode_hex(&tree.root()),
+        })
     }
 }
 
@@ -535,6 +681,44 @@ impl ContractArguments {
     #[wasm_bindgen(getter, js_name = repaymentAssetX)]
     pub fn repayment_asset_x(&self) -> String {
         self.repayment_asset_x.clone()
+    }
+
+    /// `REPAYMENT_ASSET_POINT`, `A` as a curve point: the point of `REPAYMENT_ASSET`.
+    #[wasm_bindgen(getter, js_name = repaymentAssetPoint)]
+    pub fn repayment_asset_point(&self) -> String {
+        self.repayment_asset_point.clone()
+    }
+
+    /// `COLLATERAL_ASSET_POINT`, `A_c`, of the active collateral's asset commitment.
+    #[wasm_bindgen(getter, js_name = collateralAssetPoint)]
+    pub fn collateral_asset_point(&self) -> String {
+        self.collateral_asset_point.clone()
+    }
+
+    /// `COLLATERAL_VALUE_POINT`, `V_c0 = C·A_c + ρ·G`, of the active collateral's value
+    /// commitment.
+    #[wasm_bindgen(getter, js_name = collateralValuePoint)]
+    pub fn collateral_value_point(&self) -> String {
+        self.collateral_value_point.clone()
+    }
+
+    /// `STARTING_DEBT_POINT`, `D₀ = R·A + r₀·G`, of the repayment's value commitment.
+    #[wasm_bindgen(getter, js_name = startingDebtPoint)]
+    pub fn starting_debt_point(&self) -> String {
+        self.starting_debt_point.clone()
+    }
+
+    /// `FS_IV`, the chaining value of the release proof's challenge, over `A`, `A_c`, `V_c0`,
+    /// `D₀` and `J`.
+    #[wasm_bindgen(getter, js_name = fsIv)]
+    pub fn fs_iv(&self) -> String {
+        self.fs_iv.clone()
+    }
+
+    /// `BLINDER_ROOT`, the root of the tree of the blinder commitments `Y_1 … Y_1024`.
+    #[wasm_bindgen(getter, js_name = blinderRoot)]
+    pub fn blinder_root(&self) -> String {
+        self.blinder_root.clone()
     }
 }
 
@@ -626,7 +810,7 @@ pub(crate) mod tests {
     }
 
     fn arguments(offer: &OpenedOffer) -> Vec<String> {
-        let a = offer.contract_arguments();
+        let a = offer.contract_arguments().unwrap();
         vec![
             a.borrower_nft_asset_id(),
             a.lender_nft_asset_id(),
@@ -638,6 +822,12 @@ pub(crate) mod tests {
             a.expiry_hash(),
             a.repayment_asset_prefix_bit().to_string(),
             a.repayment_asset_x(),
+            a.repayment_asset_point(),
+            a.collateral_asset_point(),
+            a.collateral_value_point(),
+            a.starting_debt_point(),
+            a.fs_iv(),
+            a.blinder_root(),
         ]
     }
 
@@ -667,21 +857,42 @@ pub(crate) mod tests {
         assert!(!as_lender.first_input().starts_with('['));
     }
 
+    /// The `x ‖ y` hex of a point argument.
+    fn point_words((x, y): ([u8; 32], [u8; 32])) -> String {
+        encode_hex(&[x, y].concat())
+    }
+
     #[test]
     fn contract_arguments_match_the_contract() {
         let fixture = fixture();
-        let hex = creation_hex(&fixture);
         let lender = key_of(&fixture, "lender_master_blinding_key");
-        let offer = open_creation_as_lender_hex(&lender, &hex).unwrap();
+        let borrower = key_of(&fixture, "borrower_master_blinding_key");
+        // both offers, whose `A` has either prefix bit, as both parties open them
+        for hex in [
+            creation_hex(&fixture),
+            fixture["other_offer"]["creation_tx"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        ] {
+            let as_lender = open_creation_as_lender_hex(&lender, &hex).unwrap();
+            let as_borrower = open_creation_as_borrower_hex(&borrower, &hex).unwrap();
+            assert_eq!(arguments(&as_lender), arguments(&as_borrower));
+            assert_matches_the_contract(&as_lender, &lender, &hex);
+        }
+    }
 
+    /// Every argument of `offer` is the contract's, which `from_terms` rebuilds from the terms and
+    /// the shared secret.
+    fn assert_matches_the_contract(offer: &OpenedOffer, lender: &LendingKey, hex: &str) {
         let (_, parameters) = verify_offer_as_lender(
             lender.inner(),
-            &tx_of(&hex),
+            &tx_of(hex),
             SimplicityNetwork::LiquidTestnet,
         )
         .unwrap();
         let expected = parameters.build_arguments();
-        let got = offer.contract_arguments();
+        let got = offer.contract_arguments().unwrap();
 
         assert_eq!(
             got.borrower_nft_asset_id(),
@@ -713,6 +924,27 @@ pub(crate) mod tests {
         assert_eq!(got.repayment_asset_prefix_bit(), u8::from(prefix_bit));
         assert_eq!(got.repayment_asset_x(), encode_hex(&x));
         assert_eq!(offer.expiry_salt(), encode_hex(&parameters.expiry_salt));
+        // the release proof's points, `FS_IV` and `BLINDER_ROOT`
+        assert_eq!(
+            got.repayment_asset_point(),
+            point_words(expected.repayment_asset_point)
+        );
+        assert_eq!(
+            got.collateral_asset_point(),
+            point_words(expected.collateral_asset_point)
+        );
+        assert_eq!(
+            got.collateral_value_point(),
+            point_words(expected.collateral_value_point)
+        );
+        assert_eq!(
+            got.starting_debt_point(),
+            point_words(expected.starting_debt_point)
+        );
+        assert_eq!(got.fs_iv(), encode_hex(&expected.fs_iv));
+        assert_eq!(got.blinder_root(), encode_hex(&expected.blinder_root));
+        // the offer is within the bounds that `verify_offer_as_lender` checked
+        assert!(offer.check_offer_bounds().is_ok());
     }
 
     #[test]

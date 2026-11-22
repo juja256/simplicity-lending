@@ -56,6 +56,31 @@ function toOfferError(error: unknown): PrivateOfferError {
   return new PrivateOfferError(code, message, !NOT_ADDRESSED_CODES.has(code))
 }
 
+/**
+ * The lender's check of the bounds of proportional release before it accepts (proofs, O9):
+ * `1 ≤ C ≤ 2^44` and `1 ≤ R ≤ 2^50 − 2`, by the offer's own check and by the free one on its
+ * terms. The release proof is sound only within them, and nothing on chain bounds `R`. Throws
+ * `PrivateOfferError` `out-of-bounds`, an offer addressed to the key that it must not accept.
+ */
+export function checkLenderBounds(
+  wasm: Pick<PrivateFlowDeps['wasm'], 'checkOfferBounds'>,
+  opened: Pick<OpenedOffer, 'checkOfferBounds' | 'collateralAmount' | 'repaymentAmount'>,
+): void {
+  try {
+    opened.checkOfferBounds()
+    wasm.checkOfferBounds(opened.collateralAmount(), opened.repaymentAmount())
+  } catch (error) {
+    const refusal = toOfferError(error)
+    throw new PrivateOfferError(refusal.code, refusal.message, true)
+  }
+}
+
+/**
+ * Opens the creation `creationTxHex` with `key` as `role` and checks it against the addresses of
+ * its own terms, every argument recomputed from the shared secret and the terms, the release
+ * proof's points, `FS_IV` and `BLINDER_ROOT` included (`contractArguments()`). The lender's also
+ * checks the bounds of release (`checkLenderBounds`). Throws `PrivateOfferError`.
+ */
 export async function openAndVerifyOffer(
   deps: PrivateFlowDeps,
   role: 'lender' | 'borrower',
@@ -73,12 +98,18 @@ export async function openAndVerifyOffer(
   }
 
   try {
+    if (role === 'lender') checkLenderBounds(deps.wasm, opened)
     const creationTx = deps.lwk.Transaction.fromString(creationTxHex)
-    const scripts = privateOfferScripts(
-      deps.sources,
-      toPrivateOfferArguments(opened.contractArguments()),
-      deps.network,
-    )
+    let args
+    try {
+      args = opened.contractArguments()
+    } catch (error) {
+      // The arguments are recomputed from the shared secret and the terms: a failure is the
+      // offer's, never "not addressed to this key".
+      const refusal = toOfferError(error)
+      throw new PrivateOfferError(refusal.code, refusal.message, true)
+    }
+    const scripts = privateOfferScripts(deps.sources, toPrivateOfferArguments(args), deps.network)
     if (!verifyOfferAddresses(scripts, creationTx)) {
       throw new PrivateOfferError(
         'address-mismatch',

@@ -21,6 +21,10 @@
 // sweeps those that open, each with its own opening. One that does not open has no known opening
 // and stays where it is, a loss to the borrower who built it. Which installments are unclaimed is
 // checked on chain against the lender NFT's claims (`lenderNftClaims`), as at the final claim.
+// The collateral the loan holds is `c_k` of its step: the lender computes it when it reads every
+// installment, and otherwise finds it by the search (`findCollateral`, in a Web Worker in the
+// app), from the chain and its offer secrets alone: the loan output's value commitment is
+// `c_k·A_c + x_k·G` (the design note's "Liquidation"). The carries stay with the borrower.
 // The lender NFT is an explicit output at a wallet address, which LWK does not list among the
 // wallet's coins, so it is spent as a plain input, not a wallet coin; the wallet still recognizes
 // its script, and signs it.
@@ -37,6 +41,7 @@ import {
   NFT_AMOUNT,
 } from '@/simplicity/private-lending/layout'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
+import type { LoanState } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from '../deps'
 import { finalizePrivateOfferInput, pinnedAuthCovenant } from '../finalize'
@@ -61,10 +66,12 @@ import {
   fetchPrevoutTxs,
   outpointOf,
   parseOutpoint,
+  type PinnedFigures,
   pinnedTxOutSecrets,
   prevoutsOf,
   requireOutput,
   type SpendLayout,
+  takePinned,
   walletCoinInput,
   wasmStep,
 } from './shared'
@@ -89,6 +96,57 @@ export class ExpiryNotReachedError extends Error {
   }
 }
 
+/** What the search for a loan's collateral takes: the wasm's `CollateralSearch`, as plain values. */
+export interface CollateralSearchInput {
+  /** `V_k`, the loan output's value commitment, hex. */
+  valueCommitment: string
+  /** `A_c`, the active collateral's asset commitment, hex. */
+  assetCommitment: string
+  /** `x_k`, the step's derived blinder, hex: a secret of the offer, which stays on the device. */
+  blinder: string
+  /** The search's bound, the offer's collateral `C`. */
+  max: bigint
+}
+
+/**
+ * Finds the collateral `c_k` in `[1, max]` that `search` describes, or undefined: the wasm's
+ * `findCollateral`, run off the UI thread in the app (`findCollateralInWorker`).
+ */
+export type CollateralFinder = (search: CollateralSearchInput) => Promise<bigint | undefined>
+
+/**
+ * The collateral the loan of `state` holds: computed when the lender read every installment, and
+ * otherwise found by `findCollateral` and set on `state` (`setCollateral`, which checks that it
+ * opens the loan output). Copied out, and the wasm's object freed (`takePinned`). Throws when it
+ * cannot be found.
+ */
+export async function loanCollateral(
+  state: LoanState,
+  findCollateral: CollateralFinder | undefined,
+): Promise<PinnedFigures> {
+  const known = state.collateral()
+  if (known !== undefined) return takePinned(known)
+  if (findCollateral === undefined) {
+    throw new Error('An installment does not open for the lender, and no search was given')
+  }
+  const search = wasmStep('The collateral search', () => state.collateralSearch())
+  const input: CollateralSearchInput = {
+    valueCommitment: search.valueCommitment,
+    assetCommitment: search.assetCommitment,
+    blinder: search.blinder,
+    max: search.max,
+  }
+  search.free()
+  const found = await findCollateral(input)
+  if (found === undefined) {
+    throw new Error("The loan output holds no amount of the offer's collateral up to its terms")
+  }
+  wasmStep('Setting the collateral found', () => state.setCollateral(found))
+  const collateral = state.collateral()
+  if (collateral === undefined) throw new Error('The collateral found was not kept')
+  return takePinned(collateral)
+}
+
 export interface LiquidationParams {
   /**
    * The lender NFT, an explicit output at a wallet address: the acceptance's output 2, or output 0
@@ -106,6 +164,11 @@ export interface LiquidationParams {
   collateralReceiver: Address
   /** The chain tip's height. */
   tipHeight: number
+  /**
+   * The search for the collateral when an installment does not open for the lender
+   * (`loanCollateral`); the app runs it in a Web Worker.
+   */
+  findCollateral?: CollateralFinder
 }
 
 export interface LiquidationSummary {
@@ -155,7 +218,6 @@ export async function buildPrivateLiquidation(
   const principalAsset = opened.principalAsset()
   // Read now: `finalize` may run after the loan's state is freed.
   const debtHash = state.debtHash
-  const collateral = state.collateral()
 
   // 1. The covenant inputs, and the fee coins.
   const loanRef = parseOutpoint(state.loanOutpoint)
@@ -168,14 +230,17 @@ export async function buildPrivateLiquidation(
       throw new Error(`Fee coin ${outpointOf(coin)} is not the policy asset`)
     }
   }
-  if (
-    collateral.asset !== opened.collateralAsset() ||
-    collateral.amount !== opened.collateralAmount()
-  ) {
-    throw new Error('The loan does not hold the offer terms collateral')
-  }
   if (!params.collateralReceiver.isBlinded()) {
     throw new Error('The collateral must go to a confidential address')
+  }
+  // `c_k`: what the installments left of the offer's collateral.
+  const collateral = await loanCollateral(state, params.findCollateral)
+  if (
+    collateral.asset !== opened.collateralAsset() ||
+    collateral.amount <= 0n ||
+    collateral.amount > opened.collateralAmount()
+  ) {
+    throw new Error('The loan does not hold the offer terms collateral')
   }
 
   // 2. The unclaimed installments that open, each with its own opening, in chain order.

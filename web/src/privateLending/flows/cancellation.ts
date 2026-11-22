@@ -1,19 +1,25 @@
 // The borrower's cancellation of a pending private offer (`attach_cancellation` in the contracts'
 // private lending core):
 //   inputs   0 the pending offer (OfferCancellation branch), 1 the lender NFT at its script_auth
-//            lock, 2 the borrower NFT, explicit; 3… the borrower's fee coins;
-//   outputs  0 burns the lender NFT and 1 the borrower NFT (OP_RETURN, explicit); 2 the
+//            lock, 2 the borrower NFT, explicit, 3 the carry supply (the creation's output 4, at
+//            the principal's asset_auth, unlocked by the borrower NFT); 4… the borrower's fee
+//            coins;
+//   outputs  0 burns the lender NFT and 1 the borrower NFT (OP_RETURN, explicit); 2 burns the
+//            carry supply (OP_RETURN, explicit: the supply is the same for every loan); 3 the
 //            collateral back to the borrower, blinded to its wallet; then the policy-asset change
 //            and the fee.
-// The covenant checks the pending collateral at input 0 and both burns (input 1 to output 0,
+// The covenant checks the pending collateral at input 0 and both NFT burns (input 1 to output 0,
 // input 2 to output 1); it leaves the collateral to the spender. The script_auth lock releases the
-// lender NFT to a transaction that spends the pending offer at input 0. The borrower NFT is an
+// lender NFT to a transaction that spends the pending offer at input 0. The carry supply's
+// asset_auth takes the borrower NFT from input 2 to its burn at output 1, which the no-burn lock
+// accepts; once the NFT is burned, nothing could unlock the supply again. The borrower NFT is an
 // explicit output at a wallet address, which LWK does not list among the wallet's coins, so it is
 // spent as a plain input, not a wallet coin; the wallet still recognizes its script, and signs it.
 import type { Address, WalletTxOut } from 'lwk_wasm'
 
 import type { UpdatedPset } from '@/lwk/updatedPset'
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
+import { ASSET_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/asset-auth/witness'
 import {
   CANCELLATION_INPUT,
   CANCELLATION_OUTPUT,
@@ -24,7 +30,13 @@ import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lend
 import { SCRIPT_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/script-auth/witness'
 
 import type { PrivateFlowDeps } from '../deps'
-import { finalizePrivateOfferInput, finalizeScriptAuthInput, pinnedAuthCovenant } from '../finalize'
+import {
+  finalizeAssetAuthInput,
+  finalizePrivateOfferInput,
+  finalizeScriptAuthInput,
+  pinnedAuthCovenant,
+} from '../finalize'
+import { creationCarrySupply } from '../loan'
 import { walletInputSecret } from '../secrets'
 import type { VerifiedOffer } from '../verify'
 import {
@@ -56,15 +68,16 @@ export interface CancellationParams {
 }
 
 export interface CancellationSummary {
-  /** The collateral back to the borrower: `"<txid>:2"`. */
+  /** The collateral back to the borrower: `"<txid>:3"`. */
   collateralOutpoint: string
   collateral: bigint
 }
 
 /**
  * Builds the borrower's cancellation of a pending offer, blinded and ready to sign. `finalize`
- * finalizes the wallet inputs (the borrower NFT among them), then the offer (OfferCancellation)
- * and the lender NFT lock (script_auth), running both covenants on the transaction.
+ * finalizes the wallet inputs (the borrower NFT among them), then the offer (OfferCancellation),
+ * the lender NFT lock (script_auth) and the carry supply (asset_auth), running each covenant on
+ * the transaction.
  */
 export async function buildPrivateCancellation(
   deps: PrivateFlowDeps,
@@ -80,6 +93,9 @@ export async function buildPrivateCancellation(
   const lockInput = `${creationTxid}:${CREATION_OUTPUT.lenderNft}`
   const borrowerNft = opened.borrowerNft()
   const lenderNft = opened.lenderNft()
+  // The carry supply, checked on the creation: `CARRY_SUPPLY` units of the asset its input 2
+  // issues, at the principal's asset_auth.
+  const carrySupply = creationCarrySupply(deps, offer)
 
   // 1. The inputs.
   const nftRef = parseOutpoint(params.borrowerNftOutpoint)
@@ -91,10 +107,11 @@ export async function buildPrivateCancellation(
     }
   }
   const feeInputs = params.feeCoins.map(outpointOf)
-  const inputs = [offerInput, lockInput, nftInput, ...feeInputs]
+  const inputs = [offerInput, lockInput, nftInput, carrySupply.outpoint, ...feeInputs]
   if (new Set(inputs).size !== inputs.length) {
     throw new Error(
-      'The offer, the lender NFT lock, the borrower NFT and the fee coins must differ',
+      'The offer, the lender NFT lock, the borrower NFT, the carry supply and the fee coins must ' +
+        'differ',
     )
   }
   if (!params.collateralReceiver.isBlinded()) {
@@ -121,6 +138,8 @@ export async function buildPrivateCancellation(
 
   // 3. The outputs.
   const principalAuth = pinnedAuthCovenant(deps, offer, 'principal')
+  const carryPrevout = () =>
+    requireOutput(creationTx, CREATION_OUTPUT.carrySupply, 'The carry supply')
   const repaymentAuth = pinnedAuthCovenant(deps, offer, 'repayment')
   const burn = burnScript(deps)
   const collateralReceiver = lwk.Address.parse(params.collateralReceiver.toString(), deps.network)
@@ -140,13 +159,19 @@ export async function buildPrivateCancellation(
         blinding: { kind: 'explicit' },
       },
       {
+        script: burn.toString(),
+        asset: carrySupply.asset,
+        amount: carrySupply.amount,
+        blinding: { kind: 'explicit' },
+      },
+      {
         script: collateralReceiver.scriptPubkey().toString(),
         asset: pendingCollateral.asset,
         amount: pendingCollateral.amount,
         blinding: { kind: 'fresh', receiver: collateralReceiver },
       },
     ],
-    restrictedAssets: [borrowerNft, lenderNft],
+    restrictedAssets: [borrowerNft, lenderNft, carrySupply.asset],
     restrictedScripts: [
       offer.scripts.pendingOffer.toString(),
       offer.scripts.activeOffer.toString(),
@@ -188,11 +213,23 @@ export async function buildPrivateCancellation(
         secrets: lwk.TxOutSecrets.fromExplicit(lwk.AssetId.fromString(borrowerNft), NFT_AMOUNT),
         maxWeightToSatisfy: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
       },
+      {
+        outpoint: new lwk.OutPoint(carrySupply.outpoint),
+        prevout: carryPrevout(),
+        asset: lwk.AssetId.fromString(carrySupply.asset),
+        amount: carrySupply.amount,
+        maxWeightToSatisfy: ASSET_AUTH_MAX_WEIGHT_TO_SATISFY,
+      },
       ...params.feeCoins.map((coin, index) => walletCoinInput(deps, coin, feePrevouts[index])),
     ],
     outputs: [
       { script: burn, amount: NFT_AMOUNT, asset: lwk.AssetId.fromString(lenderNft) },
       { script: burn, amount: NFT_AMOUNT, asset: lwk.AssetId.fromString(borrowerNft) },
+      {
+        script: burn,
+        amount: carrySupply.amount,
+        asset: lwk.AssetId.fromString(carrySupply.asset),
+      },
       {
         script: collateralReceiver.scriptPubkey(),
         amount: pendingCollateral.amount,
@@ -214,8 +251,13 @@ export async function buildPrivateCancellation(
         opened.inputSecret(wasm.PinnedRole.PendingCollateral, CANCELLATION_INPUT.offer),
         wasm.InputSecret.explicit(CANCELLATION_INPUT.lenderNft, lenderNft, NFT_AMOUNT),
         wasm.InputSecret.explicit(CANCELLATION_INPUT.borrowerNft, borrowerNft, NFT_AMOUNT),
+        wasm.InputSecret.explicit(
+          CANCELLATION_INPUT.carrySupply,
+          carrySupply.asset,
+          carrySupply.amount,
+        ),
         ...params.feeCoins.map((coin, index) =>
-          walletInputSecret(deps, coin, CANCELLATION_INPUT.borrowerNft + 1 + index),
+          walletInputSecret(deps, coin, CANCELLATION_INPUT.carrySupply + 1 + index),
         ),
       ],
       [],
@@ -230,6 +272,7 @@ export async function buildPrivateCancellation(
     requireOutput(creationTx, CREATION_OUTPUT.pendingOffer, 'The pending offer'),
     requireOutput(creationTx, CREATION_OUTPUT.lenderNft, 'The lender NFT lock'),
     requireOutput(nftTx, nftRef.vout, 'The borrower NFT'),
+    carryPrevout(),
     ...prevoutsOf(feePrevoutTxs, feeInputs),
   ]
 
@@ -250,13 +293,26 @@ export async function buildPrivateCancellation(
         CANCELLATION_INPUT.offer,
         { branch: 'OfferCancellation' },
       )
-      const finalizedTx = finalizeScriptAuthInput(
+      const withLock = finalizeScriptAuthInput(
         deps,
         withOffer,
         offer,
         prevouts(),
         CANCELLATION_INPUT.lenderNft,
         CANCELLATION_INPUT.offer,
+      )
+      // the no-burn lock accepts the borrower NFT's burn at output 1
+      const finalizedTx = finalizeAssetAuthInput(
+        deps,
+        withLock,
+        offer,
+        'principal',
+        prevouts(),
+        CANCELLATION_INPUT.carrySupply,
+        {
+          inputIndex: CANCELLATION_INPUT.borrowerNft,
+          outputIndex: CANCELLATION_OUTPUT.borrowerNftBurn,
+        },
       )
       const txid = finalizedTx.txid().toString()
       if (txid !== builtTxid) throw new Error('Finalizing changed the cancellation')

@@ -136,7 +136,8 @@ fn salt_changes_the_revealed_cmr(context: simplex::TestContext) -> anyhow::Resul
     let acceptance_tx = accept_private_offer(&context, &mut setup, &lender)?;
     let repayment_tx = broadcast(
         &build_full_repayment(
-            &Loan::accepted(parameters, &acceptance_tx),
+            &setup,
+            &Loan::accepted(&setup, &acceptance_tx),
             borrower,
             lender.get_blinding_public_key(),
         )?,

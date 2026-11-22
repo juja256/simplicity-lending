@@ -32,14 +32,20 @@ import {
   type PutDirectoryEntryBody,
   requestDirectoryChallenge,
 } from '@/api/indexer/private'
-import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
+import {
+  estimateFeeBudgetSats,
+  EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
+  WALLET_OVERHEAD_WEIGHT_UNITS,
+} from '@/lwk/weights'
 import { AddressCursor, GAP_LIMIT } from '@/privateLending/addressCursor'
 import {
   borrowerNftOutpoint as candidateBorrowerNftOutpoint,
   repaymentBorrowerNftOutpoint,
+  unspentCarries,
   unspentUtxo,
   utxoOutpoint,
 } from '@/privateLending/candidate'
+import { releaseForPayment } from '@/privateLending/collateralFigures'
 import type { PrivateFlowDeps } from '@/privateLending/deps'
 import {
   checkDirectoryEntry,
@@ -53,9 +59,10 @@ import { buildInstallmentClaim } from '@/privateLending/flows/claimInstallments'
 import { buildPrincipalClaim } from '@/privateLending/flows/claimPrincipal'
 import { buildFinalClaim, closedLoanOutpoint } from '@/privateLending/flows/claimRepayment'
 import { buildPrivateCreation, type CreationParams } from '@/privateLending/flows/creation'
-import { buildPrivateInstallment } from '@/privateLending/flows/installment'
+import { buildPrivateInstallment, R2_EXTRA_OUTPUT_AMOUNT } from '@/privateLending/flows/installment'
 import {
   buildPrivateLiquidation,
+  type CollateralFinder,
   ExpiryNotReachedError,
   type LiquidationParams,
 } from '@/privateLending/flows/liquidation'
@@ -76,10 +83,18 @@ import {
   termBlocksOf,
   unitsToDecimal,
 } from '@/privateLending/lenderTerms'
-import { loadLoan, type Loan, PrincipalNotClaimedError } from '@/privateLending/loan'
+import {
+  type CarrySupply,
+  creationCarrySupply,
+  loadLoan,
+  type Loan,
+  PrincipalNotClaimedError,
+  verifiedLoanCarries,
+} from '@/privateLending/loan'
 import { MESSAGE_LIMITS, messageBytes } from '@/privateLending/messages'
 import { checkAgainstTerms, proposalOfOffer } from '@/privateLending/proposalCheck'
 import { walletReceiver } from '@/privateLending/receiver'
+import { INSTALLMENT_WEIGHT_UNITS, REPAY_WEIGHT_UNITS } from '@/privateLending/repayWeights'
 import {
   CREATION_TX_MISMATCH,
   loadVerifiedOffer,
@@ -98,6 +113,7 @@ import {
   ACCEPTANCE_OUTPUT,
   CANCELLATION_INPUT,
   CANCELLATION_OUTPUT,
+  CARRY_SUPPLY,
   CLAIM_INPUT,
   CLAIM_OUTPUT,
   CREATION_OUTPUT,
@@ -458,38 +474,67 @@ function creationCoins(wallet: SeedWallet): {
   return { firstInput, lenderNftCoin, collateralCoins }
 }
 
-/** The NFTs a creation PSET issues and the nonce of its pending offer, output 3. */
+/**
+ * The tokens a creation PSET issues, the NFTs at outputs 0 and 1 and the carry token's supply at
+ * output 4, all explicit, and the nonce of its pending offer, output 3.
+ */
 function creationIdentity(pset: lwk.Pset): {
   borrowerNft: string
   lenderNft: string
+  carry: string
   nonce: string
 } {
   const outputs = inspectPset(wasm, pset.toString()).outputs
   const borrowerNftOutput = outputs[CREATION_OUTPUT.borrowerNft]
   const lenderNftOutput = outputs[CREATION_OUTPUT.lenderNft]
   const offerOutput = outputs[CREATION_OUTPUT.pendingOffer]
+  const carryOutput = outputs[CREATION_OUTPUT.carrySupply]
   if (
     offerOutput === undefined ||
+    carryOutput === undefined ||
     borrowerNftOutput.asset === null ||
     lenderNftOutput.asset === null ||
+    carryOutput.asset === null ||
+    carryOutput.amount !== CARRY_SUPPLY ||
     offerOutput.ecdhPubkey === null
   ) {
-    throw new Error('the creation PSET has no explicit NFTs at outputs 0 and 1 or no nonce at 3')
+    throw new Error(
+      'the creation PSET has no explicit NFTs at outputs 0 and 1, no nonce at 3, or no ' +
+        `explicit carry supply of ${CARRY_SUPPLY} at 4`,
+    )
   }
   return {
     borrowerNft: borrowerNftOutput.asset,
     lenderNft: lenderNftOutput.asset,
+    carry: carryOutput.asset,
     nonce: offerOutput.ecdhPubkey,
   }
 }
 
+/** The tokens of an offer that `describeOutputs` names: its NFTs, and its carry token if known. */
+interface OfferTokens {
+  borrowerNft: string
+  lenderNft: string
+  carry?: string
+}
+
+/** The tokens of `offer`, its carry token read from its creation (`creationCarrySupply`). */
+function offerTokens(ctx: Context, offer: VerifiedOffer, role: Wallet): OfferTokens {
+  return {
+    borrowerNft: offer.opened.borrowerNft(),
+    lenderNft: offer.opened.lenderNft(),
+    carry: creationCarrySupply(flowDeps(ctx.wallets[role], ctx.chain), offer).asset,
+  }
+}
+
 /** One line per output: what it holds and how it is blinded. */
-function describeOutputs(pset: lwk.Pset, nfts: { borrowerNft: string; lenderNft: string }): void {
+function describeOutputs(pset: lwk.Pset, tokens: OfferTokens): void {
   const names: Record<string, string> = {
     [TESTNET_ASSETS.policy]: 'tL-BTC',
     [TESTNET_ASSETS.principal]: 'TEST',
-    [nfts.borrowerNft]: 'borrower NFT',
-    [nfts.lenderNft]: 'lender NFT',
+    [tokens.borrowerNft]: 'borrower NFT',
+    [tokens.lenderNft]: 'lender NFT',
+    ...(tokens.carry === undefined ? {} : { [tokens.carry]: 'carry token' }),
   }
   inspectPset(wasm, pset.toString()).outputs.forEach((output, index) => {
     const kind =
@@ -510,18 +555,31 @@ function describeOutputs(pset: lwk.Pset, nfts: { borrowerNft: string; lenderNft:
 }
 
 /**
- * Throws if two outputs of `pset` other than the fee share a script: a wallet output (a receiver,
- * the principal change, the policy-asset change) must never reuse another's script.
+ * Throws if two outputs of `pset` share a script, except the fee, the burns (an `OP_RETURN` pays no
+ * one: the repayment burns the borrower NFT and the carries to the same `OP_RETURN "burn"`) and the
+ * outputs `shared`, which must have one script between them: an installment's two carries, both at
+ * the principal's asset_auth. A wallet output (a receiver, the release, the principal change, the
+ * policy-asset change) must never reuse another's script, nor the carries'.
  */
-function assertDistinctOutputScripts(pset: lwk.Pset, what: string): void {
+function assertDistinctOutputScripts(
+  pset: lwk.Pset,
+  what: string,
+  shared: readonly number[] = [],
+): void {
+  const outputs = inspectPset(wasm, pset.toString()).outputs
+  const sharedScripts = new Set(shared.map(index => outputs[index]?.script ?? ''))
+  if (shared.length > 0 && (sharedScripts.size !== 1 || sharedScripts.has(''))) {
+    throw new Error(`${what}: outputs ${shared.join(' and ')} do not share one script`)
+  }
   const seen = new Set<string>()
-  for (const output of inspectPset(wasm, pset.toString()).outputs) {
-    if (output.script === '') continue
+  outputs.forEach((output, index) => {
+    // the first of the shared outputs stands for them all
+    if (output.script === '' || output.script.startsWith('6a') || shared.indexOf(index) > 0) return
     if (seen.has(output.script)) {
       throw new Error(`${what}: two outputs share the script ${output.script}`)
     }
     seen.add(output.script)
-  }
+  })
 }
 
 /** A cursor over consensus-encoded bytes, which throws past their end. */
@@ -532,6 +590,11 @@ class ByteReader {
 
   get done(): boolean {
     return this.at === this.bytes.length
+  }
+
+  /** How many bytes were read. */
+  get position(): number {
+    return this.at
   }
 
   take(length: number): Uint8Array {
@@ -582,12 +645,18 @@ class ByteReader {
 }
 
 /**
- * The length of each output's range proof in `tx`, 0 for none, read from its consensus encoding
- * (rust-elements' `Encodable for Transaction`), which LWK's JS API does not expose. Checks itself
- * against `tx`: every byte read, the outputs' count and scripts, and no proof on an explicit
- * output.
+ * The length of each output's range proof in `tx`, 0 for none, where it starts in the encoding,
+ * and the transaction's weight, read from its consensus encoding (rust-elements' `Encodable for
+ * Transaction`), which LWK's JS API does not expose. The weight is rust-elements'
+ * `Transaction::weight`: four times the bytes up to the lock time, plus the witnesses after it.
+ * Checks itself against `tx`: every byte read, the outputs' count and scripts, and no proof on an
+ * explicit output.
  */
-function outputRangeProofLengths(tx: lwk.Transaction): number[] {
+function readConsensusEncoding(tx: lwk.Transaction): {
+  rangeProofLengths: number[]
+  rangeProofOffsets: number[]
+  weight: number
+} {
   const reader = new ByteReader(tx.toBytes())
   reader.u32() // version
   const hasWitness = reader.u8() === 1
@@ -617,7 +686,9 @@ function outputRangeProofLengths(tx: lwk.Transaction): number[] {
     explicit.push(asset === 'explicit' && value === 'explicit')
   }
   reader.u32() // lock time
+  const baseSize = reader.position
   const lengths = new Array<number>(count).fill(0)
+  const offsets = new Array<number>(count).fill(0)
   if (hasWitness) {
     for (let i = 0; i < inputs; i += 1) {
       reader.varBytes() // amount range proof
@@ -630,12 +701,19 @@ function outputRangeProofLengths(tx: lwk.Transaction): number[] {
     }
     for (let i = 0; i < count; i += 1) {
       reader.varBytes() // surjection proof
-      lengths[i] = reader.varBytes().length
+      lengths[i] = reader.varInt()
+      offsets[i] = reader.position
+      reader.take(lengths[i])
       if (explicit[i] && lengths[i] !== 0) throw new Error(`explicit output ${i} has a range proof`)
     }
   }
   if (!reader.done) throw new Error('the transaction has bytes after its witnesses')
-  return lengths
+  const size = tx.toBytes().length
+  return {
+    rangeProofLengths: lengths,
+    rangeProofOffsets: offsets,
+    weight: 4 * baseSize + (size - baseSize),
+  }
 }
 
 /** The parameters of a creation from the borrower to the lender, from the borrower's coins. */
@@ -662,9 +740,9 @@ async function creationParams(
 
 /**
  * Builds a creation from the borrower to the lender, with `message` in its terms, twice from the
- * same coins, and checks that the rebuild is a fresh offer (Review Focus): new NFTs and a new
- * output 3 nonce. Each build runs the builder's layout asserts. Returns the second build; the first
- * is never signed.
+ * same coins, and checks that the rebuild is a fresh offer (Review Focus): new NFTs, a new carry
+ * token and a new output 3 nonce. Each build runs the builder's layout asserts. Returns the second
+ * build; the first is never signed.
  */
 async function buildFreshCreation(
   ctx: Context,
@@ -681,12 +759,16 @@ async function buildFreshCreation(
   if (discarded.borrowerNft === kept.borrowerNft || discarded.lenderNft === kept.lenderNft) {
     throw new Error('two creations built from the same coins issue the same NFTs')
   }
+  if (discarded.carry === kept.carry) {
+    throw new Error('two creations built from the same coins issue the same carry token')
+  }
   if (discarded.nonce === kept.nonce) {
     throw new Error('two creations built from the same coins share the output 3 nonce')
   }
   out('two builds from the same coins differ:')
   out(`  borrower NFT ${discarded.borrowerNft} | ${kept.borrowerNft}`)
   out(`  lender NFT   ${discarded.lenderNft} | ${kept.lenderNft}`)
+  out(`  carry token  ${discarded.carry} | ${kept.carry}`)
   out(`  nonce        ${discarded.nonce} | ${kept.nonce}`)
   out(`message ${quoted(message)}`)
   out('blinded creation PSET (second build):')
@@ -754,7 +836,9 @@ async function submitCreation(
 
 /**
  * The lender fetches the creation of the record `stage`, verifies it through the gate and shows its
- * terms, with the record's message (`CREATION_MESSAGES`), which the terms' signature covers.
+ * terms, with the record's message (`CREATION_MESSAGES`), which the terms' signature covers, and
+ * the loan's carry supply: output 4 holds `CARRY_SUPPLY` explicit units of the token input 2
+ * issues, at the principal's asset_auth (`creationCarrySupply`).
  */
 async function lenderView(ctx: Context, stage: CreationRecord, txid: string): Promise<void> {
   const { borrower, lender } = ctx.wallets
@@ -791,6 +875,8 @@ async function lenderView(ctx: Context, stage: CreationRecord, txid: string): Pr
   out(`  borrower NFT ${opened.borrowerNft()}`)
   out(`  lender NFT   ${opened.lenderNft()}`)
   out(`  message      ${quoted(opened.message())} (${messageBytes(opened.message() ?? '')} bytes)`)
+  const supply = creationCarrySupply(flowDeps(lender, ctx.chain), offer)
+  out(`  carry supply ${supply.outpoint}: ${supply.amount} explicit units of ${supply.asset}`)
 }
 
 async function createStage(ctx: Context): Promise<void> {
@@ -875,7 +961,7 @@ async function assertCreationHidesMessage(ctx: Context): Promise<void> {
   for (const message of [longest, undefined]) {
     const built = await buildPrivateCreation(deps, { ...params, message })
     const tx = built.pset.extractTx()
-    const length = outputRangeProofLengths(tx)[CREATION_OUTPUT.pendingOffer]
+    const length = readConsensusEncoding(tx).rangeProofLengths[CREATION_OUTPUT.pendingOffer]
     const opened = wasm.openCreationAsLender(lender.lendingKey, tx.toString())
     try {
       if (opened.message() !== message) {
@@ -1157,6 +1243,84 @@ function checkWitnessWeights(witnesses: string[][], inputs: WeightedInput[], tit
       throw new Error(`input ${index} (${name}) weighs ${weight}, over its constant ${limit}`)
     }
   }
+}
+
+/** The inputs of `tx` that spend `outpoints` (`"<txid>:<vout>"`), by index, in their order. */
+function inputIndexesOf(tx: lwk.Transaction, outpoints: readonly string[]): number[] {
+  const spent = tx.inputs.map(input => {
+    const outpoint = input.outpoint()
+    return `${outpoint.txid().toString()}:${outpoint.vout()}`
+  })
+  return outpoints.map(outpoint => {
+    const index = spent.indexOf(outpoint)
+    if (index < 0) throw new Error(`the transaction does not spend ${outpoint}`)
+    return index
+  })
+}
+
+/** The inputs of `tx` that spend the loan's `carries`, each unlocked by its asset_auth. */
+function carryWeights(tx: lwk.Transaction, carries: readonly string[]): WeightedInput[] {
+  return inputIndexesOf(tx, carries).map(index => ({
+    index,
+    name: 'carry (asset_auth)',
+    limit: ASSET_AUTH_MAX_WEIGHT_TO_SATISFY,
+  }))
+}
+
+/**
+ * Prints `tx`'s weight and fee, and throws unless the fee the repay form reserves for it covers
+ * the fee it pays: the form's reserve (`selectFeeCoins`) is `estimateFeeBudgetSats` of the
+ * payment's own weight `units` (`repayWeights.ts`, `name`), at the fee rate the flows build with.
+ * It also prints how the weight compares with `units` and the wallet's overhead, the weight the
+ * reserve stands for before its margin: Elements charges the fee on the discounted size, so the
+ * reserve covers the fee even when the weight is above it.
+ */
+function assertFeeReserveCovers(
+  ctx: Context,
+  tx: lwk.Transaction,
+  units: number,
+  name: string,
+  what: string,
+): void {
+  const { weight } = readConsensusEncoding(tx)
+  const { feeRate } = flowDeps(ctx.wallets.borrower, ctx.chain)
+  const fee = tx.fee(lwk.AssetId.fromString(TESTNET_ASSETS.policy))
+  const reserve = estimateFeeBudgetSats(units, feeRate)
+  const counted = units + WALLET_OVERHEAD_WEIGHT_UNITS
+  out(
+    `${what}: ${weight} WU, ${tx.discountVsize()} discounted vbytes, fee ${fee} tL-sats; the ` +
+      `repay form reserves ${reserve} tL-sats at ${feeRate} sat/kvb`,
+  )
+  out(
+    `  the reserve stands for ${counted} WU before its margin (${name} ${units} + the wallet's ` +
+      `overhead ${WALLET_OVERHEAD_WEIGHT_UNITS}): ${weight - counted >= 0 ? '+' : ''}` +
+      `${weight - counted} WU from the transaction's weight`,
+  )
+  if (fee > reserve) {
+    throw new Error(
+      `${what} pays a fee of ${fee}, more than the ${reserve} the repay form reserves`,
+    )
+  }
+}
+
+/**
+ * The same check on the confirmed transaction `txid`, whose weight esplora must report as the
+ * encoding gives it.
+ */
+async function assertConfirmedFeeReserve(
+  ctx: Context,
+  txid: string,
+  units: number,
+  name: string,
+  what: string,
+): Promise<void> {
+  const tx = await ctx.chain.fetchTx(txid)
+  const reported = await ctx.chain.fetchWeight(txid)
+  const { weight } = readConsensusEncoding(tx)
+  if (reported !== weight) {
+    throw new Error(`esplora reports ${txid} at ${reported} WU, its encoding gives ${weight}`)
+  }
+  assertFeeReserveCovers(ctx, tx, units, name, what)
 }
 
 /** The acceptance's inputs that LWK sized with a max-weight-to-satisfy constant. */
@@ -1500,16 +1664,37 @@ function recordedLoanOutpoint(): string {
 }
 
 /**
- * The `create` loan's output as the app finds it: the unspent active offer of its candidate on the
- * local testnet indexer. Polls for up to 5 minutes until the indexer lists the loan output of the
- * records, and every confirmed installment as an `installment` UTXO, then returns it.
+ * The `create` loan's carries before its `j`-th installment, from the records: the creation's
+ * carry supply (output 4) before the first, then the `(j − 1)`-th installment's outputs 3 and 4.
  */
-async function indexedLoanOutpoint(ctx: Context): Promise<string> {
+function recordedCarries(j: number): string[] {
+  if (j <= 1) return [`${requireConfirmed('create')}:${CREATION_OUTPUT.carrySupply}`]
+  const previous = confirmedInstallments()[j - 2]
+  if (previous === undefined) throw new Error(`installment ${j - 1} is not confirmed`)
+  return [INSTALLMENT_OUTPUT.carry, INSTALLMENT_OUTPUT.secondCarry].map(
+    vout => `${previous}:${vout}`,
+  )
+}
+
+/** The `create` loan as the app finds it on the indexer: its output, and its carries. */
+interface IndexedLoan {
+  loanOutpoint: string
+  /** The carries the indexer lists unspent (`unspentCarries`); the builders check them on chain. */
+  carries: string[]
+}
+
+/**
+ * The `create` loan as the app finds it: the unspent active offer of its candidate on the local
+ * testnet indexer, and the carries it lists unspent. Polls for up to 5 minutes until the indexer
+ * lists the loan output of the records, every confirmed installment as an `installment` UTXO and
+ * the records' carries as its unspent `carry` UTXOs, then returns them.
+ */
+async function indexedLoan(ctx: Context): Promise<IndexedLoan> {
   const creationTxid = requireConfirmed('create')
   const expected = recordedLoanOutpoint()
-  const installments = confirmedInstallments()
-    .map(txid => `${txid}:${INSTALLMENT_OUTPUT.installment}`)
-    .sort()
+  const confirmed = confirmedInstallments()
+  const installments = confirmed.map(txid => `${txid}:${INSTALLMENT_OUTPUT.installment}`).sort()
+  const expectedCarries = recordedCarries(confirmed.length + 1).sort()
   let seen = 'nothing'
   for (let attempt = 0; attempt < 30; attempt += 1) {
     if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 10_000))
@@ -1525,19 +1710,23 @@ async function indexedLoanOutpoint(ctx: Context): Promise<string> {
       .filter(utxo => utxo.utxo_type === 'installment')
       .map(utxoOutpoint)
       .sort()
-    seen = `the loan at ${loan ? utxoOutpoint(loan) : 'none'}, installments [${listed.join(', ')}]`
+    const carries = unspentCarries(candidate)
+    seen =
+      `the loan at ${loan ? utxoOutpoint(loan) : 'none'}, installments [${listed.join(', ')}], ` +
+      `unspent carries [${carries.join(', ')}]`
     if (
       loan !== undefined &&
       utxoOutpoint(loan) === expected &&
-      isDeepStrictEqual(listed, installments)
+      isDeepStrictEqual(listed, installments) &&
+      isDeepStrictEqual([...carries].sort(), expectedCarries)
     ) {
       out(`indexer ${ctx.apiUrl}: ${seen}`)
-      return expected
+      return { loanOutpoint: expected, carries }
     }
   }
   throw new Error(
     `the indexer at ${ctx.apiUrl} lists ${seen}, not the loan at ${expected} with installments ` +
-      `[${installments.join(', ')}]: let it catch up`,
+      `[${installments.join(', ')}] and carries [${expectedCarries.join(', ')}]: let it catch up`,
   )
 }
 
@@ -1585,25 +1774,106 @@ async function loadE2eLoan(
   return loadLoan(flowDeps(wallet, ctx.chain), offer, wallet.lendingKey, loanOutpoint)
 }
 
-/** The installment's inputs that LWK sized with a max-weight-to-satisfy constant. */
-const INSTALLMENT_WEIGHTS: WeightedInput[] = [
-  {
-    index: INSTALLMENT_INPUT.borrowerNft,
-    name: 'borrower NFT (p2wpkh)',
-    limit: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
-  },
-  {
-    index: INSTALLMENT_INPUT.loan,
-    name: 'loan (Installment)',
-    limit: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.Installment,
-  },
-]
+/**
+ * The carries the indexer named for `loan`, verified on chain as the builders verify them
+ * (`verifiedLoanCarries`): exactly the carries the borrower opens from the loan's transactions,
+ * at the principal's asset_auth. Prints each, and throws unless they hold `R + 1` carry units
+ * after an installment, or the whole supply before the first.
+ */
+async function checkIndexedCarries(
+  ctx: Context,
+  offer: VerifiedOffer,
+  loan: Loan,
+  carries: readonly string[],
+): Promise<void> {
+  const verified = await verifiedLoanCarries(
+    flowDeps(ctx.wallets.borrower, ctx.chain),
+    offer,
+    loan,
+    carries,
+  )
+  try {
+    const total = verified.reduce((sum, carry) => sum + carry.amount, 0n)
+    const expected =
+      loan.state.installmentCount === 0 ? CARRY_SUPPLY : offer.opened.repaymentAmount() + 1n
+    for (const carry of verified) {
+      out(`  carry ${carry.outpoint}: ${carry.amount} units, verified on chain`)
+    }
+    if (total !== expected) {
+      throw new Error(`the loan's carries hold ${total} units, not ${expected}`)
+    }
+  } finally {
+    verified.forEach(carry => carry.carry.free())
+  }
+}
 
 /**
- * The stage's own checks of a blinded installment PSET: the borrower NFT back to a borrower
- * address, explicit; the successor loan with the collateral's value commitment under another asset
- * commitment, blinded to the lender; the installment at the installment lock under `A`, blinded to
- * the lender.
+ * The installment's inputs that LWK sized with a max-weight-to-satisfy constant: the borrower NFT,
+ * the loan, and the loan's `carries`, wherever `tx` spends them.
+ */
+function installmentWeights(tx: lwk.Transaction, carries: readonly string[]): WeightedInput[] {
+  return [
+    {
+      index: INSTALLMENT_INPUT.borrowerNft,
+      name: 'borrower NFT (p2wpkh)',
+      limit: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
+    },
+    {
+      index: INSTALLMENT_INPUT.loan,
+      name: 'loan (Installment)',
+      limit: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.Installment,
+    },
+    ...carryWeights(tx, carries),
+  ]
+}
+
+/** Whether an inspected output is a confidential carry: `asset`, at the principal's asset_auth. */
+function isCarry(
+  output: InspectedOutput | undefined,
+  offer: VerifiedOffer,
+  asset: string,
+): output is InspectedOutput {
+  return (
+    output !== undefined &&
+    scriptHash(output.script) === offer.scripts.principalOutputScriptHash &&
+    output.asset === asset &&
+    output.amount !== null &&
+    output.amount >= 1n &&
+    output.assetCommitment !== null &&
+    output.amountCommitment !== null &&
+    output.blindingKey === offer.opened.borrowerBlindingKey() &&
+    output.ecdhPubkey !== null
+  )
+}
+
+/** Whether an inspected output is a confidential `OP_RETURN` of `amount` of `asset`. */
+function burnsConfidential(
+  output: InspectedOutput | undefined,
+  asset: string,
+  amount: bigint,
+): boolean {
+  return (
+    output !== undefined &&
+    output.script.startsWith('6a') &&
+    output.asset === asset &&
+    output.amount === amount &&
+    output.assetCommitment !== null &&
+    output.amountCommitment !== null
+  )
+}
+
+/**
+ * The stage's own checks of a blinded installment PSET:
+ * - the inputs: the principal coins from input 2, then the loan's `carries` (never at input 2);
+ * - the borrower NFT back to a borrower address, explicit;
+ * - the successor loan, holding the collateral less the release under another asset commitment,
+ *   blinded to the lender;
+ * - the installment at the installment lock under `A`, blinded to the lender;
+ * - the carries at the principal's asset_auth, confidential, blinded to the borrower, with
+ *   `R + 1` carry units between them;
+ * - the release (`releasePreview`) to a new wallet address, blinded to it, or R2's output when
+ *   nothing is released;
+ * - at the first installment only, the confidential burn of the supply's leftover, `S − R − 1`.
  */
 function assertInstallmentOutputs(
   pset: lwk.Pset,
@@ -1611,14 +1881,41 @@ function assertInstallmentOutputs(
   loan: Loan,
   amount: bigint,
   borrower: SeedWallet,
+  principalCoins: lwk.WalletTxOut[],
+  carries: readonly string[],
+  carryAsset: string,
 ): void {
   const opened = offer.opened
-  const outputs = inspectPset(wasm, pset.toString()).outputs
+  const { inputs, outputs } = inspectPset(wasm, pset.toString())
   const nft = outputs[INSTALLMENT_OUTPUT.borrowerNft]
   const successor = outputs[INSTALLMENT_OUTPUT.loan]
   const installment = outputs[INSTALLMENT_OUTPUT.installment]
+  const firstCarry = outputs[INSTALLMENT_OUTPUT.carry]
+  const secondCarry = outputs[INSTALLMENT_OUTPUT.secondCarry]
+  const releaseOutput = outputs[INSTALLMENT_OUTPUT.release]
   const collateral = loan.state.collateral()
+  const release = loan.state.releasePreview(amount)
+  const repayment = opened.repaymentAmount()
+  const first = loan.state.installmentCount === 0
+  const principalInputs = principalCoins.map(outpointOf)
+  const spent = inputs.map(input => input.prevout)
+  const firstCarryInput = INSTALLMENT_INPUT.firstWalletCoin + principalInputs.length
+  const [released, releasedAsset] =
+    release > 0n
+      ? [release, opened.collateralAsset()]
+      : [R2_EXTRA_OUTPUT_AMOUNT, TESTNET_ASSETS.policy]
   const checks: [string, boolean][] = [
+    [
+      `inputs 2… are the principal coins, then the carries ${carries.join(', ')}`,
+      isDeepStrictEqual(
+        spent.slice(INSTALLMENT_INPUT.firstWalletCoin, firstCarryInput),
+        principalInputs,
+      ) &&
+        isDeepStrictEqual(spent.slice(firstCarryInput, firstCarryInput + carries.length), [
+          ...carries,
+        ]) &&
+        !carries.includes(spent[INSTALLMENT_INPUT.firstWalletCoin]),
+    ],
     [
       'output 0 is the borrower NFT to a borrower address, explicit',
       nft !== undefined &&
@@ -1630,13 +1927,13 @@ function assertInstallmentOutputs(
         nft.amountCommitment === null,
     ],
     [
-      "output 1 is the successor loan: the collateral's value commitment under a new asset " +
-        'commitment, blinded to the lender',
+      `output 1 is the successor loan: the collateral less the release of ${release}, under a ` +
+        'new asset commitment, blinded to the lender',
       successor !== undefined &&
+        collateral !== undefined &&
         successor.script !== offer.scripts.activeOfferAt(loan.state.debtHash).toString() &&
         successor.asset === collateral.asset &&
-        successor.amount === collateral.amount &&
-        successor.amountCommitment === collateral.valueCommitment &&
+        successor.amount === collateral.amount - release &&
         successor.assetCommitment !== null &&
         successor.assetCommitment !== collateral.assetCommitment &&
         successor.blindingKey === opened.lenderBlindingKey() &&
@@ -1652,6 +1949,41 @@ function assertInstallmentOutputs(
         installment.blindingKey === opened.lenderBlindingKey() &&
         installment.ecdhPubkey !== null,
     ],
+    [
+      `outputs 3 and 4 are the carries at the principal asset_auth, confidential, blinded to the ` +
+        `borrower, ${firstCarry?.amount} + ${secondCarry?.amount} = R + 1 carry units`,
+      isCarry(firstCarry, offer, carryAsset) &&
+        isCarry(secondCarry, offer, carryAsset) &&
+        (firstCarry.amount ?? 0n) + (secondCarry.amount ?? 0n) === repayment + 1n,
+    ],
+    [
+      release > 0n
+        ? `output 5 releases ${release} of the collateral to a new borrower address, blinded`
+        : `output 5 is R2's ${R2_EXTRA_OUTPUT_AMOUNT} tL-sats to a new borrower address, blinded`,
+      releaseOutput !== undefined &&
+        releaseOutput.script !== '' &&
+        !releaseOutput.script.startsWith('6a') &&
+        releaseOutput.asset === releasedAsset &&
+        releaseOutput.amount === released &&
+        releaseOutput.blindingKey !== null &&
+        releaseOutput.assetCommitment !== null &&
+        releaseOutput.amountCommitment !== null &&
+        releaseOutput.ecdhPubkey !== null,
+    ],
+    first
+      ? [
+          `output 6 burns the supply's leftover, S − R − 1 = ${CARRY_SUPPLY - repayment - 1n}, ` +
+            'confidential',
+          burnsConfidential(
+            outputs[INSTALLMENT_OUTPUT.leftoverBurn],
+            carryAsset,
+            CARRY_SUPPLY - repayment - 1n,
+          ),
+        ]
+      : [
+          'no output burns carry units after the first installment',
+          outputs.every(output => output.asset !== carryAsset || !output.script.startsWith('6a')),
+        ],
   ]
   for (const [what, ok] of checks) {
     if (!ok) throw new Error(`installment PSET: not true that ${what}`)
@@ -1672,17 +2004,18 @@ function installmentMessageOf(state: wasm.LoanState, j: number): ReadBack {
 /**
  * Reads the loan again with the finalized installment `tx` after `loan`'s, as each party reads it
  * once it confirms: the borrower must rebuild its debt, rewinding the installment's range proof
- * with the key it derives, and the lender must open the installment's amount; the successor must
- * be at the loan's script of the debt left. Both must read the installment's message
- * (`installmentMessage`), signed by the borrower for this installment. Run before saving: the
- * covenant does not check the range proof's nonce, and an installment the borrower cannot rewind
- * leaves a loan it can never close.
+ * with the key it derives, and the lender must open the installment's amount; both must find the
+ * successor holding `collateral`, at the loan's script of the debt left. Both must read the
+ * installment's message (`installmentMessage`), signed by the borrower for this installment. Run
+ * before saving: the covenant does not check the range proof's nonce, and an installment the
+ * borrower cannot rewind leaves a loan it can never close.
  */
 async function assertInstallmentReadsBack(
   ctx: Context,
   loan: Loan,
   owed: bigint,
   amount: bigint,
+  collateral: bigint,
   tx: lwk.Transaction,
 ): Promise<void> {
   const acceptance = (await ctx.chain.fetchTx(loan.acceptanceTxid)).toString()
@@ -1703,17 +2036,19 @@ async function assertInstallmentReadsBack(
       state.loanOutpoint !== `${txid}:${INSTALLMENT_OUTPUT.loan}` ||
       state.installment(j).amount !== amount ||
       state.remaining !== owed - amount ||
+      state.collateral()?.amount !== collateral ||
       successor?.scriptPubkey().toString() !==
         offer.scripts.activeOfferAt(state.debtHash).toString()
     ) {
       throw new Error(
-        `the ${role} reads installment ${j} back as ${state.installment(j).amount} paid and ` +
-          `${state.remaining} owed, not ${amount} and ${owed - amount}, at ${state.loanOutpoint}`,
+        `the ${role} reads installment ${j} back as ${state.installment(j).amount} paid, ` +
+          `${state.remaining} owed and ${state.collateral()?.amount} collateral held, not ` +
+          `${amount}, ${owed - amount} and ${collateral}, at ${state.loanOutpoint}`,
       )
     }
     out(
       `  ok: the ${role} reads installment ${j} back from the chain: ${amount} paid, ` +
-        `${state.remaining} owed, the loan at its debt's script`,
+        `${state.remaining} owed, ${collateral} collateral held, the loan at its debt's script`,
     )
     assertReadBack(
       `the ${role}'s read of installment ${j}`,
@@ -1725,24 +2060,36 @@ async function assertInstallmentReadsBack(
 
 /**
  * The borrower's installment of a third of what `loan` owes, with its message
- * (`installmentMessage`): built, checked by the stage, signed, finalized (which runs the covenant)
- * and read back by both parties.
+ * (`installmentMessage`), spending the loan's `carries` as the indexer lists them: built, checked
+ * by the stage, signed, finalized (which runs the covenant, with the release proof, and the
+ * carries' asset_auth) and read back by both parties. Its whole weight must be within the fee the
+ * repay form reserves for an installment.
  */
 async function buildSignedInstallment(
   ctx: Context,
   offer: VerifiedOffer,
   loan: Loan,
+  carries: readonly string[],
 ): Promise<{ hex: string; txid: string; amount: bigint }> {
   const { borrower } = ctx.wallets
   const owed = loan.state.remaining
-  if (owed === undefined) throw new Error('the borrower cannot read what the loan owes')
+  const held = loan.state.collateral()?.amount
+  if (owed === undefined || held === undefined) {
+    throw new Error('the borrower cannot read what the loan owes or holds')
+  }
   const amount = owed / 3n
+  const release = loan.state.releasePreview(amount)
   const message = installmentMessage(loan.state.installmentCount + 1)
   out(
     `the loan owes ${owed} of ${offer.opened.repaymentAmount()} after ` +
       `${loan.state.installmentCount} installments: paying ${amount}`,
   )
+  out(
+    `it holds ${held} of the collateral's ${offer.opened.collateralAmount()} tL-sats: the ` +
+      `installment releases ${release}, and leaves ${held - release}`,
+  )
   out(`message ${quoted(message)}`)
+  await checkIndexedCarries(ctx, offer, loan, carries)
   const principalCoins = pickCoins(
     borrower,
     TESTNET_ASSETS.principal,
@@ -1758,32 +2105,90 @@ async function buildSignedInstallment(
     borrowerNftOutpoint: borrowerNftOutpoint(),
     principalCoins,
     feeCoins,
+    carryOutpoints: carries,
+    earlierBuilds: [],
     lendingKey: borrower.lendingKey,
     tipHeight: await ctx.chain.tipHeight(),
     message,
   })
+  const tokens = offerTokens(ctx, offer, 'borrower')
   out('blinded installment PSET:')
-  describeOutputs(built.pset, {
-    borrowerNft: offer.opened.borrowerNft(),
-    lenderNft: offer.opened.lenderNft(),
-  })
-  assertDistinctOutputScripts(built.pset, 'the installment')
-  assertInstallmentOutputs(built.pset, offer, loan, amount, borrower)
+  describeOutputs(built.pset, tokens)
+  assertDistinctOutputScripts(built.pset, 'the installment', [
+    INSTALLMENT_OUTPUT.carry,
+    INSTALLMENT_OUTPUT.secondCarry,
+  ])
+  assertInstallmentOutputs(
+    built.pset,
+    offer,
+    loan,
+    amount,
+    borrower,
+    principalCoins,
+    carries,
+    tokens.carry ?? '',
+  )
   const { finalizedTx, summary } = built.finalize(borrower.signer.sign(built.pset))
-  assertFinalizedWeights(finalizedTx, INSTALLMENT_WEIGHTS)
-  await assertInstallmentReadsBack(ctx, loan, owed, amount, finalizedTx)
+  assertFinalizedWeights(finalizedTx, installmentWeights(finalizedTx, carries))
+  assertFeeReserveCovers(
+    ctx,
+    finalizedTx,
+    INSTALLMENT_WEIGHT_UNITS,
+    'INSTALLMENT_WEIGHT_UNITS',
+    `installment ${loan.state.installmentCount + 1}`,
+  )
+  await assertInstallmentReadsBack(ctx, loan, owed, amount, held - release, finalizedTx)
   out(
     `finalized: installment ${summary.installmentOutpoint} (${amount} TEST units), the loan at ` +
-      `${summary.loanOutpoint}, ${summary.remaining} owed`,
+      `${summary.loanOutpoint}, ${summary.remaining} owed; ${summary.release} tL-sats released ` +
+      `to ${summary.releaseOutpoint ?? 'nothing (R2)'}`,
   )
+  if (summary.release !== release) {
+    throw new Error(`the builder released ${summary.release}, not the preview's ${release}`)
+  }
   return { hex: finalizedTx.toString(), txid: finalizedTx.txid().toString(), amount }
 }
 
 /**
+ * The collateral each installment of `loan` released, by the release rule in the app's integer
+ * arithmetic (`releaseForPayment`, not the wasm's), from the offer's terms and the amounts the loan
+ * reads. Throws unless what they leave is the collateral the loan reads (`collateral()`), so the
+ * releases and the collateral left add up to `C` exactly.
+ */
+function releasesOf(offer: VerifiedOffer, loan: Loan): bigint[] {
+  const total = offer.opened.collateralAmount()
+  const repayment = offer.opened.repaymentAmount()
+  let owed = repayment
+  let held = total
+  const releases: bigint[] = []
+  for (let j = 1; j <= loan.state.installmentCount; j += 1) {
+    const info = loan.state.installment(j)
+    const amount = info.amount
+    info.free()
+    const release =
+      amount === undefined ? undefined : releaseForPayment({ total, repayment, owed, held }, amount)
+    if (amount === undefined || release === undefined) {
+      throw new Error(`installment ${j} does not open, or does not fit the release rule`)
+    }
+    releases.push(release)
+    owed -= amount
+    held -= release
+  }
+  const read = loan.state.collateral()?.amount
+  if (read !== held) {
+    throw new Error(`the loan holds ${read} of the collateral; the releases leave ${held}`)
+  }
+  return releases
+}
+
+/**
  * Checks a confirmed installment, the `j`-th, on chain: the loan read from its output 1 has it as
- * its last installment, the borrower NFT is back at a borrower address and the borrower's TEST
- * balance fell by its amount (when `before` was read before building it). Both parties read the
- * message of each installment up to it from the chain.
+ * its last installment, the borrower NFT is back at a borrower address, the borrower's TEST
+ * balance fell by its amount (when `before` was read before building it), and its wallet received
+ * the release at output 5, the one the release rule gives. The carries are at outputs 3 and 4, at
+ * the principal's asset_auth, and the first installment burns the supply's leftover at output 6.
+ * Both parties read the message of each installment up to it from the chain. Its weight is within
+ * the fee the repay form reserves.
  */
 async function checkConfirmedInstallment(
   ctx: Context,
@@ -1793,6 +2198,7 @@ async function checkConfirmedInstallment(
   before: bigint | undefined,
 ): Promise<void> {
   const { borrower } = ctx.wallets
+  const opened = offer.opened
   await borrower.sync()
   const loan = await loadE2eLoan(ctx, offer, 'borrower', `${txid}:${INSTALLMENT_OUTPUT.loan}`)
   const amount = loan.state.installment(j).amount
@@ -1806,7 +2212,7 @@ async function checkConfirmedInstallment(
   const tx = await ctx.chain.fetchTx(txid)
   const nft = tx.outputs[INSTALLMENT_OUTPUT.borrowerNft]
   if (
-    nft?.asset()?.toString() !== offer.opened.borrowerNft() ||
+    nft?.asset()?.toString() !== opened.borrowerNft() ||
     nft.value() !== NFT_AMOUNT ||
     walletAddressIndex(borrower, nft.scriptPubkey().toString()) === undefined
   ) {
@@ -1822,7 +2228,57 @@ async function checkConfirmedInstallment(
   } else {
     out(`borrower TEST (confirmed): ${after}`)
   }
-  await assertWitnessWeights(ctx, txid, INSTALLMENT_WEIGHTS)
+
+  // the release, by the release rule, in the borrower's wallet
+  const releases = releasesOf(offer, loan)
+  const release = releases[j - 1]
+  const held = opened.collateralAmount() - releases.reduce((sum, r) => sum + r, 0n)
+  const releaseOutpoint = `${txid}:${INSTALLMENT_OUTPUT.release}`
+  const coin = (await waitForWalletCoin(borrower, releaseOutpoint)).unblinded()
+  const [value, asset] =
+    release > 0n
+      ? [release, opened.collateralAsset()]
+      : [R2_EXTRA_OUTPUT_AMOUNT, TESTNET_ASSETS.policy]
+  if (coin.value() !== value || coin.asset().toString() !== asset) {
+    throw new Error(
+      `${releaseOutpoint} holds ${coin.value()} of ${coin.asset().toString()}, not ${value} of ` +
+        `${asset}`,
+    )
+  }
+  out(
+    release > 0n
+      ? `the borrower's wallet received the release: ${releaseOutpoint}, ${release} tL-sats`
+      : `nothing released; the borrower's wallet received R2's ${value} tL-sats at ` +
+          releaseOutpoint,
+  )
+  out(
+    `the loan holds ${held} of the collateral's ${opened.collateralAmount()} tL-sats, ` +
+      `${releases.join(' + ')} released`,
+  )
+
+  // the carries, and the leftover's burn at the first installment
+  const principalLock = offer.scripts.principalOutputScriptHash
+  const carriesAt = [INSTALLMENT_OUTPUT.carry, INSTALLMENT_OUTPUT.secondCarry]
+  if (carriesAt.some(vout => tx.outputs[vout]?.scriptPubkey().jet_sha256_hex() !== principalLock)) {
+    throw new Error('the confirmed installment has no carries at outputs 3 and 4')
+  }
+  out(`carries at ${carriesAt.map(vout => `${txid}:${vout}`).join(' and ')}, the principal lock`)
+  if (j === 1) {
+    const burn = tx.outputs[INSTALLMENT_OUTPUT.leftoverBurn]
+    if (burn === undefined || !burn.scriptPubkey().isProvablyUnspendable()) {
+      throw new Error("the first installment does not burn the supply's leftover at output 6")
+    }
+    out(`the supply's leftover burned at ${txid}:${INSTALLMENT_OUTPUT.leftoverBurn}`)
+  }
+
+  await assertWitnessWeights(ctx, txid, installmentWeights(tx, recordedCarries(j)))
+  await assertConfirmedFeeReserve(
+    ctx,
+    txid,
+    INSTALLMENT_WEIGHT_UNITS,
+    'INSTALLMENT_WEIGHT_UNITS',
+    `installment ${j}`,
+  )
   for (const role of NAMES) {
     const read = await loadE2eLoan(
       ctx,
@@ -2041,7 +2497,8 @@ async function claimFirstInstallment(ctx: Context): Promise<void> {
   let before: bigint | undefined
   if (!getRecord(INSTALLMENT_CLAIM_RECORD)) {
     requireStageNeed(ctx, INSTALLMENT_CLAIM_RECORD)
-    const loan = await loadE2eLoan(ctx, offer, 'lender', await indexedLoanOutpoint(ctx))
+    const { loanOutpoint } = await indexedLoan(ctx)
+    const loan = await loadE2eLoan(ctx, offer, 'lender', loanOutpoint)
     const unspent = await indexedUnspentInstallments(ctx)
     if (!unspent.includes(installment)) {
       throw new Error(`the indexer does not list ${installment} as unspent`)
@@ -2083,9 +2540,10 @@ async function claimFirstInstallment(ctx: Context): Promise<void> {
  * The borrower pays two installments on the `create` loan, after the principal claim, each a third
  * of what the loan owes then, and the lender claims the first between them. Each has its own
  * record (`repay-partial-1`, `claim-installment-1`, `repay-partial-2`), so a crash never rebuilds
- * one: an installment built again would reuse its range proof's nonce. Each reads the loan output
- * from the indexer, as the app does. The second installment is left unclaimed, for the final
- * claim to sweep.
+ * one: an installment built again would reuse its range proof's nonce, and its successor's blinder.
+ * Each reads the loan output and its carries from the indexer, as the app does, and releases the
+ * collateral it pays for to the borrower's wallet. The second installment is left unclaimed, for
+ * the final claim to sweep.
  */
 async function repayPartialStage(ctx: Context): Promise<void> {
   const { borrower } = ctx.wallets
@@ -2097,9 +2555,10 @@ async function repayPartialStage(ctx: Context): Promise<void> {
     let before: bigint | undefined
     if (!getRecord(stage)) {
       requireStageNeed(ctx, stage)
-      const loan = await loadE2eLoan(ctx, offer, 'borrower', await indexedLoanOutpoint(ctx))
+      const { loanOutpoint, carries } = await indexedLoan(ctx)
+      const loan = await loadE2eLoan(ctx, offer, 'borrower', loanOutpoint)
       before = confirmedBalance(borrower, TESTNET_ASSETS.principal)
-      hex = (await buildSignedInstallment(ctx, offer, loan)).hex
+      hex = (await buildSignedInstallment(ctx, offer, loan, carries)).hex
     }
     const txid = await submitStage(
       ctx.chain,
@@ -2124,8 +2583,9 @@ async function repayPartialDryStage(ctx: Context): Promise<void> {
   requireStageNeed(ctx, 'repay-partial-1')
   requireConfirmed('claim-principal')
   const offer = await loadCreatedOffer(ctx, 'borrower')
-  const loan = await loadE2eLoan(ctx, offer, 'borrower', await indexedLoanOutpoint(ctx))
-  const { txid } = await buildSignedInstallment(ctx, offer, loan)
+  const { loanOutpoint, carries } = await indexedLoan(ctx)
+  const loan = await loadE2eLoan(ctx, offer, 'borrower', loanOutpoint)
+  const { txid } = await buildSignedInstallment(ctx, offer, loan, carries)
   out(`\nrepay-partial-dry: ok (${txid} finalized, not saved or broadcast)`)
 }
 
@@ -2154,21 +2614,40 @@ function burnsNftOnChain(tx: lwk.Transaction, vout: number, nft: string): boolea
 }
 
 /**
- * The stage's own checks of a blinded repayment PSET: the borrower NFT burned, the debt (what the
- * loan owes under `A`, its value commitment the loan's debt) at the offer's repayment asset_auth,
- * blinded to the lender, and the collateral back to the borrower, blinded to its wallet.
+ * The stage's own checks of a blinded repayment PSET: the principal coins from input 2, then the
+ * loan's `carries`; the borrower NFT burned; the debt (what the loan owes under `A`, its value
+ * commitment the loan's debt) at the offer's repayment asset_auth, blinded to the lender; the
+ * collateral the loan holds back to the borrower, blinded to its wallet; and every carry unit
+ * burned in one confidential `OP_RETURN`.
  */
 function assertRepaymentOutputs(
   pset: lwk.Pset,
   offer: VerifiedOffer,
   loan: Loan,
   collateralReceiver: lwk.Address,
+  principalCoins: lwk.WalletTxOut[],
+  carries: readonly string[],
+  carryAsset: string,
 ): void {
   const opened = offer.opened
-  const outputs = inspectPset(wasm, pset.toString()).outputs
+  const { inputs, outputs } = inspectPset(wasm, pset.toString())
   const repayment = outputs[REPAYMENT_OUTPUT.repayment]
   const collateral = outputs[REPAYMENT_OUTPUT.collateral]
+  const held = loan.state.collateral()?.amount
+  const carried = loan.state.installmentCount === 0 ? CARRY_SUPPLY : opened.repaymentAmount() + 1n
+  const spent = inputs.map(input => input.prevout)
+  const firstCarryInput = REPAYMENT_INPUT.offer + 1 + principalCoins.length
   const checks: [string, boolean][] = [
+    [
+      `inputs 2… are the principal coins, then the carries ${carries.join(', ')}`,
+      isDeepStrictEqual(
+        spent.slice(REPAYMENT_INPUT.offer + 1, firstCarryInput),
+        principalCoins.map(outpointOf),
+      ) &&
+        isDeepStrictEqual(spent.slice(firstCarryInput, firstCarryInput + carries.length), [
+          ...carries,
+        ]),
+    ],
     [
       'output 0 burns the borrower NFT, explicit',
       burnsNft(outputs[REPAYMENT_OUTPUT.borrowerNftBurn], opened.borrowerNft()),
@@ -2185,15 +2664,20 @@ function assertRepaymentOutputs(
         repayment.ecdhPubkey !== null,
     ],
     [
-      'output 2 is the collateral to the borrower, blinded',
+      `output 2 is the collateral the loan holds, ${held} tL-sats, to the borrower, blinded`,
       collateral !== undefined &&
+        held !== undefined &&
         collateral.script === collateralReceiver.scriptPubkey().toString() &&
         collateral.asset === opened.collateralAsset() &&
-        collateral.amount === loan.state.collateral().amount &&
+        collateral.amount === held &&
         collateral.blindingKey !== null &&
         collateral.assetCommitment !== null &&
         collateral.amountCommitment !== null &&
         collateral.ecdhPubkey !== null,
+    ],
+    [
+      `output 3 burns the carries' ${carried} units, confidential`,
+      burnsConfidential(outputs[REPAYMENT_OUTPUT.carryBurn], carryAsset, carried),
     ],
   ]
   for (const [what, ok] of checks) {
@@ -2202,33 +2686,42 @@ function assertRepaymentOutputs(
   }
 }
 
-/** The repayment's inputs that LWK sized with a max-weight-to-satisfy constant. */
-const REPAYMENT_WEIGHTS: WeightedInput[] = [
-  {
-    index: REPAYMENT_INPUT.borrowerNft,
-    name: 'borrower NFT (p2wpkh)',
-    limit: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
-  },
-  {
-    index: REPAYMENT_INPUT.offer,
-    name: 'offer (FullRepayment)',
-    limit: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.FullRepayment,
-  },
-]
+/**
+ * The repayment's inputs that LWK sized with a max-weight-to-satisfy constant: the borrower NFT,
+ * the loan, and the loan's `carries`, wherever `tx` spends them.
+ */
+function repaymentWeights(tx: lwk.Transaction, carries: readonly string[]): WeightedInput[] {
+  return [
+    {
+      index: REPAYMENT_INPUT.borrowerNft,
+      name: 'borrower NFT (p2wpkh)',
+      limit: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
+    },
+    {
+      index: REPAYMENT_INPUT.offer,
+      name: 'offer (FullRepayment)',
+      limit: PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.FullRepayment,
+    },
+    ...carryWeights(tx, carries),
+  ]
+}
 
 /**
  * The borrower's full repayment of what the `create` loan owes, its principal claimed, with its
- * message (`REPAYMENT_MESSAGE`): built, checked by the stage, signed and finalized (which runs the
- * covenant).
+ * message (`REPAYMENT_MESSAGE`), sweeping the loan's `carries` as the indexer lists them: built,
+ * checked by the stage, signed and finalized (which runs the covenant and the carries'
+ * asset_auth). Its whole weight must be within the fee the repay form reserves for it.
  */
 async function buildSignedRepayment(
   ctx: Context,
   offer: VerifiedOffer,
   loan: Loan,
+  carries: readonly string[],
 ): Promise<{ hex: string; txid: string }> {
   const { borrower } = ctx.wallets
   const owed = loan.state.remaining
   if (owed === undefined) throw new Error('the borrower cannot read what the loan owes')
+  await checkIndexedCarries(ctx, offer, loan, carries)
   const collateralReceiver = walletReceiver(borrower)
   const principalCoins = pickCoins(borrower, TESTNET_ASSETS.principal, owed, 'borrower repayment')
   const feeCoins = pickCoins(borrower, TESTNET_ASSETS.policy, FEE_BUDGET, 'borrower fee')
@@ -2239,20 +2732,34 @@ async function buildSignedRepayment(
     borrowerNftOutpoint: borrowerNftOutpoint(),
     principalCoins,
     feeCoins,
+    carryOutpoints: carries,
     collateralReceiver,
     lendingKey: borrower.lendingKey,
     message: REPAYMENT_MESSAGE,
   })
+  const tokens = offerTokens(ctx, offer, 'borrower')
   out(`message ${quoted(REPAYMENT_MESSAGE)}`)
   out('blinded repayment PSET:')
-  describeOutputs(built.pset, {
-    borrowerNft: offer.opened.borrowerNft(),
-    lenderNft: offer.opened.lenderNft(),
-  })
+  describeOutputs(built.pset, tokens)
   assertDistinctOutputScripts(built.pset, 'the repayment')
-  assertRepaymentOutputs(built.pset, offer, loan, collateralReceiver)
+  assertRepaymentOutputs(
+    built.pset,
+    offer,
+    loan,
+    collateralReceiver,
+    principalCoins,
+    carries,
+    tokens.carry ?? '',
+  )
   const { finalizedTx, summary } = built.finalize(borrower.signer.sign(built.pset))
-  assertFinalizedWeights(finalizedTx, REPAYMENT_WEIGHTS)
+  assertFinalizedWeights(finalizedTx, repaymentWeights(finalizedTx, carries))
+  assertFeeReserveCovers(
+    ctx,
+    finalizedTx,
+    REPAY_WEIGHT_UNITS,
+    'REPAY_WEIGHT_UNITS',
+    'the repayment',
+  )
   out(
     `finalized: repayment ${summary.repaymentOutpoint} (${summary.repayment} TEST units, ` +
       `interest ${summary.interest}), collateral to ${summary.collateralOutpoint}`,
@@ -2279,6 +2786,12 @@ function describeRest(offer: VerifiedOffer, loan: Loan): bigint {
   return owed
 }
 
+/**
+ * The borrower repays the rest of the `create` loan, which it reads from the indexer with its
+ * carries. Once it confirms: the borrower NFT is burned, the repayment is at its asset_auth, the
+ * collateral the installments left comes back to the borrower's wallet (with their releases, the
+ * whole collateral), the carries are swept and burned, and the lender reads the message.
+ */
 async function repayStage(ctx: Context): Promise<void> {
   const { borrower } = ctx.wallets
   requireAcceptance()
@@ -2289,10 +2802,11 @@ async function repayStage(ctx: Context): Promise<void> {
   let before: bigint | undefined
   if (!getRecord('repay')) {
     requireStageNeed(ctx, 'repay')
-    const loan = await loadE2eLoan(ctx, offer, 'borrower', await indexedLoanOutpoint(ctx))
+    const { loanOutpoint, carries } = await indexedLoan(ctx)
+    const loan = await loadE2eLoan(ctx, offer, 'borrower', loanOutpoint)
     describeRest(offer, loan)
     before = confirmedBalance(borrower, TESTNET_ASSETS.principal)
-    hex = (await buildSignedRepayment(ctx, offer, loan)).hex
+    hex = (await buildSignedRepayment(ctx, offer, loan, carries)).hex
   }
   const txid = await submitStage(
     ctx.chain,
@@ -2327,21 +2841,35 @@ async function repayStage(ctx: Context): Promise<void> {
   )
   const repaid = describeRest(offer, loan)
 
+  // The collateral the installments left, `c_k`: with their releases, the whole collateral.
+  const releases = releasesOf(offer, loan)
+  const held = offer.opened.collateralAmount() - releases.reduce((sum, r) => sum + r, 0n)
   const collateralOutpoint = `${txid}:${REPAYMENT_OUTPUT.collateral}`
   const coin = await waitForWalletCoin(borrower, collateralOutpoint)
   const secrets = coin.unblinded()
-  if (
-    secrets.asset().toString() !== offer.opened.collateralAsset() ||
-    secrets.value() !== offer.opened.collateralAmount()
-  ) {
+  if (secrets.asset().toString() !== offer.opened.collateralAsset() || secrets.value() !== held) {
     throw new Error(
-      `${collateralOutpoint} holds ${secrets.value()} of ${secrets.asset().toString()}`,
+      `${collateralOutpoint} holds ${secrets.value()} of ${secrets.asset().toString()}, not the ` +
+        `${held} the loan held`,
     )
   }
   out(
     `the borrower's collateral came back to its wallet: ${collateralOutpoint}, ` +
       `${secrets.value()} tL-sats`,
   )
+  out(
+    `the releases and the collateral back add up to the collateral: ` +
+      `${[...releases, held].join(' + ')} = ${offer.opened.collateralAmount()}`,
+  )
+
+  // The carries the loan held, swept: spent by the repayment, their units burned at output 3.
+  const carries = recordedCarries(loan.state.installmentCount + 1)
+  inputIndexesOf(repayTx, carries)
+  const carryBurn = repayTx.outputs[REPAYMENT_OUTPUT.carryBurn]
+  if (carryBurn === undefined || !carryBurn.scriptPubkey().isProvablyUnspendable()) {
+    throw new Error('the confirmed repayment does not burn the carries at output 3')
+  }
+  out(`the carries ${carries.join(', ')} swept, burned at ${txid}:${REPAYMENT_OUTPUT.carryBurn}`)
   const after = confirmedBalance(borrower, TESTNET_ASSETS.principal)
   if (before !== undefined) {
     out(`borrower TEST (confirmed): ${before} -> ${after}`)
@@ -2351,7 +2879,14 @@ async function repayStage(ctx: Context): Promise<void> {
   } else {
     out(`borrower TEST (confirmed): ${after}`)
   }
-  await assertWitnessWeights(ctx, txid, REPAYMENT_WEIGHTS)
+  await assertWitnessWeights(ctx, txid, repaymentWeights(repayTx, carries))
+  await assertConfirmedFeeReserve(
+    ctx,
+    txid,
+    REPAY_WEIGHT_UNITS,
+    'REPAY_WEIGHT_UNITS',
+    'the repayment',
+  )
   await checkRepaymentMessage(ctx, repayTx)
   out('\nrepay: ok')
 }
@@ -2387,9 +2922,10 @@ async function repayDryStage(ctx: Context): Promise<void> {
   requireStageNeed(ctx, 'repay')
   requireConfirmed('claim-principal')
   const offer = await loadCreatedOffer(ctx, 'borrower')
-  const loan = await loadE2eLoan(ctx, offer, 'borrower', await indexedLoanOutpoint(ctx))
+  const { loanOutpoint, carries } = await indexedLoan(ctx)
+  const loan = await loadE2eLoan(ctx, offer, 'borrower', loanOutpoint)
   describeRest(offer, loan)
-  const { txid } = await buildSignedRepayment(ctx, offer, loan)
+  const { txid } = await buildSignedRepayment(ctx, offer, loan, carries)
   out(`\nrepay-dry: ok (${txid} finalized, not saved or broadcast)`)
 }
 
@@ -2416,12 +2952,53 @@ function stopAtBuild(deps: PrivateFlowDeps): PrivateFlowDeps {
 }
 
 /**
+ * The `create` offer's candidate on the local testnet indexer once it has indexed the repayment's
+ * block: its principal spent by the claim `claimTxid`, and its loan and its carries spent by the
+ * repayment `repayTxid`. Polls for up to 5 minutes, as the other stages do.
+ */
+async function indexedRepayment(
+  ctx: Context,
+  creationTxid: string,
+  claimTxid: string,
+  repayTxid: string,
+): Promise<PrivateCandidateDetails> {
+  let seen = 'nothing'
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 10_000))
+    let candidate: PrivateCandidateDetails
+    try {
+      candidate = await fetchPrivateCandidate(creationTxid, ctx.apiUrl)
+    } catch (error) {
+      seen = indexerErrorMessage(error) ?? (error instanceof Error ? error.message : String(error))
+      continue
+    }
+    const spentBy = (type: string) =>
+      candidate.utxos.filter(utxo => utxo.utxo_type === type).map(utxo => utxo.spent_txid)
+    const principal = spentBy('principal')
+    const repaid = spentBy('active_offer').includes(repayTxid)
+    const carries = spentBy('carry').filter(txid => txid === repayTxid).length
+    seen =
+      `the principal spent by [${principal.join(', ')}], the loan ${repaid ? '' : 'not '}spent ` +
+      `by the repayment, ${carries} carries spent by it`
+    if (isDeepStrictEqual(principal, [claimTxid]) && repaid && carries > 0) {
+      out(`indexer ${ctx.apiUrl}: ${seen}`)
+      return candidate
+    }
+  }
+  throw new Error(
+    `the indexer at ${ctx.apiUrl} lists ${seen}, not ${creationTxid}'s principal spent by the ` +
+      `claim ${claimTxid} and its loan and carries by the repayment ${repayTxid}: let it catch up`,
+  )
+}
+
+/**
  * A hostile indexer cannot steer the borrower into repaying while the principal may be unclaimed:
  * the repayment burns the borrower NFT, the only key to an unclaimed principal. The `create` offer
  * (claimed, then repaid, on chain) is served from candidates wrapped in memory from the honest one,
- * as an active loan with its active offer unspent. The borrower NFT is derived from each as the
- * Repay row and modal do for a loan without installments (`repaymentBorrowerNftOutpoint`), and the
- * builder runs on `stopAtBuild` deps, with the loan the repayment spent:
+ * as an active loan with its active offer and the carries its repayment swept unspent. The
+ * borrower NFT is derived from each as the Repay row and modal do for a loan without installments
+ * (`repaymentBorrowerNftOutpoint`), and the builder runs on `stopAtBuild` deps, with the loan the
+ * repayment spent:
  * - the honest principal, spent by the claim: the inputs are derived and the builder passes every
  *   check up to the build (the control);
  * - no principal at all, or one spent by the creation itself: no inputs are derived, and the
@@ -2450,17 +3027,14 @@ async function repayHostileDryStage(ctx: Context): Promise<void> {
   )
   const owed = loan.state.remaining
   if (owed === undefined) throw new Error('the borrower cannot read what the loan owed')
-  const honest = await fetchPrivateCandidate(creationTxid, ctx.apiUrl)
+  const honest = await indexedRepayment(ctx, creationTxid, claimTxid, repayTxid)
   const principal = honest.utxos.find(utxo => utxo.utxo_type === 'principal')
-  if (principal?.spent_txid !== claimTxid) {
-    throw new Error(
-      `the indexer at ${ctx.apiUrl} does not list ${creationTxid}'s principal as spent by the ` +
-        `claim ${claimTxid}: ${JSON.stringify(principal)}`,
-    )
-  }
-  out(`indexer ${ctx.apiUrl}: ${creationTxid}'s principal spent by the claim ${claimTxid}`)
+  if (principal === undefined) throw new Error(`the indexer lists no principal of ${creationTxid}`)
 
-  /** The candidate as an active loan, its active offer unspent, with `principals` in its place. */
+  /**
+   * The candidate as an active loan, its active offer and the carries the repayment swept
+   * unspent, with `principals` in its place.
+   */
   const activeWith = (principals: PrivateUtxo[]): PrivateCandidateDetails => ({
     ...honest,
     status: 'active',
@@ -2469,9 +3043,18 @@ async function repayHostileDryStage(ctx: Context): Promise<void> {
       ...honest.utxos
         .filter(utxo => utxo.utxo_type === 'active_offer')
         .map(utxo => ({ ...utxo, spent_txid: null, spent_at_height: null })),
+      ...honest.utxos
+        .filter(utxo => utxo.utxo_type === 'carry' && utxo.spent_txid === repayTxid)
+        .map(utxo => ({ ...utxo, spent_txid: null, spent_at_height: null })),
       ...principals,
     ],
   })
+  // the carries the loan held before its repayment, as the wrapped candidate lists them
+  const carries = unspentCarries(activeWith([]))
+  if (carries.length === 0) {
+    throw new Error(`the indexer at ${ctx.apiUrl} lists no carry as spent by the repayment`)
+  }
+  out(`the wrapped candidate's carries: ${carries.join(', ')}`)
 
   // The builder checks these coins before anything it fetches; a repayment needs them.
   const principalCoins = pickCoins(borrower, TESTNET_ASSETS.principal, owed, 'borrower repayment')
@@ -2483,6 +3066,7 @@ async function repayHostileDryStage(ctx: Context): Promise<void> {
       borrowerNftOutpoint,
       principalCoins,
       feeCoins,
+      carryOutpoints: carries,
       collateralReceiver,
       lendingKey: borrower.lendingKey,
     }).then(
@@ -2741,17 +3325,24 @@ async function assertCollateralReceived(
 }
 
 /**
- * The stage's own checks of a blinded cancellation PSET: both NFTs burned, and the collateral back
- * to the borrower, blinded to its wallet.
+ * The stage's own checks of a blinded cancellation PSET: input 3 is the creation's carry supply;
+ * both NFTs and the supply burned, explicit; and the collateral back to the borrower, blinded to
+ * its wallet.
  */
 function assertCancellationOutputs(
   pset: lwk.Pset,
   offer: VerifiedOffer,
   collateralReceiver: lwk.Address,
+  supply: CarrySupply,
 ): void {
   const opened = offer.opened
-  const outputs = inspectPset(wasm, pset.toString()).outputs
+  const { inputs, outputs } = inspectPset(wasm, pset.toString())
+  const carryBurn = outputs[CANCELLATION_OUTPUT.carryBurn]
   const checks: [string, boolean][] = [
+    [
+      `input 3 is the carry supply, ${supply.outpoint}`,
+      inputs[CANCELLATION_INPUT.carrySupply]?.prevout === supply.outpoint,
+    ],
     [
       'output 0 burns the lender NFT, explicit',
       burnsNft(outputs[CANCELLATION_OUTPUT.lenderNftBurn], opened.lenderNft()),
@@ -2761,7 +3352,17 @@ function assertCancellationOutputs(
       burnsNft(outputs[CANCELLATION_OUTPUT.borrowerNftBurn], opened.borrowerNft()),
     ],
     [
-      'output 2 is the collateral back to the borrower, blinded',
+      `output 2 burns the carry supply, ${CARRY_SUPPLY} units, explicit`,
+      carryBurn !== undefined &&
+        carryBurn.script.startsWith('6a') &&
+        carryBurn.asset === supply.asset &&
+        carryBurn.amount === CARRY_SUPPLY &&
+        carryBurn.blindingKey === null &&
+        carryBurn.assetCommitment === null &&
+        carryBurn.amountCommitment === null,
+    ],
+    [
+      'output 3 is the collateral back to the borrower, blinded',
       paysBlinded(
         outputs[CANCELLATION_OUTPUT.collateral],
         collateralReceiver,
@@ -2793,11 +3394,17 @@ const CANCELLATION_WEIGHTS: WeightedInput[] = [
     name: 'borrower NFT (p2wpkh)',
     limit: EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
   },
+  {
+    index: CANCELLATION_INPUT.carrySupply,
+    name: 'carry supply (asset_auth)',
+    limit: ASSET_AUTH_MAX_WEIGHT_TO_SATISFY,
+  },
 ]
 
 /**
- * The borrower's cancellation of the `cancel` offer: built, checked by the stage, signed and
- * finalized (which runs the covenants). The borrower NFT is still where the creation paid it.
+ * The borrower's cancellation of the `cancel` offer, which burns its carry supply: built, checked
+ * by the stage, signed and finalized (which runs the covenants, the supply's asset_auth among
+ * them). The borrower NFT is still where the creation paid it.
  */
 async function buildSignedCancellation(
   ctx: Context,
@@ -2809,24 +3416,25 @@ async function buildSignedCancellation(
   const feeCoins = pickCoins(borrower, TESTNET_ASSETS.policy, FEE_BUDGET, 'borrower fee')
   out(`fee coins ${feeCoins.map(outpointOf).join(', ')}`)
 
-  const built = await buildPrivateCancellation(flowDeps(borrower, ctx.chain), offer, {
+  const deps = flowDeps(borrower, ctx.chain)
+  const built = await buildPrivateCancellation(deps, offer, {
     borrowerNftOutpoint: `${creationTxid}:${CREATION_OUTPUT.borrowerNft}`,
     feeCoins,
     collateralReceiver,
   })
   out('blinded cancellation PSET:')
-  describeOutputs(built.pset, {
-    borrowerNft: offer.opened.borrowerNft(),
-    lenderNft: offer.opened.lenderNft(),
-  })
-  assertCancellationOutputs(built.pset, offer, collateralReceiver)
+  describeOutputs(built.pset, offerTokens(ctx, offer, 'borrower'))
+  assertCancellationOutputs(built.pset, offer, collateralReceiver, creationCarrySupply(deps, offer))
   const { finalizedTx, summary } = built.finalize(borrower.signer.sign(built.pset))
   assertFinalizedWeights(finalizedTx, CANCELLATION_WEIGHTS)
   out(`finalized: collateral back to ${summary.collateralOutpoint} (${summary.collateral} tL-sats)`)
   return { hex: finalizedTx.toString(), txid: finalizedTx.txid().toString() }
 }
 
-/** A new offer from the borrower to the lender, which the borrower then cancels. */
+/**
+ * A new offer from the borrower to the lender, which the borrower then cancels: both NFTs and the
+ * carry supply are burned, and the collateral comes back.
+ */
 async function cancelStage(ctx: Context): Promise<void> {
   const { borrower } = ctx.wallets
   const creationTxid = await submitCreation(ctx, 'cancel-create', 'cancel-create', offerExpiry)
@@ -2857,9 +3465,22 @@ async function cancelStage(ctx: Context): Promise<void> {
   ) {
     throw new Error('the confirmed cancellation does not burn both NFTs')
   }
+  const supply = creationCarrySupply(flowDeps(borrower, ctx.chain), offer)
+  const carryBurn = cancelTx.outputs[CANCELLATION_OUTPUT.carryBurn]
+  if (
+    inputIndexesOf(cancelTx, [supply.outpoint])[0] !== CANCELLATION_INPUT.carrySupply ||
+    carryBurn === undefined ||
+    !carryBurn.scriptPubkey().isProvablyUnspendable() ||
+    carryBurn.asset()?.toString() !== supply.asset ||
+    carryBurn.value() !== CARRY_SUPPLY
+  ) {
+    throw new Error(`the confirmed cancellation does not burn the carry supply ${supply.outpoint}`)
+  }
   out(
     `lender NFT burned at ${txid}:${CANCELLATION_OUTPUT.lenderNftBurn}, ` +
-      `borrower NFT at ${txid}:${CANCELLATION_OUTPUT.borrowerNftBurn}`,
+      `borrower NFT at ${txid}:${CANCELLATION_OUTPUT.borrowerNftBurn}, ` +
+      `the carry supply ${supply.outpoint} (${CARRY_SUPPLY} units) at ` +
+      `${txid}:${CANCELLATION_OUTPUT.carryBurn}`,
   )
   await assertCollateralReceived(
     borrower,
@@ -2891,14 +3512,16 @@ function enableLocktimeNoRbf(): number {
 }
 
 /**
- * The stage's own checks of a blinded liquidation PSET: the lender NFT burned, the collateral to
- * the lender, blinded to its wallet, and the expiry as the lock time, enabled by the offer input.
+ * The stage's own checks of a blinded liquidation PSET: the lender NFT burned, the `collateral`
+ * the loan holds to the lender, blinded to its wallet, and the expiry as the lock time, enabled by
+ * the offer input.
  */
 function assertLiquidationOutputs(
   pset: lwk.Pset,
   offer: VerifiedOffer,
   lender: SeedWallet,
   collateralReceiver: lwk.Address,
+  collateral: bigint,
   swept: string[],
   sweptAmount: bigint,
 ): void {
@@ -2929,12 +3552,12 @@ function assertLiquidationOutputs(
       burnsNft(outputs[LIQUIDATION_OUTPUT.lenderNftBurn], opened.lenderNft()),
     ],
     [
-      'output 1 is the collateral to the lender, blinded',
+      `output 1 is the collateral the loan holds, ${collateral} tL-sats, to the lender, blinded`,
       paysBlinded(
         outputs[LIQUIDATION_OUTPUT.collateral],
         collateralReceiver,
         opened.collateralAsset(),
-        opened.collateralAmount(),
+        collateral,
       ),
     ],
     [`the lock time is the expiry, block ${expiry}`, lockTime === expiry],
@@ -2972,8 +3595,17 @@ function liquidationWeights(swept: number): WeightedInput[] {
 }
 
 /**
+ * The lender's search for a loan's collateral when an installment does not open for it, run here
+ * as the app's Web Worker runs it (`searchWorker.ts`): the wasm's `findCollateral`.
+ */
+const findCollateralHere: CollateralFinder = async search =>
+  wasm.findCollateral(search.valueCommitment, search.assetCommitment, search.blinder, search.max)
+
+/**
  * The lender's liquidation with its lender NFT at `lenderNft`, sweeping those of `unspent` that
- * open, at `tipHeight`.
+ * open, at `tipHeight`, with the search for the collateral the app gives the builder. The builder
+ * runs it only when an installment does not open for the lender, which no installment of the e2e
+ * borrower is: `liquidate-dry` runs it itself (`checkCollateralSearch`).
  */
 function liquidationParams(
   ctx: Context,
@@ -2988,6 +3620,7 @@ function liquidationParams(
     feeCoins: pickCoins(lender, TESTNET_ASSETS.policy, FEE_BUDGET, 'lender fee'),
     collateralReceiver: walletReceiver(lender),
     tipHeight,
+    findCollateral: findCollateralHere,
   }
 }
 
@@ -3057,7 +3690,8 @@ async function tryEarlyLiquidation(
 /**
  * The lender's liquidation of `loan` with `params`: built, checked by the stage, signed and
  * finalized (which runs the covenant, with the debt hash the loan's storage holds, and its lock
- * height check). It must sweep exactly `swept`, for `sweptAmount`.
+ * height check). It must pay the lender the collateral the loan holds, and sweep exactly `swept`,
+ * for `sweptAmount`.
  */
 async function buildSignedLiquidation(
   ctx: Context,
@@ -3071,12 +3705,22 @@ async function buildSignedLiquidation(
   out(`fee coins ${params.feeCoins.map(outpointOf).join(', ')}`)
 
   const built = await buildPrivateLiquidation(flowDeps(lender, ctx.chain), offer, loan, params)
+  const collateral = loan.state.collateral()?.amount
+  if (collateral === undefined) throw new Error('the liquidation left the collateral unknown')
   out('blinded liquidation PSET:')
   describeOutputs(built.pset, {
     borrowerNft: offer.opened.borrowerNft(),
     lenderNft: offer.opened.lenderNft(),
   })
-  assertLiquidationOutputs(built.pset, offer, lender, params.collateralReceiver, swept, sweptAmount)
+  assertLiquidationOutputs(
+    built.pset,
+    offer,
+    lender,
+    params.collateralReceiver,
+    collateral,
+    swept,
+    sweptAmount,
+  )
   const { finalizedTx, summary } = built.finalize(lender.signer.sign(built.pset))
   assertFinalizedWeights(finalizedTx, liquidationWeights(swept.length))
   const installments =
@@ -3179,12 +3823,43 @@ async function liquidateStage(ctx: Context): Promise<void> {
 }
 
 /**
+ * The lender's search for the collateral of `loan`, read after its installments
+ * (`collateralSearch`, then `findCollateral` on the loan output's commitments and the step's
+ * blinder alone), must find the collateral the installments it reads leave. The lender reads every
+ * e2e installment, so the liquidation never needs the search: this runs it on the chain's loan
+ * output all the same.
+ */
+async function checkCollateralSearch(loan: Loan): Promise<void> {
+  const known = loan.state.collateral()?.amount
+  const search = loan.state.collateralSearch()
+  const input = {
+    valueCommitment: search.valueCommitment,
+    assetCommitment: search.assetCommitment,
+    blinder: search.blinder,
+    max: search.max,
+  }
+  search.free()
+  const started = performance.now()
+  const found = await findCollateralHere(input)
+  const ms = Math.round(performance.now() - started)
+  if (known === undefined || found !== known) {
+    throw new Error(`the lender's search finds ${found}, the installments leave ${known}`)
+  }
+  out(
+    `the lender's search over [1, ${input.max}] finds the collateral the loan holds, ${found} ` +
+      `tL-sats, in ${ms} ms: the amount the installments it reads leave`,
+  )
+}
+
+/**
  * The lender's liquidation of the `create` loan after its installments, which no stage broadcasts:
  * the loan the repayment spent, or the loan now before it, with the installments no claim took.
  * The builder is given the loan's expiry as the tip, so that it builds the transaction the lender
  * could broadcast from the block after it. Finalizing runs the covenant with the witness's debt
  * hash, the one the loan's storage holds after the installments, not the starting debt's. The
- * transaction is never saved or broadcast.
+ * lender's search must find the collateral the loan holds (`checkCollateralSearch`), and the
+ * liquidation pays it, what the installments left, to the lender. The transaction is never saved
+ * or broadcast.
  */
 async function liquidateCreateLoanDry(ctx: Context): Promise<void> {
   const { lender } = ctx.wallets
@@ -3212,10 +3887,109 @@ async function liquidateCreateLoanDry(ctx: Context): Promise<void> {
       `${debtHash} (${loan.state.debtHashAt(0)} at acceptance); unclaimed ` +
       `[${unspent.join(', ')}], ${sweptAmount} TEST units`,
   )
+  if (installmentCount > 0) await checkCollateralSearch(loan)
   out(`its liquidation, built at the expiry, block ${expiry} (tip ${await ctx.chain.tipHeight()})`)
   const params = liquidationParams(ctx, lenderNftOutpoint(), unspent, expiry)
   const { txid } = await buildSignedLiquidation(ctx, offer, loan, params, unspent, sweptAmount)
   out(`the create loan's liquidation: ${txid} finalized, not saved or broadcast`)
+  const collateral = loan.state.collateral()?.amount
+  if (installmentCount > 0 && collateral !== undefined) {
+    await liquidateWithUnreadableInstallment(ctx, offer, loanOutpoint, unspent, collateral)
+  }
+}
+
+/**
+ * `tx` with one byte in the middle of output `vout`'s range proof changed. The range proof is
+ * witness data, so the txid stays the same, but the proof no longer rewinds: to its reader, the
+ * output's amount does not open.
+ */
+function withUnrewindableOutput(tx: lwk.Transaction, vout: number): lwk.Transaction {
+  const { rangeProofLengths, rangeProofOffsets } = readConsensusEncoding(tx)
+  if (rangeProofLengths[vout] === 0) throw new Error(`output ${vout} has no range proof`)
+  const bytes = tx.toBytes().slice()
+  bytes[rangeProofOffsets[vout] + Math.floor(rangeProofLengths[vout] / 2)] ^= 0x01
+  const changed = lwk.Transaction.fromBytes(bytes)
+  if (changed.txid().toString() !== tx.txid().toString()) {
+    throw new Error("changing a range proof changed the transaction's txid")
+  }
+  return changed
+}
+
+/**
+ * The `create` loan's dry liquidation by a lender that cannot open the loan's last installment, as
+ * for one built outside the app: the lender's deps serve that installment with output 2's range
+ * proof changed (`withUnrewindableOutput`), so its amount, and with it the collateral the loan
+ * holds, are unknown. The builder must then find the collateral with the search it is given,
+ * called once, pay the lender that `collateral`, and sweep none of the unclaimed installments it
+ * cannot open; finalizing runs the covenant. Nothing is saved or broadcast.
+ */
+async function liquidateWithUnreadableInstallment(
+  ctx: Context,
+  offer: VerifiedOffer,
+  loanOutpoint: string,
+  unspent: string[],
+  collateral: bigint,
+): Promise<void> {
+  const { lender } = ctx.wallets
+  const last = confirmedInstallments().at(-1)
+  if (last === undefined) throw new Error('the create loan has no confirmed installment')
+  const hidden = `${last}:${INSTALLMENT_OUTPUT.installment}`
+  const base = flowDeps(lender, ctx.chain)
+  const deps: PrivateFlowDeps = {
+    ...base,
+    fetchTx: async txid => {
+      const tx = await base.fetchTx(txid)
+      return txid === last ? withUnrewindableOutput(tx, INSTALLMENT_OUTPUT.installment) : tx
+    },
+  }
+  const loan = await loadLoan(deps, offer, lender.lendingKey, loanOutpoint)
+  if (installmentAmount(loan, hidden) !== undefined || loan.state.collateral() !== undefined) {
+    throw new Error(`${hidden} still opens for the lender with its range proof changed`)
+  }
+  out(
+    `the lender, served ${hidden} with its range proof changed, cannot open it: what the loan ` +
+      `owes and holds is unknown (${loan.state.remaining}, ${loan.state.collateral()?.amount})`,
+  )
+  let searches = 0
+  const finder: CollateralFinder = search => {
+    searches += 1
+    return findCollateralHere(search)
+  }
+  const opened = unspent.filter(outpoint => outpoint !== hidden)
+  let sweptAmount = 0n
+  for (const outpoint of opened) sweptAmount += installmentAmount(loan, outpoint) ?? 0n
+  const params: LiquidationParams = {
+    ...liquidationParams(ctx, lenderNftOutpoint(), unspent, offer.opened.loanExpirationTime()),
+    findCollateral: finder,
+  }
+  const built = await buildPrivateLiquidation(deps, offer, loan, params)
+  if (searches !== 1 || loan.state.collateral()?.amount !== collateral) {
+    throw new Error(
+      `the builder searched ${searches} times and set the collateral to ` +
+        `${loan.state.collateral()?.amount}, not once and ${collateral}`,
+    )
+  }
+  out(`the builder searched once, and found the collateral the loan holds, ${collateral} tL-sats`)
+  out('blinded liquidation PSET:')
+  describeOutputs(built.pset, {
+    borrowerNft: offer.opened.borrowerNft(),
+    lenderNft: offer.opened.lenderNft(),
+  })
+  assertLiquidationOutputs(
+    built.pset,
+    offer,
+    lender,
+    params.collateralReceiver,
+    collateral,
+    opened,
+    sweptAmount,
+  )
+  const { finalizedTx } = built.finalize(lender.signer.sign(built.pset))
+  assertFinalizedWeights(finalizedTx, liquidationWeights(opened.length))
+  out(
+    `the liquidation by the lender that cannot open ${hidden}: ` +
+      `${finalizedTx.txid().toString()} finalized, not saved or broadcast`,
+  )
 }
 
 /**

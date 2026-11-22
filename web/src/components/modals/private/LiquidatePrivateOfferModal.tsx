@@ -5,26 +5,24 @@ import { useBlockHeight } from '@/api/esplora/hooks'
 import { fetchLatestBlockHeight } from '@/api/esplora/methods'
 import Notice from '@/components/Notice'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
-import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
+import { liquidationWeightUnits } from '@/privateLending/actionWeights'
 import { utxoOutpoint } from '@/privateLending/candidate'
+import { liquidationCollateralText } from '@/privateLending/collateralFigures'
+import { findCollateralInWorker } from '@/privateLending/collateralSearch'
 import { findLenderNft } from '@/privateLending/flows/claimInstallments'
 import { buildPrivateLiquidation } from '@/privateLending/flows/liquidation'
+import { useCollateralLeft } from '@/privateLending/hooks/useCollateralLeft'
+import { useLoan } from '@/privateLending/hooks/useLoan'
 import { esploraSpentBy } from '@/privateLending/hooks/usePrivateFlowDeps'
 import { loadLoan } from '@/privateLending/loan'
 import { isPastExpiry } from '@/privateLending/offerView'
 import { selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
 import { useWallet } from '@/providers/wallet/useWallet'
-import { ASSET_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/asset-auth/witness'
-import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
 
 import PrivateOfferActionShell, {
   type FreshOffer,
   type PrivateOfferActionModalProps,
 } from './PrivateOfferActionShell'
-
-// The active offer (Liquidation), and the lender NFT, a wallet output.
-const LIQUIDATE_WEIGHT_UNITS =
-  PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.Liquidation + EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY
 
 /**
  * The lender takes the collateral of an expired loan, burning its lender NFT, and sweeps the
@@ -35,6 +33,14 @@ export default function LiquidatePrivateOfferModal(props: PrivateOfferActionModa
   const { getLendingKey } = useWallet()
   const { data: tipHeight } = useBlockHeight()
   const { formatCollateralDisplay } = useFormatAmount()
+  // What the liquidation pays: the collateral the loan holds now, `c_k`, read with the loan or
+  // found by the lender's search, not the offer's.
+  const loan = useLoan(props.item)
+  const found = useCollateralLeft(terms.collateralAmount, loan.data, true)
+  const collateralText = liquidationCollateralText(
+    loan.isError ? { kind: 'unknown' } : found,
+    formatCollateralDisplay,
+  )
   const isExpired = isPastExpiry(terms, tipHeight)
   const notYet =
     `The loan expires at block #${terms.loanExpirationTime}. It can be liquidated once the ` +
@@ -56,7 +62,7 @@ export default function LiquidatePrivateOfferModal(props: PrivateOfferActionModa
     const feeCoins = selectFeeCoins(
       deps.walletUtxos(),
       deps.assets.policy,
-      LIQUIDATE_WEIGHT_UNITS + unspentInstallments.length * ASSET_AUTH_MAX_WEIGHT_TO_SATISFY,
+      liquidationWeightUnits(unspentInstallments.length),
       deps.feeRate,
     )
     return buildPrivateLiquidation(deps, offer, loan, {
@@ -65,15 +71,17 @@ export default function LiquidatePrivateOfferModal(props: PrivateOfferActionModa
       feeCoins,
       collateralReceiver: walletReceiver(deps),
       tipHeight: currentTip,
+      // when an installment does not open for the lender: off the page's thread
+      findCollateral: findCollateralInWorker,
     })
   }
 
   const summary = useMemo(
     () => [
-      { label: 'Collateral', value: formatCollateralDisplay(terms.collateralAmount) },
+      { label: 'Collateral', value: collateralText },
       { label: 'Expiration block', value: `#${terms.loanExpirationTime}` },
     ],
-    [terms, formatCollateralDisplay],
+    [terms, collateralText],
   )
 
   return (

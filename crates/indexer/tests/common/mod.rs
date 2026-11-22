@@ -1,13 +1,18 @@
 #![allow(dead_code)]
 
 use anyhow::Context;
-use lending_contracts::programs::{private_lending::PrivateLendingOffer, program::SimplexProgram};
+use lending_contracts::programs::{
+    asset_auth::{AssetAuth, AssetAuthParameters},
+    private_lending::PrivateLendingOffer,
+    program::SimplexProgram,
+};
 use lending_indexer::api::server::run_server;
 use lending_indexer::esplora_client::EsploraClient;
 use lending_indexer::indexer::{BlockProcessor, TrackerRegistry};
 use lending_indexer::models::{PrivateOfferModel, PrivateOfferUtxoModel};
 use private_lending_core::{LendingKey, NewOffer, OfferTerms};
 use serde_json::Value;
+use simplex::provider::SimplicityNetwork;
 use simplex::simplicityhl::elements::secp256k1_zkp::{PublicKey, SECP256K1};
 use simplex::simplicityhl::elements::{
     AssetId, LockTime, OutPoint, Script, Transaction, TxIn, TxOut, Txid, confidential, hashes::Hash,
@@ -163,6 +168,7 @@ pub fn private_creation(
             nft_output(lender_nft),
             marker_output,
             collateral_output,
+            explicit_output(carry_asset(), CARRY_SUPPLY),
         ],
     );
 
@@ -185,6 +191,22 @@ pub fn explicit_output(asset: AssetId, amount: u64) -> TxOut {
         value: confidential::Value::Explicit(amount),
         script_pubkey: non_op_return_script(),
         ..Default::default()
+    }
+}
+
+/// The carry token's asset: the indexer does not read it, so any asset stands for it.
+fn carry_asset() -> AssetId {
+    asset(0xca)
+}
+
+/// The carry supply `S = 2^50`, held by creation's output 4.
+pub const CARRY_SUPPLY: u64 = 1 << 50;
+
+/// The `OP_RETURN` that burns `amount` carry units.
+fn carry_burn(amount: u64) -> TxOut {
+    TxOut {
+        value: confidential::Value::Explicit(amount),
+        ..burn_output(carry_asset())
     }
 }
 
@@ -212,7 +234,7 @@ pub fn acceptance_tx(c: &PrivateCreation) -> Transaction {
     )
 }
 
-/// Cancellation: burns both NFTs and returns the collateral.
+/// Cancellation: burns both NFTs and the carry supply, and returns the collateral.
 pub fn cancellation_tx(c: &PrivateCreation) -> Transaction {
     let terms = &c.offer.signed_terms.terms;
     tx_with_inputs(
@@ -220,56 +242,122 @@ pub fn cancellation_tx(c: &PrivateCreation) -> Transaction {
             creation_outpoint(c, 3),
             creation_outpoint(c, 1),
             creation_outpoint(c, 0),
+            creation_outpoint(c, 4),
         ],
         vec![
             burn_output(terms.lender_nft),
             burn_output(terms.borrower_nft),
             explicit_output(asset(9), 5_000),
+            carry_burn(CARRY_SUPPLY),
         ],
     )
 }
 
-/// Full repayment: burns the borrower NFT, pays the lender and returns the collateral.
-pub fn repayment_tx(c: &PrivateCreation, active: OutPoint) -> Transaction {
+/// The `asset_auth` lock of one unit of `nft`, as the private lending program pins it: the
+/// repayment's (the lender NFT, burned), an installment's (the lender NFT, kept) and the carries'
+/// (the borrower NFT, kept).
+pub fn asset_auth_lock(nft: AssetId, with_asset_burn: bool) -> Script {
+    AssetAuth::new(AssetAuthParameters {
+        asset_id: nft,
+        asset_amount: 1,
+        with_asset_burn,
+        network: SimplicityNetwork::LiquidTestnet,
+    })
+    .get_script_pubkey()
+}
+
+/// `amount` of `asset` at `script`.
+pub fn locked_output(asset: AssetId, amount: u64, script: Script) -> TxOut {
+    TxOut {
+        script_pubkey: script,
+        ..explicit_output(asset, amount)
+    }
+}
+
+/// The full repayment's payment to the lender: output 1, at the repayment lock.
+pub fn repayment_output(c: &PrivateCreation) -> TxOut {
+    let terms = &c.offer.signed_terms.terms;
+    locked_output(
+        terms.principal_asset,
+        terms.repayment_amount,
+        asset_auth_lock(terms.lender_nft, true),
+    )
+}
+
+/// Full repayment: burns the borrower NFT and the `carries` it spends, pays the lender and
+/// returns the collateral.
+pub fn repayment_tx(c: &PrivateCreation, active: OutPoint, carries: &[OutPoint]) -> Transaction {
     let terms = &c.offer.signed_terms.terms;
     tx_with_inputs(
-        vec![creation_outpoint(c, 0), active],
+        [creation_outpoint(c, 0), active]
+            .into_iter()
+            .chain(carries.iter().copied())
+            .collect(),
         vec![
             burn_output(terms.borrower_nft),
-            explicit_output(terms.principal_asset, terms.repayment_amount),
+            repayment_output(c),
             explicit_output(asset(9), 5_000),
+            carry_burn(1),
         ],
     )
 }
 
-/// Installment: spends the borrower NFT at `nft` and the loan at `active`, and returns the NFT
-/// unburned at output 0, with the successor loan at output 1 and the installment at output 2.
-pub fn installment_tx(c: &PrivateCreation, nft: OutPoint, active: OutPoint) -> Transaction {
+/// Installment: spends the borrower NFT at `nft`, the loan at `active` and the `carries`, and
+/// returns the NFT unburned at output 0, with the successor loan at output 1, the installment at
+/// output 2, at the installment lock, and the new carries at outputs 3 and 4, at the carry lock.
+pub fn installment_tx(
+    c: &PrivateCreation,
+    nft: OutPoint,
+    active: OutPoint,
+    carries: &[OutPoint],
+) -> Transaction {
     let terms = &c.offer.signed_terms.terms;
+    installment_tx_with_nft_output(
+        c,
+        nft,
+        active,
+        carries,
+        explicit_output(terms.borrower_nft, 1),
+    )
+}
+
+/// [`installment_tx`] that burns the borrower NFT in output 0, which the program allows: it
+/// checks only the NFT's asset and amount there.
+pub fn installment_tx_burning_the_nft(
+    c: &PrivateCreation,
+    nft: OutPoint,
+    active: OutPoint,
+    carries: &[OutPoint],
+) -> Transaction {
+    let terms = &c.offer.signed_terms.terms;
+    installment_tx_with_nft_output(c, nft, active, carries, burn_output(terms.borrower_nft))
+}
+
+fn installment_tx_with_nft_output(
+    c: &PrivateCreation,
+    nft: OutPoint,
+    active: OutPoint,
+    carries: &[OutPoint],
+    nft_output: TxOut,
+) -> Transaction {
+    let terms = &c.offer.signed_terms.terms;
+    let carry_lock = asset_auth_lock(terms.borrower_nft, false);
     tx_with_inputs(
-        vec![nft, active, outpoint_with_txid_byte(0x43, 0)],
+        [nft, active, outpoint_with_txid_byte(0x43, 0)]
+            .into_iter()
+            .chain(carries.iter().copied())
+            .collect(),
         vec![
-            explicit_output(terms.borrower_nft, 1),
+            nft_output,
             explicit_output(asset(9), 5_000),
-            explicit_output(terms.principal_asset, 1_000),
+            locked_output(
+                terms.principal_asset,
+                1_000,
+                asset_auth_lock(terms.lender_nft, false),
+            ),
+            locked_output(carry_asset(), 1, carry_lock.clone()),
+            locked_output(carry_asset(), 1, carry_lock),
             explicit_output(terms.principal_asset, 500),
-        ],
-    )
-}
-
-/// Zero-debt close: burns the borrower NFT, reveals the debt's blinder in an `OP_RETURN` at output
-/// 1 and returns the collateral.
-pub fn zero_debt_close_tx(c: &PrivateCreation, nft: OutPoint, active: OutPoint) -> Transaction {
-    let terms = &c.offer.signed_terms.terms;
-    tx_with_inputs(
-        vec![nft, active],
-        vec![
-            burn_output(terms.borrower_nft),
-            TxOut {
-                script_pubkey: Script::new_op_return(&[7; 32]),
-                ..Default::default()
-            },
-            explicit_output(asset(9), 5_000),
         ],
     )
 }

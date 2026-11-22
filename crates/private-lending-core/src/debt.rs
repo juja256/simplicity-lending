@@ -97,8 +97,6 @@ pub enum DebtError {
     NotOnCurve,
     /// The result is the point at infinity, which no commitment encodes.
     Infinity,
-    /// The key gives neither the debt nor its negation: debt remains, or the key is another's.
-    NotThisDebt,
 }
 
 impl fmt::Display for DebtError {
@@ -107,7 +105,6 @@ impl fmt::Display for DebtError {
             Self::NotConfidential => f.write_str("the asset or the value is not a commitment"),
             Self::NotOnCurve => f.write_str("the commitment is not a point of the curve"),
             Self::Infinity => f.write_str("the result is the point at infinity"),
-            Self::NotThisDebt => f.write_str("the key does not open the debt"),
         }
     }
 }
@@ -159,66 +156,19 @@ pub fn asset_plus_generator(asset: &confidential::Asset) -> Result<confidential:
     Ok(asset_of_point(&sum))
 }
 
-/// The key a zero-debt close reveals: the debt's blinder `k`, as 32 big-endian bytes, when no
-/// amount is owed. `None` while debt remains, or for a zero blinder, which the covenant refuses.
-pub fn zero_debt_key(opening: &DebtOpening) -> Option<[u8; 32]> {
-    let blinder = opening.blinder.into_inner();
-    (opening.amount == 0 && opening.blinder != ValueBlindingFactor::zero())
-        .then(|| *blinder.as_ref())
-}
-
-/// The blinder of the zero debt that a close revealing `k` spent: `k` or `−k`, whichever gives
-/// `debt` exactly. The covenant compares x-coordinates only, so a close may reveal either.
-///
-/// # Errors
-/// Returns [`DebtError::NotConfidential`] or [`DebtError::NotOnCurve`] if `debt` is not a
-/// commitment, and [`DebtError::NotThisDebt`] if `k` is not a nonzero scalar or neither `k·G`
-/// nor `−k·G` is `debt`.
-pub fn zero_debt_blinder(
-    k: &[u8; 32],
-    debt: &confidential::Value,
-) -> Result<ValueBlindingFactor, DebtError> {
-    let debt = value_point(debt)?;
-    let k = SecretKey::from_slice(k).map_err(|_| DebtError::NotThisDebt)?;
-    let point = PublicKey::from_secret_key(SECP256K1, &k);
-    let blinder = if point == debt {
-        k
-    } else if point.negate(SECP256K1) == debt {
-        k.negate()
-    } else {
-        return Err(DebtError::NotThisDebt);
-    };
-
-    Ok(ValueBlindingFactor::from_slice(&blinder.secret_bytes())
-        .expect("a secret key is a value blinding factor"))
-}
-
 /// The combined opening of the outputs that a loan's final claim sweeps.
 ///
 /// All repayment outputs of a loan, the installments and the full repayment, add up to the debt
 /// at acceptance, whose opening `start` the lender knows. The full repayment and the unclaimed
-/// installments therefore add up to `start` minus the `claimed` installments' openings. After a
-/// zero-debt close, which has no repayment output, the unclaimed installments add up to that
-/// minus `(0, k')`, with `k'` the blinder of the debt the close spent ([`zero_debt_blinder`]).
-/// Every one of these outputs carries the asset commitment `A`, so the claim balances when one of
-/// them takes this opening and the others an amount and a blinder of zero, whatever their range
-/// proofs hold.
+/// installments therefore add up to `start` minus the `claimed` installments' openings. Every one
+/// of these outputs carries the asset commitment `A`, so the claim balances when one of them takes
+/// this opening and the others an amount and a blinder of zero, whatever their range proofs hold.
 ///
-/// Returns `None` when the claimed openings add up to more than `start`, and when nothing is left
-/// to sweep: after a zero-debt close whose installments were all claimed.
-pub fn sweep_opening(
-    start: DebtOpening,
-    claimed: &[DebtOpening],
-    zero_debt: Option<ValueBlindingFactor>,
-) -> Option<DebtOpening> {
-    let left = claimed
+/// Returns `None` when the claimed openings add up to more than `start`, or to all of it.
+pub fn sweep_opening(start: DebtOpening, claimed: &[DebtOpening]) -> Option<DebtOpening> {
+    claimed
         .iter()
-        .try_fold(start, |left, claimed| left.after(*claimed))?;
-
-    match zero_debt {
-        Some(blinder) => left.after(DebtOpening { amount: 0, blinder }),
-        None => Some(left),
-    }
+        .try_fold(start, |left, claimed| left.after(*claimed))
 }
 
 /// Why an installment output did not open.
@@ -307,8 +257,13 @@ pub fn open_installment_with_extra_data(
     Ok((opening, extra_data))
 }
 
-/// The curve point of a value commitment.
-fn value_point(value: &confidential::Value) -> Result<PublicKey, DebtError> {
+/// The curve point of a value commitment, by phase 5's square-ness rule: the point the covenant
+/// reads from the commitment.
+///
+/// # Errors
+/// Returns [`DebtError::NotConfidential`] if the value is explicit or null, and
+/// [`DebtError::NotOnCurve`] if its x-coordinate is not on the curve.
+pub fn value_point(value: &confidential::Value) -> Result<PublicKey, DebtError> {
     let commitment = value.commitment().ok_or(DebtError::NotConfidential)?;
 
     commitment_point(&commitment.serialize())
@@ -322,8 +277,13 @@ fn value_of_point(point: &PublicKey) -> confidential::Value {
     confidential::Value::Confidential(commitment)
 }
 
-/// The curve point of an asset commitment.
-fn asset_point(asset: &confidential::Asset) -> Result<PublicKey, DebtError> {
+/// The curve point of an asset commitment, by phase 5's square-ness rule: the point the covenant
+/// reads from the commitment.
+///
+/// # Errors
+/// Returns [`DebtError::NotConfidential`] if the asset is explicit or null, and
+/// [`DebtError::NotOnCurve`] if its x-coordinate is not on the curve.
+pub fn asset_point(asset: &confidential::Asset) -> Result<PublicKey, DebtError> {
     let generator = asset.commitment().ok_or(DebtError::NotConfidential)?;
 
     commitment_point(&generator.serialize())
@@ -609,10 +569,6 @@ mod tests {
             asset_plus_generator(&confidential::Asset::Explicit(principal_asset())),
             Err(DebtError::NotConfidential)
         );
-        assert_eq!(
-            zero_debt_blinder(&[1; 32], &explicit),
-            Err(DebtError::NotConfidential)
-        );
     }
 
     #[test]
@@ -659,65 +615,6 @@ mod tests {
         assert_eq!(prefixes, HashSet::from([0x0a, 0x0b]));
     }
 
-    #[test]
-    fn zero_debt_blinder_takes_either_sign() {
-        let mut rng = rng();
-        let repayment = random_repayment(&mut rng);
-        let mut bits = HashSet::new();
-
-        for _ in 0..16 {
-            // an installment of the exact remaining amount with another blinder than the debt's
-            let debt = random_opening(&mut rng, 7_000);
-            let payment = random_opening(&mut rng, debt.amount);
-            let zero = debt.after(payment).unwrap();
-            let (before, paid) = (debt.commitment(&repayment), payment.commitment(&repayment));
-            let d = debt_after(&before, &paid).unwrap();
-            assert_eq!(d, zero.commitment(&repayment));
-            assert_eq!(zero_debt_key(&debt), None);
-
-            let k = zero_debt_key(&zero).unwrap();
-            assert_eq!(&k, zero.blinder.into_inner().as_ref());
-            let minus_k = *(-zero.blinder).into_inner().as_ref();
-            assert_eq!(zero_debt_blinder(&k, &d), Ok(zero.blinder));
-            assert_eq!(zero_debt_blinder(&minus_k, &d), Ok(zero.blinder));
-            bits.insert(prefix_bit(&serialize(&d)));
-        }
-
-        assert_eq!(bits, HashSet::from([0, 1]));
-    }
-
-    #[test]
-    fn zero_debt_blinder_refuses_another_point() {
-        let mut rng = rng();
-        let repayment = random_repayment(&mut rng);
-        let zero = random_opening(&mut rng, 0);
-        let d = zero.commitment(&repayment);
-
-        // the key of another zero debt
-        let other = *ValueBlindingFactor::new(&mut rng).into_inner().as_ref();
-        assert_eq!(zero_debt_blinder(&other, &d), Err(DebtError::NotThisDebt));
-        // not a nonzero scalar
-        assert_eq!(zero_debt_blinder(&[0; 32], &d), Err(DebtError::NotThisDebt));
-        assert_eq!(
-            zero_debt_blinder(&[0xff; 32], &d),
-            Err(DebtError::NotThisDebt)
-        );
-        // the blinder of a debt that is not zero
-        let owed = DebtOpening { amount: 1, ..zero };
-        let k = *owed.blinder.into_inner().as_ref();
-        assert_eq!(zero_debt_key(&owed), None);
-        assert_eq!(
-            zero_debt_blinder(&k, &owed.commitment(&repayment)),
-            Err(DebtError::NotThisDebt)
-        );
-        // a zero amount with a zero blinder is the point at infinity
-        let infinity = DebtOpening {
-            amount: 0,
-            blinder: ValueBlindingFactor::zero(),
-        };
-        assert_eq!(zero_debt_key(&infinity), None);
-    }
-
     /// Whether the value commitments `swept` add up to `total`.
     fn adds_up(swept: &[confidential::Value], total: &confidential::Value) -> bool {
         let points: Vec<_> = swept.iter().map(|v| value_point(v).unwrap()).collect();
@@ -745,24 +642,12 @@ mod tests {
 
         // the full repayment's output is the debt itself
         let swept = commitments(&[unclaimed[0], unclaimed[1], debt]);
-        let sweep = sweep_opening(start, &claimed, None).unwrap();
+        let sweep = sweep_opening(start, &claimed).unwrap();
         assert!(adds_up(&swept, &sweep.commitment(&repayment)));
 
-        // an installment of the exact remaining amount with another blinder, then the close
-        let last = random_opening(&mut rng, debt.amount);
-        let zero = debt.after(last).unwrap();
-        let k = zero_debt_key(&zero).unwrap();
-        let k_prime = zero_debt_blinder(&k, &zero.commitment(&repayment)).unwrap();
-        let swept = commitments(&[unclaimed[0], unclaimed[1], last]);
-        let sweep = sweep_opening(start, &claimed, Some(k_prime)).unwrap();
-        assert!(adds_up(&swept, &sweep.commitment(&repayment)));
-
-        // nothing is left once every installment is claimed after the close
-        let all = [installments.as_slice(), &[last]].concat();
-        assert_eq!(sweep_opening(start, &all, Some(k_prime)), None);
         // claims beyond the debt at acceptance
         let too_much = [random_opening(&mut rng, start.amount + 1)];
-        assert_eq!(sweep_opening(start, &too_much, None), None);
+        assert_eq!(sweep_opening(start, &too_much), None);
     }
 
     #[test]

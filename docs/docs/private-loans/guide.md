@@ -72,6 +72,9 @@ The borrower app does not list your own key.
    sent until every field is within them. **Repayment** shows what you repay and the interest in it,
    and the summary sentence below says what you repay by which date and what the lender keeps if you
    do not. You may add a private message to the lender; see [Private messages](#private-messages).
+   No lender accepts a collateral above 2^44 base units (175,921.86044416 tL-BTC) or a repayment
+   above 2^50 − 2 base units, so the form refuses them: "The collateral is more than a lender can
+   accept: ask for less."
 4. Select **Lock collateral and send**, check the proposal, and approve signing. Wait for
    confirmation and indexer discovery. The proposal then appears under **My loans**, waiting for the
    lender.
@@ -90,14 +93,17 @@ transaction fee.
 
 ### Repay
 
-**Repay** opens a form with what you have paid so far and what you still owe. The amount starts at
-what you still owe, in the repayment asset.
+**Repay** opens a form with what you have paid so far and what you still owe, and with **Collateral
+released so far** and **Collateral left**. The amount starts at what you still owe, in the
+repayment asset.
 
-- **Less than you owe** pays an installment. The rest stays owed and the loan stays open. My loans
-  then shows how much of the repayment you have paid, such as "Active, 300 of 1,100 TEST repaid,
-  due in 12 days".
-- **All you owe** repays the loan in full. Your collateral comes back to you, and the borrower role
-  token is burned.
+- **Less than you owe** pays an installment. The rest stays owed and the loan stays open. The
+  installment releases the part of your collateral it pays for: the form shows **Collateral
+  released** and **Collateral left after it** for the amount you type. My loans then shows how much
+  of the repayment you have paid, such as "Active, 300 of 1,100 TEST repaid, due in 12 days", with
+  the collateral **Released** and **Left**.
+- **All you owe** repays the loan in full. The collateral the loan still holds comes back to you
+  (**Collateral back to you**), and the borrower role token is burned.
 - **Nothing, or more than you owe**, is refused, as is an amount with more decimals than the asset
   has.
 
@@ -108,14 +114,35 @@ separately. Only you and the lender can read its amount: on chain it is hidden l
 other amounts. The app reads what you have paid from the chain and your wallet alone, so a new
 browser or device shows the same figures.
 
+#### Collateral released by installments
+
+The loan keeps collateral in proportion to what it still owes, rounded up: a loan of collateral `C`
+and repayment `R` that still owes `d` holds `⌈d·C/R⌉`, and the rest has come back to you. With
+20,000 tL-sats of collateral against a repayment of 1,100 TEST units, an installment of 366 units
+releases 6,654 tL-sats, a second of 244 releases 4,436 more, and the full repayment of the last 490
+gives back the 8,910 left. The releases always add up to the whole collateral. A small installment
+can release nothing when the collateral it pays for rounds to zero; it is still paid, and a later
+payment releases what they add up to.
+
+The release goes to a new address of your wallet, in the installment's own transaction, hidden like
+the loan's other amounts. The contract checks it: the installment proves on chain that the loan
+keeps exactly the collateral its debt calls for, so you cannot take more and the lender cannot keep
+more. The proof makes an installment larger than a plain payment, about 50,000 weight units, and its
+fee grows with it.
+
+Each loan has its own **carry token**, which its creation issues and its installments pass on: they
+carry hidden figures the proof needs from one installment to the next. The app finds them and spends
+them for you, with your role token; you never handle them. The full repayment burns them, and so
+does a cancellation. A loan takes at most 1,024 installments; after that the form offers only the
+full repayment.
+
 Installments are not refunded if the loan is liquidated. Once the term ends, the lender can take
 the collateral and keep every installment you paid. So from the loan's expiry block on, the form
 takes only the full repayment: "The term has ended: the lender can take the collateral at any time.
 Repay in full to get it back."
 
-If your installments have paid the whole debt, the loan shows **Close the loan** instead of
-**Repay**. Closing pays nothing and gives your collateral back. The app never makes such an
-installment itself, since an installment of all you owe is the full repayment.
+An installment never pays the whole debt: what you still owe always goes through the full
+repayment, which gives back the collateral left.
 
 ### How the term is counted
 
@@ -141,20 +168,30 @@ restart when the lender accepts.
    Wait for confirmation and indexing. Acceptance is not offered once a proposal's expiry has
    passed. The review shows the borrower's message, if any, under **Message from the borrower**,
    and you may answer with a private message of your own.
-5. The loan then appears in **Loan book**, with what the borrower has repaid, what remains and what
-   you can claim. When the borrower pays an installment, select **Claim** to receive it; the lender
-   role token comes back to you. Once the borrower repays the rest, or closes a loan its
-   installments paid, select **Claim repayment**: it receives the repayment and every installment
-   you have not claimed, and consumes the lender role token. A repaid loan is not fully claimed
-   until this separate transaction completes.
+5. The loan then appears in **Loan book**. **Lent** shows the principal with the repayment under
+   it, **Repaid** what the borrower has repaid with what it still owes under it, and **Claimable**
+   what you can claim; **Status** shows when the loan is due. When the borrower pays an
+   installment, select **Claim** to receive it; the lender role token comes back to you. Under
+   **Collateral**, the loan book shows the collateral the installments gave back to the borrower
+   ("released") and the collateral the loan still holds ("left"). Once the borrower repays the rest,
+   select **Claim repayment**: it receives the repayment and every installment you have not
+   claimed, and consumes the lender role token. A repaid loan is not fully claimed until this
+   separate transaction completes.
 6. If the loan remains unpaid past its expiry height, **Liquidate** becomes available. Liquidation
-   consumes the lender role token and releases the collateral to you, with the installments you
-   have not claimed.
+   consumes the lender role token and gives you the collateral the loan still holds, with the
+   installments you have not claimed.
+
+The console accepts no proposal whose collateral is above 2^44 base units or whose repayment is
+above 2^50 − 2: beyond them the contract's check of each release would not hold. Such a proposal
+says that its collateral or its repayment is outside what a lender can accept, and offers no
+action.
 
 An installment the borrower built outside this app may not open with your key. **Claimable** then
-marks it "amount unknown", and **Remaining** shows the debt as "at most" the repayment less what
+marks it "amount unknown", and **Repaid** shows what is owed as "at most" the repayment less what
 you can read. **Claim repayment** still takes it, and you receive the repayment in full; a
-liquidation leaves it unclaimed.
+liquidation leaves it unclaimed. Without its amount, the console cannot compute the collateral the
+loan holds, so it searches for it, from the chain and the offer's secrets alone, in the background:
+**Collateral** says "computing…" for about a second, and the liquidation uses what it finds.
 
 The summary at the top of **Proposals** counts the proposals waiting for you, the active loans, the
 principal lent out, the collateral held, and the loans due within 7 days or overdue. These are this
@@ -183,7 +220,7 @@ many fit.
 | With an installment | The borrower | The lender, and the borrower on any device | 3068 bytes |
 | With the full repayment | The borrower | The lender; the borrower only in the browser that sent it | 3068 bytes |
 
-A cancellation, a claim, a liquidation and **Close the loan** carry no message.
+A cancellation, a claim and a liquidation carry no message.
 
 Only the two parties can read a loan's messages; on chain they are hidden like its amounts, and a
 transaction with a message looks the same as one without. The proposal's and the installments'
@@ -235,8 +272,10 @@ again: the app offers only **Discard** for it. The same holds for a saved instal
 loan's term has ended. While a saved installment waits, the app offers no other payment on that
 loan. After you discard one, or once the app stops tracking one that never confirmed, the app pays
 the next installment of that loan from other coins: if the earlier one did reach the network, a
-new one from the same coins could reveal both amounts. This record lives in the browser profile
-too.
+new one from the same coins could reveal both amounts. It also pays exactly the earlier one's
+amount, as two installments of the same step with different amounts would reveal how much
+collateral each released; for another amount, repay in full. This record lives in the browser
+profile too.
 
 Preserve the browser profile and its site data while a transaction needs recovery. A different
 profile does not have that local retry record. Check the transaction ID in the explorer if the

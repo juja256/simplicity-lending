@@ -1,8 +1,8 @@
 # Private lending v2 — design (draft)
 
 Status: collecting items. Not yet a design; nothing here is decided beyond the item list, except
-the decisions recorded in items 3, 4, 5 and 7 to 10, in "Scope of v2" and in "Phase 5 design
-note".
+the decisions recorded in items 3, 4, 5 and 7 to 10, in "Scope of v2", in "Phase 5 design note"
+and in "Phase 7 design note".
 
 Builds on [the v1 design](2026-10-28-private-lending-design.md) and
 `crates/contracts/simf/private_lending.simf`.
@@ -44,7 +44,7 @@ Builds on [the v1 design](2026-10-28-private-lending-design.md) and
      generators) and the verifier taking commitments from the transaction.
    - A feasibility spike for (b) ran on 2026-11-21 (`2026-11-21-phase-7-spike/note.md`): buildable
      with Sigma proofs and consensus range proofs plus a liquidation repair, about 43,000 WU per
-     installment; (b) stays postponed.
+     installment. The user resumed (b) the same day; the phase 7 design note (below) builds it.
    - The phase 5 design note (below) builds (a). It closes the loan by equality instead of the
      BIP340 signature under `D_final`, and by revealing the blinder `k` of `D = k·G` when the debt
      is already zero, decided 2026-11-18.
@@ -585,6 +585,632 @@ The plan's done-when, made concrete:
 Phase 5 also rewrites the header comment of `private_lending.simf`, removes the dead features
 `lending` and `pre_lock`, and takes the phase 4 review's items that name phase 5 (listed in the
 2026-11-16 handoff).
+
+## Phase 7 design note: proportional collateral release (item 3(b))
+
+Decided with the user on 2026-11-21, after the spike (`2026-11-21-phase-7-spike/note.md`, route C
+with the liquidation repair). This note is the binding design of phase 7.
+
+The user's decisions:
+
+- route C, with the liquidation repair;
+- the lender caps the collateral at `2^44` base units when it accepts;
+- one carry token per loan, issued by the creation transaction;
+- the zero-debt close is removed;
+- the soundness proofs are written first.
+
+Where the spike note and this note differ, this note wins. Section "What this note decides beyond
+the spike" lists the differences.
+
+It keeps the phase 5 design note except where it says otherwise. In particular these stay:
+
+- the debt as a point;
+- the closing by equality;
+- the full repayment;
+- the liquidation;
+- the encoding conversions of "Elements commitments in Simplicity";
+- the final claim with the combined opening.
+
+### Notation
+
+Phase 5's notation holds: `G`, `n`, `A`, `D = d·A + r·G`, `D₀ = R·A + r₀·G`, `h(A, D)`. Points are
+group elements of secp256k1. "The point of" a commitment means the curve point read from Elements'
+encoding with phase 5's square-ness rule.
+
+- **`C`** is the collateral amount, and **`R`** the full repayment, both in base units.
+- **`A_c`** is the active collateral's asset commitment: the collateral asset's generator blinded
+  with `a_c`, the derived `active-collateral-abf`.
+- **`V_c0 = C·A_c + ρ·G`** is its value commitment at acceptance, with `ρ` the derived
+  `active-collateral-vbf`.
+- **The step `k`** of a loan is the number of installments it has had, so step 0 is acceptance. At
+  step `k` the loan output's asset commitment is `A_c + k·G`, as in phase 5.
+- **`d_k`, `r_k`** open the debt `D_k` at step `k`, and `c_k` is the collateral it holds.
+- **The release rule.** At every step,
+
+  ```
+  c_k = ceil(d_k·C / R)         and   e_k := c_k·R − d_k·C   with   0 ≤ e_k ≤ R − 1.
+  ```
+
+  - With `paid_k = R − d_k`, the collateral released so far is
+    `C − c_k = floor(paid_k·C / R)`.
+  - Installment `k` releases `c_(k−1) − c_k`, which can be 0.
+  - The full repayment releases `c_k`.
+- **The carry token** is the asset that the creation transaction issues for the loan, `S = 2^50`
+  units. **`W1_k`** and **`W2_k`** are the two carry outputs of installment `k`. They hold
+  `e_k + 1` and `R − e_k` carry units, and their asset commitments are `A_w1` and `A_w2`.
+- **`J`** is a fixed point whose discrete logarithm nobody knows (below).
+- **The blinder commitments.** For `j = 1..N` with `N = 1024`, the per-step blinders are `x_j`
+  and `y_j` (below), and the blinder commitment is
+
+  ```
+  Y_j = x_j·G + y_j·J.
+  ```
+- **The collateral at step `k ≥ 1`** has:
+  - asset blinder `a_c + k`;
+  - value blinder `x_k − c_k·k` (mod `n`).
+
+  Its value commitment is therefore `V_k = c_k·(A_c + k·G) + (x_k − c_k·k)·G = c_k·A_c + x_k·G`.
+- **Encodings.**
+  - "The `x ‖ y` of a point" is its affine coordinates as two 32-byte big-endian words.
+  - "`compress(h, a, b)`" is the SHA-256 compression function (`jet::sha_256_block`) with
+    chaining value `h` and the 64-byte block `a ‖ b`, with no padding and no length.
+  - "`derive(label)`" is `OfferSecrets::derive`, a tagged hash of the shared secret under the tag
+    `simplicity-lending/private/v1/<label>`.
+  - "`scalar(b)`" is the 32 bytes `b` read big-endian and reduced modulo `n`.
+
+### The statement
+
+An installment at step `i` creates step `i + 1`. The program proves, for the transaction it runs in:
+
+> the successor holds `c' = ceil(d'·C/R)`, where `d'` is the amount of `D' = D − V`, and the
+> successor's value commitment is `c'·A_c + x_(i+1)·G`.
+
+It does so with a Sigma proof of knowledge of eleven secrets: `C, ρ, c', x, y, e, w1, R, r₀, w2, τ`.
+Each secret has one response, and that response is shared by every equation the secret appears in:
+
+```
+E1  V_c0      = C·A_c + ρ·G
+E2  V_s       = c'·A_c + x·G
+E3  Y         = x·G + y·J
+E4  W1 − A_w1 = e·A_w1 + w1·G
+E5  D₀        = R·A + r₀·G
+E6  W2        = (R − e)·A_w2 + w2·G
+E7  0         = c'·D₀ − C·D' − e·A − τ·G
+```
+
+**The statement's points come from three places:**
+
+- **Parameters:** `A`, `A_c`, `V_c0` and `D₀`. `J` is a constant.
+- **Introspection:**
+  - `V_s` is output 1's value commitment.
+  - `W1`, `A_w1` and `W2`, `A_w2` are outputs 3 and 4's value and asset commitments.
+  - `D' = D − V` is computed from the witness's `D` (authenticated by the storage) and output 2's
+    value commitment `V`.
+- **The witness:** `Y`, authenticated by the Merkle root (equation M).
+
+**What the honest borrower knows:**
+
+- `x = c'·(i+1) + r_s = x_(i+1)`, with `r_s` the successor's value blinder.
+- `y = y_(i+1)`.
+- `e = e_(i+1)`.
+- `w1` and `w2`, the carries' value blinders.
+- `τ = c'·r₀ − C·r'`, with `r'` the blinder of `D'`.
+
+**Equation M (the repair).** For a witness index `i` with `0 ≤ i ≤ 1023`, `Y` is the leaf at
+position `i` of the tree whose root is the parameter `BLINDER_ROOT`. So `Y = Y_(i+1)`. Together
+with the index check (the input's asset commitment is `A_c + i·G`), M fixes which committed
+blinder the successor must use.
+
+**The integer argument (for the proofs).** These bounds hold:
+
+| Value | Bound | Why |
+|---|---|---|
+| `C` | `[1, 2^44]` | the lender's check at acceptance |
+| `R` | `[1, 2^50 − 2]` | the lender's check at acceptance |
+| each payment `p` | `[1, 2^64)` | consensus |
+| `c'` | `[1, 2^64)` | consensus; output 1 has a spendable script |
+| carry amounts | `[1, 2^64)` | consensus; outputs 3 and 4 have a pinned spendable script |
+| steps | at most 1024 | the Merkle tree has 1024 leaves |
+
+- The minimum of 1 comes from `CachingRangeProofChecker::VerifyRangeProof` for spendable scripts.
+- The maximum comes from `secp256k1_rangeproof_getheader_impl`.
+
+What follows from them:
+
+- The amount of `D'` is `d' = R − Σp` over the integers, with `|d'| < 2^75`.
+- E4 and E6 give `e ≡ amount(W1) − 1` and `R − e ≡ amount(W2) (mod n)`, so `0 ≤ e ≤ R − 1` over
+  the integers.
+- The coefficient of `A` in E7 is `c'R − d'C − e`, at most `2^121` in absolute value, so E7 holds
+  over the integers.
+- Therefore `c' = ceil(d'C/R)`. An installment with `d' ≤ 0` is impossible, because it would need
+  `c' ≤ 0`.
+- The program alone would accept a zero successor, `c' = 0` (with `e = 0`), when a payment covers
+  the whole debt (`d' = 0`): E1–E7 hold there. Consensus refuses it, because the range proof of a
+  spendable confidential output has a minimum of 1, and output 1 is spendable. So the whole debt
+  goes through the full repayment.
+
+The argument needs the discrete logarithms of `A`, `A_c`, `A_w1`, `A_w2` and `J` to base `G` to be
+unknown. Surjection proofs give that for the asset commitments, and the NUMS derivation gives it for
+`J`.
+
+**The verification equations.** The prover sends the commitments `T1..T7` and the responses `z_C,
+z_ρ, z_c', z_x, z_y, z_e, z_w1, z_R, z_r₀, z_w2, z_τ`, in that order. With the challenge `c`, the
+program checks:
+
+```
+V1  z_C·A_c  + z_ρ·G  = T1 + c·V_c0
+V2  z_c'·A_c + z_x·G  = T2 + c·V_s
+V3  z_y·J    + z_x·G  = T3 + c·Y
+V4  z_e·A_w1 + z_w1·G = T4 + c·(W1 − A_w1)
+V5  z_R·A    + z_r₀·G = T5 + c·D₀
+V6  (z_R − z_e)·A_w2 + z_w2·G = T6 + c·W2
+V7  z_c'·D₀  − z_τ·G  = T7 + z_C·D' + z_e·A
+```
+
+- Each line is one `jet::linear_verify_1`, which checks `a·P + b·G = Q`. The right-hand side is
+  built with `jet::scale`, `jet::gej_ge_add` and `jet::gej_normalize`.
+- The honest commitments are, with nonces `k_•`:
+  - `T1 = k_C·A_c + k_ρ·G`
+  - `T2 = k_c'·A_c + k_x·G`
+  - `T3 = k_x·G + k_y·J`
+  - `T4 = k_e·A_w1 + k_w1·G`
+  - `T5 = k_R·A + k_r₀·G`
+  - `T6 = (k_R − k_e)·A_w2 + k_w2·G`
+  - `T7 = k_c'·D₀ − k_C·D' − k_e·A − k_τ·G`
+- The responses are `z_• = k_• + c·secret`.
+- The witness carries `T1..T7` and `Y` as affine points. The program checks each one with
+  `jet::ge_is_on_curve` before using it.
+- The responses need not be below `n`: the jets reduce them.
+
+**The Fiat–Shamir challenge.**
+
+```
+h₀  = FS_IV                                   (a parameter, below)
+h₁  = compress(h₀,  D'.x,   D'.y)
+h₂  = compress(h₁,  V_s.x,  V_s.y)
+h₃  = compress(h₂,  W1.x,   W1.y)
+h₄  = compress(h₃,  A_w1.x, A_w1.y)
+h₅  = compress(h₄,  W2.x,   W2.y)
+h₆  = compress(h₅,  A_w2.x, A_w2.y)
+h₇  = compress(h₆,  Y.x,    Y.y)                (the statement ends here)
+h₈ … h₁₄ = compress(h₇ …, Tj.x, Tj.y)  for j = 1..7, in order
+c   = scalar(h₁₄)                               (jet::scalar_normalize)
+```
+
+The points are the curve points, not their Elements encodings.
+
+`FS_IV` is per loan:
+
+```
+FS_IV = SHA-256( "simplicity-lending/private/v1/release-fs" ‖ A ‖ A_c ‖ V_c0 ‖ D₀ ‖ J )
+```
+
+where each point is its `x ‖ y`. It binds the challenge to every constant of the statement. The
+lender recomputes it, as it recomputes every parameter.
+
+**The Merkle tree.**
+
+- `LEAF_IV = SHA-256("simplicity-lending/private/v1/release-leaf")`, and
+  `NODE_IV = SHA-256("simplicity-lending/private/v1/release-node")`. Both are constants of the
+  program.
+- Leaf `j`, for `j = 0..1023`, is `compress(LEAF_IV, Y_(j+1).x, Y_(j+1).y)`.
+- A node is `compress(NODE_IV, left, right)`.
+- The depth is 10, and `BLINDER_ROOT` is the root.
+- The witness path lists 10 pairs `(is_right, sibling)` from the leaf up. `is_right` is bit `k` of
+  the index at level `k`.
+- The program folds the path with `array_fold::<_, 10>`. It rebuilds the index from the bits and
+  requires it to equal the witness's `i`.
+
+**`J`.**
+
+- For `t = 0, 1, …`, let `X_t = SHA-256("simplicity-lending/private/v1/release-J" ‖ t)`, with `t`
+  as 4 big-endian bytes.
+- `J` is the point with x-coordinate `X_t` and even `y`, for the first `t` at which such a point
+  exists.
+- It is a constant of the program. A known-answer test fixes its value.
+
+**Derivations.**
+
+- **`x_j = scalar(derive("release-x/<j>"))`** and **`y_j = scalar(derive("release-y/<j>"))`**,
+  where `<j>` is `j` in decimal ASCII (`release-x/1` … `release-x/1024`). Both parties derive them.
+- **The Sigma nonces** `k_C, k_ρ, k_c', k_x, k_y, k_e, k_w1, k_R, k_r₀, k_w2, k_τ` are
+  `scalar(tagged_hash("simplicity-lending/private/v1/release-nonce", borrower_sk ‖ h₇ ‖ W ‖ m))`,
+  with
+  `W = tagged_hash("simplicity-lending/private/v1/release-witness", C ‖ ρ ‖ c' ‖ x ‖ y ‖ e ‖ w1 ‖
+  R ‖ r₀ ‖ w2 ‖ τ)`.
+  - `borrower_sk` is the borrower's lending key, as 32 bytes.
+  - `h₇` is the statement's digest.
+  - `W` binds the witness (proofs, R1, adopted in task 3). Each secret is 32 big-endian bytes,
+    reduced modulo `n`, in the responses' order.
+  - `m` is the nonce's position, 0 to 10, as one byte.
+  - They derive from the borrower's key, not from the shared secret, so the lender cannot compute
+    them and recover the borrower's openings from the responses.
+  - Nobody can compute two witnesses of one statement, because the commitments bind under the
+    unknown discrete logarithms (proofs, Theorem 1(e)). So the honest borrower's two builds of one
+    statement have one witness and give the same proof, and two different statements give
+    independent nonces.
+  - With `W`, a bug that paired a statement with a wrong witness would get other nonces too, so
+    its two proofs would not publish `z − z' = c·(w − w')`.
+
+### The program
+
+`private_lending.simf` stays one program with two storage slots: whether the offer is active, and
+`h(A, D)`.
+
+**New parameters.** The lender recomputes all of them from the shared secret and the terms when it
+checks the offer's address.
+
+| Parameter | Value | Use |
+|---|---|---|
+| `REPAYMENT_ASSET_POINT` | `A` as an affine point | E5, E7, `FS_IV` |
+| `COLLATERAL_ASSET_POINT` | `A_c` | E1, E2, the index check |
+| `COLLATERAL_VALUE_POINT` | `V_c0` | E1 |
+| `STARTING_DEBT_POINT` | `D₀` | E5, E7 |
+| `FS_IV` | as above | the challenge |
+| `BLINDER_ROOT` | the Merkle root of `Y_1..Y_1024` | M |
+
+- **Constants in the program:** `J`, `LEAF_IV` and `NODE_IV`.
+- **Kept:** every phase 5 parameter. `REPAYMENT_ASSET` stays in Elements' encoding for the byte
+  comparison of output 2's asset commitment.
+- **The carry outputs' lock** is `PRINCIPAL_OUTPUT_SCRIPT_HASH`: `asset_auth` of the borrower NFT
+  without burn, the lock the principal already uses. So it needs no new parameter.
+  - It is a taproot output, so it is spendable and consensus gives its amounts a minimum of 1.
+  - The borrower unlocks it with the NFT that every borrower branch already spends.
+- **Removed:** the zero-debt close branch and its helpers (`get_key_reveal_script_hash`,
+  `close_zero_debt`).
+
+**The witness path:**
+
+```
+Left(Left(()))                        acceptance
+Left(Right(()))                       cancellation
+Right(Left(Left(installment)))        installment with release
+Right(Left(Right(debt_hash)))         full repayment
+Right(Right((debt_hash, salt, expiry))) liquidation
+```
+
+The installment's witness is:
+
+```
+installment = ( debt: (bool, u256),           D in Elements' encoding, as in phase 5
+                index: u16,                   i, the input's step
+                y: Ge,                        Y = Y_(i+1)
+                path: [(bool, u256); 10],
+                t: (Ge, Ge, Ge, Ge, Ge, Ge, Ge),
+                z: 11 scalars in the order above )
+```
+
+| Branch | Inputs | Outputs | Witness |
+|---|---|---|---|
+| Acceptance | 0 pending offer, 1 lender NFT | 0 active offer, 1 principal, 2 lender NFT | none |
+| Cancellation | 0 pending offer, 1 lender NFT, 2 borrower NFT | 0 and 1 burn both NFTs | none |
+| Installment | 0 borrower NFT, 1 loan | 0 NFT, 1 loan, 2 installment, 3 and 4 carries | above |
+| Full repayment | 0 borrower NFT, 1 loan | 0 borrower NFT burn, 1 repayment | `h` |
+| Liquidation | 0 loan, 1 lender NFT | 0 lender NFT burn | `h`, salt, expiry |
+
+In the installment, the inputs from 2 on are the principal coins, then the carries, then the fee
+coins, so that input 2 is the first principal coin (see "Transactions").
+
+**The installment checks, in order** (run by the loan input at index 1):
+
+1. `jet::current_index()` is 1. Input 1's script hash is the storage address (active, `h(A, D)`)
+   for the witness's `D`.
+2. The borrower NFT passes from input 0 to output 0, explicit and of amount 1.
+3. Output 2's script hash is `INSTALLMENT_OUTPUT_SCRIPT_HASH`, and its asset commitment is
+   `REPAYMENT_ASSET`. Call its value commitment `V`.
+4. `D' = D − V` is not the point at infinity.
+5. Output 1's script hash is the storage address (active, `h(A, D')`).
+6. Output 1's asset commitment is input 1's plus `G`. Unlike phase 5, its value commitment is not
+   compared.
+7. **The index check.** Input 1's asset commitment is the encoding of `A_c + i·G`
+   (`jet::generate(i)`, `gej_ge_add`, `gej_normalize`, then phase 5's encoding).
+8. **Equation M.** `Y` is on the curve, and the path takes leaf `compress(LEAF_IV, Y.x, Y.y)` at
+   index `i` to `BLINDER_ROOT`.
+9. **The carries.** Outputs 3 and 4 have the script hash `PRINCIPAL_OUTPUT_SCRIPT_HASH`.
+   Confidential asset and value commitments are required (`unwrap_left`), so an explicit carry
+   fails.
+10. The program reads `V_s` from output 1, and `W1`, `A_w1`, `W2`, `A_w2` from outputs 3 and 4, as
+    curve points. The `T`s are checked to be on the curve.
+11. It computes the challenge and checks V1 to V7.
+
+Inputs from index 2 on, and outputs from index 5 on, are not constrained. The carry inputs are among
+them: `asset_auth` unlocks them through the borrower NFT at input 0 and output 0, whatever their
+index.
+
+**The other branches:**
+
+- **Full repayment:** unchanged from phase 5. The borrower spends the loan with its current
+  collateral `c_k` and takes it back in a free output.
+- **Liquidation:** unchanged. It reads neither the debt's opening nor the collateral.
+- **Acceptance and cancellation:** unchanged programs. Their transactions change (below).
+
+**Cost.** The contract (task 5, regtest, no annex) measured the installment at 4.14–4.19 M mWU
+(4,139,272 at the first installment, 4,186,312 in the steady state) against a budget of about 8.5 M
+(8,513,000 and 8,587,000), paid for by its own witness. The program is about 7.1–7.2 kB (7,105 and
+7,179 bytes pruned) and the witness 1.2 kB.
+
+- Liquid does not relay annex padding, so a build must pay for its cost with its own bytes.
+- The contract test asserts `is_budget_valid` on the stack with no annex.
+
+### Transactions
+
+**Creation** adds a third issuance and one output.
+
+- **Inputs:**
+  - 0 issues the borrower NFT and 1 the lender NFT, as today.
+  - The next input, 2, which is the first collateral or fee coin, issues the carry token: `S =
+    2^50` units, no reissuance token, fresh entropy.
+- **Outputs:**
+  - 0 borrower NFT, 1 lender NFT locked to the offer, 2 marker, 3 pending collateral, as today.
+  - New output 4 is the carry supply: `S` carry units, explicit, locked by `asset_auth` of the
+    borrower NFT without burn (`PRINCIPAL_OUTPUT_SCRIPT_HASH`).
+  - Then the changes and the fee.
+- **Why `S` is safe to show.** The amount is the same for every loan, so it reveals nothing.
+- **How `S` was chosen:**
+  - Elements limits an explicit output, and the sum of a transaction's explicit outputs over all
+    assets, to `MAX_MONEY = 21·10^14` (`bad-txns-txouttotal-toolarge`, seen in the spike). `2^50 ≈
+    1.13·10^15` leaves room for the NFTs and the fee.
+  - The carries need `R + 1` units, and the first installment burns a leftover of at least 1. So
+    `R ≤ S − 2`.
+
+**Installment.**
+
+- **Inputs:**
+  - 0 the borrower NFT and 1 the loan.
+  - From 2, the principal coins, as in phase 5. Input 2 is the first principal coin, from which
+    output 2's ephemeral key derives (phase 5's `installment_ephemeral_key`).
+  - Then the carries `W1_k` and `W2_k` of the previous installment. At the first installment
+    there is one carry input: creation's output 4.
+  - Then the fee coins.
+  - The carry inputs run `asset_auth` with the NFT at input 0 and output 0, whatever their index.
+  - **A carry never occupies input 2.** Every build at a step spends the same carries, so a carry
+    at input 2 would give every rebuild the same output-2 key (proofs, O11).
+- **Outputs:**
+  - 0 the borrower NFT and 1 the successor loan.
+  - 2 the installment: under `A`, blinded to the lender with the derived ephemeral key, as in
+    phase 5.
+  - 3 `W1_(k+1)` holds `e + 1` and 4 `W2_(k+1)` holds `R − e`. Both are confidential and blinded
+    to the borrower's lending key, with a random ephemeral key; the borrower rewinds them with
+    its lending key.
+  - Then the release to the borrower's wallet, if `c_k − c_(k+1) > 0`.
+  - At the first installment only, a confidential `OP_RETURN` burns the leftover `S − R − 1`
+    carry units.
+  - Then the principal change, the policy change and the fee.
+- **The successor** is pinned with asset blinder `a_c + k + 1` and value blinder
+  `x_(k+1) − c_(k+1)·(k+1)`.
+- **The carries balance from the second installment on:** two in, two out, `R + 1` units each
+  way.
+- **Weight.** The contract measured 49,319 WU for the first installment (5 inputs, 10 outputs)
+  and 45,535 WU in the steady state (6 inputs, 9 outputs).
+
+**Full repayment.** The phase 5 layout, plus the carries:
+
+- The app also spends the two carries, after the principal coins as in the installment (with
+  `asset_auth`; phase 5 notes that the no-burn lock accepts the NFT's burn output).
+- It burns their `R + 1` units in one confidential `OP_RETURN`.
+- The collateral `c_k` goes to the borrower.
+- **The burns hide `R`.** Both confidential burns, `S − R − 1` at the first installment and `R + 1`
+  here, use the same range-proof parameters as the other confidential outputs, so that they do not
+  reveal their amounts (proofs, O10). The implementer confirms Elements' rules for the range proofs
+  of unspendable outputs from its source.
+- The contract does not require the sweep. Without it, the carries stay locked for ever once the
+  borrower NFT is burned.
+
+**Cancellation.** The app also spends creation's output 4 with `asset_auth` and burns the `S` carry
+units in an explicit `OP_RETURN`.
+
+**Liquidation.** The lender spends the loan with its collateral's opening. At step 0 that is the
+active collateral. At step `k ≥ 1`:
+
+- It computes `D_k` as a point, as in phase 5.
+- It finds `c_k ∈ [1, C]` with `c_k·A_c = V_k − x_k·G` by a baby-step giant-step search.
+- The opening is then asset blinder `a_c + k` and value blinder `x_k − c_k·k`.
+- When the lender can read every installment, it computes `c_k = ceil(d_k·C/R)` directly instead.
+- The carries stay with the borrower, who keeps its NFT and may sweep them later.
+
+### Off chain
+
+**Checks at acceptance.** Before accepting, the lender checks (proofs, O9):
+
+- `1 ≤ C ≤ 2^44` and `1 ≤ R ≤ 2^50 − 2`. The bound on `R` is soundness-critical: `R` lives only
+  in `D₀` and `REPAYMENT_COMMITMENT`, which no consensus range proof bounds.
+- that every point parameter is the point of its encoded twin, all recomputed from the shared
+  secret and the terms:
+  - `A` of `REPAYMENT_ASSET`;
+  - `D₀` of `REPAYMENT_COMMITMENT = h(A, D₀)`;
+  - `A_c` and `V_c0` of `ACTIVE_COLLATERAL_COMMITMENT = h(A_c, V_c0)`.
+- that `FS_IV` and `BLINDER_ROOT` are the ones it recomputes, `FS_IV` over all of `A`, `A_c`,
+  `V_c0`, `D₀` and `J`;
+- that the offer's address is the one its own parameters give, including the new ones.
+
+The borrower's app refuses to create an offer outside these bounds.
+
+**Installments:**
+
+- At most `N = 1024` per loan. Step 1024 has no leaf for the next one, so the app offers only the
+  full repayment there.
+- Phase 5's branch rule stands: below the remaining debt, an installment; equal to it, the full
+  repayment; zero or above it, refused.
+- The contract now also refuses an overpayment.
+
+**Never rebuild an index with another amount.**
+
+- Two builds at the same step share `x_(k+1)`, so their successors differ by `(c' − c'')·A_c`.
+  Anyone holding both can search for the difference of the amounts.
+- Two builds with the same payment `p` keep `c'` and `x_(k+1)`, so their successors are the same
+  point. Then only the link between the two builds is revealed (proofs, L1).
+- The app saves a build before its first broadcast and rebroadcasts it.
+- **A saved build that can no longer be broadcast** (a coin it spends was spent, or the fee must
+  rise) may be rebuilt only with the same amount `p`, and with a first wallet input (input 2, the
+  first principal coin) that no saved, discarded or failed installment of the loan used.
+  - The fresh input keeps output 2's derived ephemeral key fresh. Phase 5 derives that key from the
+    lending key, the loan outpoint, the first wallet input and output 0's script, so a rebuild on
+    the same inputs would reuse it for a new commitment.
+  - Phase 6's `installmentTraceInputs` already keeps those inputs out of the loan's next build.
+  - With the same `p` and a fresh key, only the link between the two builds leaks (proofs, L1).
+- Otherwise the app never builds a second installment for the same loan state.
+
+**Rebuilding from the seed and the chain.** The borrower rebuilds:
+
+- the lending key, the offer's secrets, `x_j` and `y_j`, and the tree;
+- `d_k` and `r_k` from its own installments, as in phase 5;
+- `c_k = ceil(d_k·C/R)` and `e_k`, in 128-bit integers;
+- the carries, by rewinding outputs 3 and 4 of the last installment with its lending key, or
+  creation's output 4 at step 0.
+
+**The lender rebuilds:**
+
+- the step count and `D_k` from the chain;
+- `c_k` from the installments it can read, or by the search when one is unreadable.
+- The search runs in a Web Worker. Task 4's batched search measured about 0.7 s natively and about
+  1 s in wasm at `C = 2^44`, using 37–45 MiB. Its result is cached per loan state.
+
+**What the apps show:**
+
+- **The borrower's repay form** shows, for an amount `p`, the release
+  `c_k − ceil((d_k − p)·C/R)`. Its loan view shows the collateral released (`C − c_k`) and the
+  collateral left (`c_k`).
+- **The lender's loan book** shows the same two figures, marked "computing" while a search runs.
+
+**Integer arithmetic.** Every collateral figure is computed in `u128` as `ceil(a·b / c) = (a·b + c −
+1) / c`. The releases of a loan add up to `C` exactly.
+
+### The indexer
+
+**Reading an installment.** The indexer knows the borrower's two spends of the loan (at input 1)
+by the scripts the program pins, which it computes from the offer's NFT ids:
+
+- The full repayment pays output 1 at the repayment lock (`asset_auth` of the lender NFT, with
+  burn).
+- An installment puts the successor at output 1, at the loan's own address, the installment at
+  output 2, at the installment lock (the lender NFT's, without burn), and the carries at outputs 3
+  and 4, at the carry lock (the borrower NFT's).
+- Output 1 decides, and is read first, since the full repayment leaves its later outputs free.
+- The program checks only the borrower NFT's asset and amount at an installment's output 0, not
+  its script, so an installment may burn the NFT there (found in the phase 7 review; the program
+  stays as it is). The indexer records it as an installment, so the loan stays active and the
+  lender can liquidate it. Before the fix, the tracker read output 0 first and took such an
+  installment for the full repayment.
+- It records outputs 3 and 4 as a new UTXO type, `carry`, of that offer.
+- It records creation's output 4 as the offer's first `carry`.
+- It marks a carry spent when an installment, the full repayment or the cancellation spends it.
+
+**What it cannot see.** The release output is not constrained and its amount is hidden, so the
+indexer does not identify it. The API serves no collateral amounts.
+
+**The zero-debt close is gone.** A burned borrower NFT with an `OP_RETURN` at output 1 is no
+longer a spend kind. The tracker's zero-debt case and its test go.
+
+**Creation transactions** now have the carry output at index 4. The program id changes with the
+source, so offers of the phase 5 program are not read.
+
+### Done when
+
+**The soundness proofs** (task 1) state and prove:
+
+- special soundness and honest-verifier zero-knowledge of E1–E7 and M with shared responses;
+- the integer argument;
+- the challenge as a random oracle over chained compressions;
+- binding of the index and the leaf;
+- hiding of `V_k` given `Y_k`;
+- that the lender's search recovers the opening.
+
+The contract is written to the statements that were proved.
+
+**Contract (regtest):**
+
+- **Installments with release succeed:**
+  - at the first and at later steps;
+  - with `e = 0` and with `e = R − 1`;
+  - with a release of 0;
+  - with every point's two prefix bits, as in phase 5.
+- **The program refuses an installment** with:
+  - `c' ± 1`;
+  - carries split `(e, R − e + 1)`, or summing to anything but `R + 1`;
+  - a carry on another script, or explicit;
+  - a successor with a random blinder against the honest `Y`;
+  - a self-made `Y` with the honest path;
+  - the index, leaf and blinder of `i + 1` at step `i`;
+  - the leaf of `i + 1` with index `i`;
+  - an altered response;
+  - a proof from another installment;
+  - a successor asset other than input + `G`;
+  - phase 5's installment failures;
+  - an overpayment;
+  - a payment of exactly the debt, with the least successor consensus admits, `c' = 1` (the
+    program alone would accept `c' = 0`, which consensus refuses: see the integer argument).
+- **The liveness test** runs random installment sequences with releases. After each one:
+  - the full repayment succeeds;
+  - the liquidation after the term succeeds, by a lender who reads no installment and opens the
+    collateral by the search. The test uses `C ≤ 2^32` to keep it fast.
+- **Exact sums:** the releases of each sequence plus the full repayment's collateral add up to `C`,
+  and each release is `floor(paid_k·C/R) − floor(paid_(k−1)·C/R)` in `u128`.
+- **Weight and budget:** the installment runs within its budget with no annex, and its transaction
+  is below 100,000 WU. The test prints its weight.
+- **Creation, cancellation and full repayment:** the creation issues the carry supply, the
+  cancellation burns it, and the full repayment sweeps the carries.
+- **Phase 5's final claim** with the combined opening still passes after releases. Its zero-debt
+  case is removed with the branch.
+
+**Core:**
+
+- known-answer tests for `J`, `LEAF_IV`, `NODE_IV`, `FS_IV`, `x_j`, `y_j`, `BLINDER_ROOT` and the
+  nonces of a fixed offer;
+- the prover against a Rust verifier of V1–V7 and M;
+- property tests of the release arithmetic;
+- the search at `2^36`, and an ignored test at `2^44`.
+
+**wasm:** bindings for building an installment's witness, the release preview and the search, with
+wasm tests.
+
+**Parity:** `pnpm parity` covers the new derivations, the witness encoding and the release
+arithmetic.
+
+**Flow (web):**
+
+- two same-amount builds of an installment at one step derive different output-2 ephemeral keys;
+- no build puts a carry at input 2 (proofs, O11).
+
+**Indexer:** the `carry` type, carry spends, and the creation layout.
+
+**e2e:**
+
+- the `repay-partial` stage releases collateral, and the borrower's wallet receives it;
+- the full repayment after releases;
+- every stage from empty state.
+
+**Demo:** the demo shows a release in the borrower's and the lender's views.
+
+### What this note decides beyond the spike
+
+- **The carry token:** one per loan, from the creation transaction. Its supply `S = 2^50` sits in an
+  explicit output 4 under the borrower NFT's `asset_auth`. The first installment burns the
+  leftover, the full repayment sweeps the carries, and the cancellation burns the supply.
+- **The carry lock** is `PRINCIPAL_OUTPUT_SCRIPT_HASH`, not a new `CARRY_SCRIPT_HASH`, and the
+  carries are blinded to the borrower's lending key.
+- **The bounds** `C ≤ 2^44` and `R ≤ 2^50 − 2`, both checked by the lender.
+- **The derivations:** the labels of `x_j` and `y_j`; nonces from the borrower's lending key over
+  `h₇` and the witness digest `W` (proofs, R1); `J` by try-and-increment; and the IVs and `FS_IV`
+  with their tags.
+- **On-curve checks** of the witness's `T`s and `Y`. The spike did not check them. An off-curve
+  point would break the group-law argument the proofs rely on.
+- **The layouts:**
+  - the installment's input and output indices with the borrower NFT;
+  - the carry inputs after the principal coins, so that input 2 stays the first principal coin, as
+    phase 5's output-2 key requires;
+  - the zero-debt close removed, which reshapes the witness path.
+
+### Left to the builder
+
+- The parameters' names, and whether points travel as affine words or in Elements' encoding with
+  a decode.
+- The `T`s affine or compressed. Either way they must be checked on the curve.
+- The order of the free outputs after index 4.
+- Whether the app sweeps the carries after a liquidation.
+- The search's implementation (baby-step giant-step or kangaroo, batching, the worker) and its
+  cache.
+- Whether a testnet e2e stage liquidates a loan with releases, or the regtest tests alone cover it.
+- The UI's wording.
 
 ## Open questions
 

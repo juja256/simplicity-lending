@@ -1,20 +1,33 @@
-// The creation of a private offer (spec, part A). The borrower issues both NFTs from its own
-// coins, locks the lender NFT to the offer, and pays the collateral, blinded to the lender, into
-// the pending offer:
+// The creation of a private offer (spec, part A; `attach_creation` in the contracts' private
+// lending core). The borrower issues both NFTs and the loan's carry token from its own coins,
+// locks the lender NFT to the offer, and pays the collateral, blinded to the lender, into the
+// pending offer:
 //   inputs   0 first input (issues the borrower NFT), 1 lender NFT coin (issues the lender NFT),
-//            2… collateral coins;
+//            2… collateral coins, the first of which issues the carry token: `CARRY_SUPPLY`
+//            units, no reissuance token, fresh entropy;
 //   outputs  0 borrower NFT to the borrower, 1 lender NFT at the lender-NFT lock, 2 OP_RETURN
-//            marker, 3 pending offer; change and fee follow.
+//            marker, 3 pending offer, 4 the carry supply, explicit, at the principal's asset_auth
+//            (borrower NFT, no burn); change and fee follow.
+// The carries bound the remainder of proportional release by consensus (the design note's
+// "Transactions"): every installment spends them, and the borrower NFT unlocks them. The supply
+// is the same for every loan, so showing it reveals nothing.
 import type { Address, Contract, WalletTxOut } from 'lwk_wasm'
 
 import type { AsyncUpdatedPset } from '@/lwk/updatedPset'
 import {
+  CARRY_SUPPLY,
+  CREATION_INPUT,
   CREATION_OUTPUT,
   LOCK_TIME_THRESHOLD,
   NFT_AMOUNT,
   NO_REISSUANCE_TOKEN,
 } from '@/simplicity/private-lending/layout'
-import { privateOfferScripts, toPrivateOfferArguments } from '@/simplicity/private-lending/scripts'
+import {
+  privateAssetAuthProgram,
+  privateOfferScripts,
+  toPrivateOfferArguments,
+} from '@/simplicity/private-lending/scripts'
+import { buildCovenantSpendInfo } from '@/simplicity/taproot'
 import { hexToBytes } from '@/utils/hex'
 import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
@@ -34,13 +47,15 @@ import {
 } from './shared'
 
 /**
- * The NFTs' asset contracts, never published. What matters is their fresh issuer key: it gives
- * every build new NFT ids, and so new offer secrets.
+ * The asset contracts of the NFTs and the carry token, never published. What matters is their
+ * fresh issuer key: it gives every build new NFT ids, and so new offer secrets, and a carry token
+ * of its own to every loan (fresh entropy).
  */
 const NFT_CONTRACT_DOMAIN = 'simplicity-lending.private'
 const NFT_CONTRACTS = {
   borrower: { name: 'simplicity-lending/private/v1 borrower-nft', ticker: 'SLPB' },
   lender: { name: 'simplicity-lending/private/v1 lender-nft', ticker: 'SLPL' },
+  carry: { name: 'simplicity-lending/private/v1 carry', ticker: 'SLPC' },
 } as const
 
 export interface CreationParams {
@@ -51,7 +66,10 @@ export interface CreationParams {
   firstInput: WalletTxOut
   /** Input 1, which issues the lender NFT. */
   lenderNftCoin: WalletTxOut
-  /** Inputs 2…, which pay the collateral (and, with the other inputs, the fee). */
+  /**
+   * Inputs 2…, which pay the collateral (and, with the other inputs, the fee). The first, input 2,
+   * issues the carry token.
+   */
   collateralCoins: WalletTxOut[]
   collateralAmount: bigint
   principalAmount: bigint
@@ -73,8 +91,30 @@ export interface CreationSummary {
   offerOutpoint: string
   borrowerNft: string
   lenderNft: string
+  /** The loan's carry token, issued at input 2: its supply is at `"<txid>:4"`. */
+  carryAsset: string
   /** Repayment − principal, in principal units. */
   interest: bigint
+}
+
+/**
+ * Why the borrower's app refuses an offer of `collateral` and full repayment `repayment` (base
+ * units), or undefined within the bounds of proportional release, `1 ≤ C ≤ 2^44` and
+ * `1 ≤ R ≤ 2^50 − 2` (`wasm.checkOfferBounds`): the lender refuses an offer outside them, since
+ * the release proof is sound only within them (proofs, O9).
+ */
+export function offerBoundsError(
+  wasm: Pick<PrivateFlowDeps['wasm'], 'checkOfferBounds'>,
+  collateral: bigint,
+  repayment: bigint,
+): string | undefined {
+  try {
+    wasm.checkOfferBounds(collateral, repayment)
+    return undefined
+  } catch (error) {
+    const text = typeof error === 'string' ? error : error instanceof Error ? error.message : ''
+    return text.replace(/^out-of-bounds: /, '') || 'The offer is outside the bounds of release'
+  }
 }
 
 /** The terms' interest rate, for display only: the interest is repayment − principal. */
@@ -86,7 +126,7 @@ function interestRateBps(principal: bigint, repayment: bigint): number {
   return Number(bps)
 }
 
-function freshNftContract(deps: PrivateFlowDeps, nft: keyof typeof NFT_CONTRACTS): Contract {
+function freshContract(deps: PrivateFlowDeps, nft: keyof typeof NFT_CONTRACTS): Contract {
   const { name, ticker } = NFT_CONTRACTS[nft]
   return new deps.lwk.Contract(
     NFT_CONTRACT_DOMAIN,
@@ -113,6 +153,9 @@ export async function buildPrivateCreation(
 ): Promise<AsyncUpdatedPset<CreationSummary>> {
   const { lwk, wasm } = deps
   const message = checkedMessage(params.message, 'creation')
+  const outOfBounds = offerBoundsError(wasm, params.collateralAmount, params.repaymentAmount)
+  if (outOfBounds !== undefined)
+    throw new Error(`The lender would refuse this offer: ${outOfBounds}`)
   const coins = [params.firstInput, params.lenderNftCoin, ...params.collateralCoins]
   const outpoints = coins.map(outpointOf)
   const [firstInput, lenderNftInput] = outpoints
@@ -144,16 +187,16 @@ export async function buildPrivateCreation(
   // The transactions of the coins: the PSET carries every input's prevout.
   const prevoutTxs = await fetchPrevoutTxs(deps, outpoints)
 
-  // 1. Fresh NFT contracts, and the ids they give before the transaction exists. The PSET issues
-  // with the same contract hashes, so its issuances give exactly these ids.
-  const borrowerNftContractHash = wasm.contractHashFromJson(
-    freshNftContract(deps, 'borrower').toString(),
-  )
-  const lenderNftContractHash = wasm.contractHashFromJson(
-    freshNftContract(deps, 'lender').toString(),
-  )
+  // 1. Fresh NFT and carry contracts, and the ids they give before the transaction exists. The
+  // PSET issues with the same contract hashes, so its issuances give exactly these ids.
+  const contractHashOf = (asset: keyof typeof NFT_CONTRACTS) =>
+    wasm.contractHashFromJson(freshContract(deps, asset).toString())
+  const borrowerNftContractHash = contractHashOf('borrower')
+  const lenderNftContractHash = contractHashOf('lender')
+  const carryContractHash = contractHashOf('carry')
   const borrowerNft = wasm.issuedAssetId(firstInput, borrowerNftContractHash)
   const lenderNft = wasm.issuedAssetId(lenderNftInput, lenderNftContractHash)
+  const carryAsset = wasm.issuedAssetId(outpoints[CREATION_INPUT.carryIssuance], carryContractHash)
 
   // 2. The offer: terms signed for the lender, pinned blinders, the marker.
   const terms = new wasm.OfferTermsInput(
@@ -189,11 +232,10 @@ export async function buildPrivateCreation(
     }
 
     // 3. The contract's scripts.
-    const scripts = privateOfferScripts(
-      deps.sources,
-      toPrivateOfferArguments(newOffer.contractArguments()),
-      deps.network,
+    const args = toPrivateOfferArguments(
+      wasmStep("The offer's arguments", () => newOffer.contractArguments()),
     )
+    const scripts = privateOfferScripts(deps.sources, args, deps.network)
     const pendingOffer = new lwk.Address(
       wasmStep('The pending offer address', () =>
         wasm.confidentialAddress(
@@ -204,11 +246,22 @@ export async function buildPrivateCreation(
       ),
     )
     const marker = lwk.Script.newOpReturn(hexToBytes(newOffer.marker()))
+    // The carry supply's lock, the principal's asset_auth: the hash the contract pins.
+    const carryLock = buildCovenantSpendInfo(
+      privateAssetAuthProgram(deps.sources, args.borrowerNftAssetId, false),
+    ).scriptPubkey
+    if (carryLock.jet_sha256_hex() !== scripts.principalOutputScriptHash) {
+      throw new Error("The carry supply's lock is not the one the offer's contract pins")
+    }
 
-    // inputs 0 and 1 issue the NFTs; outputs in `CREATION_OUTPUT` order
+    // inputs 0 and 1 issue the NFTs, input 2 the carry token; outputs in `CREATION_OUTPUT` order
     layout = {
       inputs: outpoints,
-      issuances: [borrowerNft, lenderNft],
+      issuances: [
+        { asset: borrowerNft, amount: NFT_AMOUNT },
+        { asset: lenderNft, amount: NFT_AMOUNT },
+        { asset: carryAsset, amount: CARRY_SUPPLY },
+      ],
       outputs: [
         {
           script: borrowerNftReceiver.scriptPubkey().toString(),
@@ -238,28 +291,46 @@ export async function buildPrivateCreation(
             pinned: pendingCollateral,
           },
         },
+        {
+          script: carryLock.toString(),
+          asset: carryAsset,
+          amount: CARRY_SUPPLY,
+          blinding: { kind: 'explicit' },
+        },
       ],
-      restrictedAssets: [borrowerNft, lenderNft],
-      restrictedScripts: [scripts.lenderNftLock.toString(), scripts.pendingOffer.toString()],
+      restrictedAssets: [borrowerNft, lenderNft, carryAsset],
+      restrictedScripts: [
+        scripts.lenderNftLock.toString(),
+        scripts.pendingOffer.toString(),
+        carryLock.toString(),
+      ],
       policyAsset: deps.assets.policy,
     }
 
     // 4. The unblinded PSET: the wallet coins in `layout.inputs` order, inputs 0 and 1 each
-    // issuing one unit of its NFT without a reissuance token; the outputs in layout order.
-    const nftContractHashes = [borrowerNftContractHash, lenderNftContractHash]
+    // issuing one unit of its NFT and input 2 the carry supply, without a reissuance token; the
+    // outputs in layout order.
+    const issuances = [
+      { amount: NFT_AMOUNT, contractHash: borrowerNftContractHash },
+      { amount: NFT_AMOUNT, contractHash: lenderNftContractHash },
+      { amount: CARRY_SUPPLY, contractHash: carryContractHash },
+    ]
     const prevouts = prevoutsOf(prevoutTxs, outpoints)
     const unblinded = buildUnblindedPset(deps, {
-      inputs: coins.map((coin, index) => ({
-        ...walletCoinInput(deps, coin, prevouts[index]),
-        issuance:
-          index < nftContractHashes.length
-            ? {
-                assetAmount: NFT_AMOUNT,
-                tokenAmount: NO_REISSUANCE_TOKEN,
-                contractHash: lwk.ContractHash.fromString(nftContractHashes[index]),
-              }
-            : undefined,
-      })),
+      inputs: coins.map((coin, index) => {
+        const issuance = issuances[index]
+        return {
+          ...walletCoinInput(deps, coin, prevouts[index]),
+          issuance:
+            issuance === undefined
+              ? undefined
+              : {
+                  assetAmount: issuance.amount,
+                  tokenAmount: NO_REISSUANCE_TOKEN,
+                  contractHash: lwk.ContractHash.fromString(issuance.contractHash),
+                },
+        }
+      }),
       outputs: [
         {
           script: borrowerNftReceiver.scriptPubkey(),
@@ -277,6 +348,11 @@ export async function buildPrivateCreation(
           amount: params.collateralAmount,
           asset: lwk.AssetId.fromString(deps.assets.collateral),
           blindingPubkey: pendingOffer.blindingPubkey(),
+        },
+        {
+          script: carryLock,
+          amount: CARRY_SUPPLY,
+          asset: lwk.AssetId.fromString(carryAsset),
         },
       ],
       changeAddress: deps.addresses.nextChange(deps.wollet, 1)[0],
@@ -362,6 +438,7 @@ export async function buildPrivateCreation(
           offerOutpoint: `${txid}:${CREATION_OUTPUT.pendingOffer}`,
           borrowerNft,
           lenderNft,
+          carryAsset,
           interest,
         },
       }

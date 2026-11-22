@@ -1,11 +1,14 @@
 //! Cryptography of Simplicity Lending private offers: lending keys, per-offer secrets, signed
 //! terms, the marker, pinned outputs, building offers, and finding, opening and checking them in
 //! their creation transactions; a loan's debt as a curve point, with the installments that pay it;
+//! the release of collateral by installments, with the derived values of the liquidation repair,
+//! the borrower's proof of each release and the lender's search for the collateral it cannot read;
 //! the private messages of a loan's parties; and the terms lenders publish in the directory, with
 //! the check of a proposal against them.
 //!
 //! The crate depends only on `elements`, `rand` and `k256` (whose field arithmetic tells whether a
-//! commitment's `y` is a square), so the contracts crate and the browser's wasm module run the same
+//! commitment's `y` is a square, and whose group arithmetic proves and verifies the releases and
+//! searches for the collateral), so the contracts crate and the browser's wasm module run the same
 //! code.
 //!
 //! Signing the terms ([`SignedTerms::sign`]) or a message ([`SignedMessage::sign`]) draws its
@@ -24,6 +27,9 @@ mod marker;
 mod message;
 mod offer;
 mod pinned;
+mod release;
+mod release_proof;
+mod release_search;
 mod secrets;
 mod terms;
 
@@ -34,9 +40,8 @@ pub use creation::{
     CreationError, FoundOffer, find_offer, open_creation_as_borrower, open_creation_as_lender,
 };
 pub use debt::{
-    DebtError, DebtOpening, InstallmentError, asset_plus_generator, debt_after, debt_hash,
-    open_installment, open_installment_with_extra_data, sweep_opening, zero_debt_blinder,
-    zero_debt_key,
+    DebtError, DebtOpening, InstallmentError, asset_plus_generator, asset_point, debt_after,
+    debt_hash, open_installment, open_installment_with_extra_data, sweep_opening, value_point,
 };
 pub use directory::{
     DIRECTORY_TAG, DirectoryAction, DirectorySignError, directory_message, sign_directory_action,
@@ -55,6 +60,13 @@ pub use message::{
 };
 pub use offer::{NewOffer, OfferError, OfferPinned, OpenError, OpenedOffer};
 pub use pinned::PinnedOutput;
+pub use release::{
+    BlinderTree, CARRY_SUPPLY, LEAF_IV, MAX_COLLATERAL, MAX_REPAYMENT, MAX_STEPS, NODE_IV,
+    ReleaseError, carry_remainder, check_bounds, collateral_at, fold_path, fs_iv, release_j,
+    release_of,
+};
+pub use release_proof::{ReleaseProof, ReleaseSecrets, ReleaseStatement, challenge, prove, verify};
+pub use release_search::{collateral_opening, find_collateral};
 pub use secrets::{OfferSecrets, PinnedRole, expiry_hash};
 pub use terms::{OfferTerms, SignedTerms, TERMS_VERSION, TermsError};
 

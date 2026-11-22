@@ -5,11 +5,14 @@
 import type { QueryClient } from '@tanstack/react-query'
 
 import { privateQueryKeys } from '@/api/indexer/queryKeys'
+import { clearFoundCollaterals } from '@/privateLending/collateralSearch'
+import { dropOpenedOffers } from '@/privateLending/offerCache'
 
 const LENDING_KEY_IDENTITY_ROOT = 'lending-key-identity'
 const PRIVATE_OFFER_TERMS_ROOT = 'private-offer-terms'
 const PRIVATE_LOAN_ROOT = 'private-loan'
 const PRIVATE_LOAN_MESSAGES_ROOT = 'private-loan-messages'
+const PRIVATE_COLLATERAL_ROOT = 'private-loan-collateral'
 const PRIVATE_LENDING_WASM_ROOT = 'private-lending-wasm'
 
 /** The private lending wasm module, loaded once. Not session data: it holds no key. */
@@ -73,11 +76,20 @@ export function privateLoanMessagesQueryKey(
   ] as const
 }
 
+/**
+ * The lender's search for a loan's collateral (`useCollateralLeft`), keyed by the loan output's
+ * commitments, which name the state the search answers for.
+ */
+export function privateCollateralQueryKey(valueCommitment: string, assetCommitment: string) {
+  return [PRIVATE_COLLATERAL_ROOT, valueCommitment, assetCommitment] as const
+}
+
 const SESSION_QUERY_ROOTS: readonly (readonly unknown[])[] = [
   privateQueryKeys.all(),
   [PRIVATE_OFFER_TERMS_ROOT],
   [PRIVATE_LOAN_ROOT],
   [PRIVATE_LOAN_MESSAGES_ROOT],
+  [PRIVATE_COLLATERAL_ROOT],
   [LENDING_KEY_IDENTITY_ROOT],
 ]
 
@@ -87,4 +99,6 @@ const SESSION_QUERY_ROOTS: readonly (readonly unknown[])[] = [
  */
 export function removePrivateSessionQueries(queryClient: QueryClient): void {
   for (const queryKey of SESSION_QUERY_ROOTS) queryClient.removeQueries({ queryKey })
+  dropOpenedOffers()
+  clearFoundCollaterals()
 }

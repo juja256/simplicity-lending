@@ -1,57 +1,63 @@
 use simplex::signer::Signer;
 use simplex::simplicityhl::elements::{LockTime, Transaction};
-use simplex::transaction::{PartialInput, PartialOutput, RequiredSignature, UTXO};
+use simplex::transaction::{PartialInput, RequiredSignature, UTXO};
 
 use lending_contracts::programs::private_lending::{
     PrivateLendingOffer, PrivateLendingWitnessBranch,
 };
-use lending_contracts::utils::confidential::ConfidentialTransaction;
+use lending_contracts::utils::confidential::{ConfidentialTransaction, PinnedOutput};
+use private_lending_core::OfferSecrets;
 
 use super::setup::{
-    Loan, PrivateOfferSetup, accept_private_offer, broadcast, default_offer_parameters,
-    get_active_offer, mine_until, setup_pending_private_offer, simplicity_spend,
+    Loan, PrivateOfferSetup, accept_private_offer, broadcast, collateral_to,
+    default_offer_parameters, get_active_offer, lender_view, mine_until,
+    setup_pending_private_offer, simplicity_spend,
 };
 
 /// The input of a liquidation that spends the loan.
 const LIQUIDATION_LOAN_INPUT: usize = 0;
 
-/// The liquidation of `loan`, before finalization: [`build_liquidation_of`] its offer and output.
+/// The liquidation of `loan`, before finalization: [`build_liquidation_of`] its offer and output,
+/// as the lender reads them from the chain, with the offer's secrets as the lender derives them.
 pub(super) fn build_liquidation_at(
+    setup: &PrivateOfferSetup,
     loan: &Loan,
     lender: &Signer,
 ) -> anyhow::Result<ConfidentialTransaction> {
-    build_liquidation_of(&loan.offer, loan.utxo.clone(), lender)
+    let (_, secrets) = lender_view(setup)?;
+    let loan_utxo = UTXO {
+        secrets: None,
+        ..loan.utxo.clone()
+    };
+
+    Ok(build_liquidation_of(&loan.offer, loan_utxo, lender, &secrets)?.0)
 }
 
 /// The liquidation of the loan `offer` held at `loan_utxo`, before finalization, built with
 /// `attach_liquidation`: the lender NFT (input 1) is burned and the collateral goes to the lender
-/// (output 1). The lender can build it from what it computes alone, with no opening of the debt.
+/// (output 1). The lender builds it from `secrets`, the chain and what it computes alone: the
+/// collateral's opening comes from the search, with no opening of the debt or of an installment.
+/// Returns the transaction and the collateral it takes.
 pub(super) fn build_liquidation_of(
     offer: &PrivateLendingOffer,
     loan_utxo: UTXO,
     lender: &Signer,
-) -> anyhow::Result<ConfidentialTransaction> {
+    secrets: &OfferSecrets,
+) -> anyhow::Result<(ConfidentialTransaction, PinnedOutput)> {
     let parameters = *offer.get_parameters();
 
     let mut ctx = ConfidentialTransaction::new();
 
-    offer.attach_liquidation(&mut ctx, loan_utxo);
+    let collateral = offer.attach_liquidation(&mut ctx, loan_utxo, secrets);
 
     let lender_nft_utxo = lender.get_utxos_asset(parameters.lender_nft_asset_id)?[0].clone();
     ctx.add_input(
         PartialInput::new(lender_nft_utxo),
         RequiredSignature::NativeEcdsa,
     );
-    ctx.add_output(
-        PartialOutput::new(
-            lender.get_confidential_address().script_pubkey(),
-            parameters.pinned.active_collateral.amount,
-            parameters.pinned.active_collateral.asset_id,
-        )
-        .with_blinding_key(lender.get_blinding_public_key()),
-    );
+    ctx.add_output(collateral_to(lender, &parameters, collateral.amount));
 
-    Ok(ctx)
+    Ok((ctx, collateral))
 }
 
 /// The liquidation of the loan that `acceptance_tx` starts, before finalization.
@@ -60,7 +66,7 @@ pub(super) fn build_liquidation(
     acceptance_tx: &Transaction,
     lender: &Signer,
 ) -> anyhow::Result<ConfidentialTransaction> {
-    build_liquidation_at(&Loan::accepted(setup.parameters, acceptance_tx), lender)
+    build_liquidation_at(setup, &Loan::accepted(setup, acceptance_tx), lender)
 }
 
 /// [`build_liquidation`] with the liquidation witness of `salt` and `expiry`, locked to
@@ -73,8 +79,8 @@ pub(super) fn build_liquidation_with(
     expiry: u32,
     lock_time: u32,
 ) -> anyhow::Result<ConfidentialTransaction> {
-    let loan = Loan::accepted(setup.parameters, acceptance_tx);
-    let mut ctx = build_liquidation_at(&loan, lender)?;
+    let loan = Loan::accepted(setup, acceptance_tx);
+    let mut ctx = build_liquidation_at(setup, &loan, lender)?;
 
     set_liquidation_witness(
         &mut ctx,

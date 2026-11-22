@@ -17,7 +17,7 @@ use crate::scan::parse;
 /// How to blind one pinned output of a PSET: an opaque handle from [`NewOffer`](crate::NewOffer)
 /// or [`OpenedOffer`].
 #[wasm_bindgen]
-pub struct PinnedBlinding(CorePinnedBlinding);
+pub struct PinnedBlinding(pub(crate) CorePinnedBlinding);
 
 impl PinnedBlinding {
     pub(crate) fn from_core(blinding: CorePinnedBlinding) -> Self {

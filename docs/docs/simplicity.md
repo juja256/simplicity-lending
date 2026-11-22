@@ -37,17 +37,19 @@ terms cannot change after it is published.
 **Parameters**, written `param::`, are fixed when the contract is created and become part of the
 resulting address. For a private lending offer they include the commitments of the collateral, the
 principal and the repayment, the repayment's asset commitment, the salted hash of the expiry, the
-asset IDs of the two role tokens, and the scripts the principal, the repayment and the installments
-must be paid to. Changing any of them produces a different address, so creating an offer with
-different terms means creating a different contract. The commitments pin the confidential outputs
+asset IDs of the two role tokens, the scripts the principal, the repayment and the installments
+must be paid to, and what the proof of each installment's release is checked against: the starting
+collateral and debt as curve points and the root of the loan's blinder commitments. Changing any
+of them produces a different address, so creating an offer with different terms means creating a
+different contract. The commitments pin the confidential outputs
 without revealing their assets and amounts. [Protocol and privacy](./private-loans/protocol.md)
 describes them.
 
 **Witness data**, written `witness::`, is provided at the moment the output is spent. In the private
 lending contract it chooses which action the transaction is attempting: accepting the offer,
-cancelling it, paying an installment, repaying the rest in full, closing a loan that owes nothing,
-or liquidating it. It also carries what the action needs and the contract checks: the debt the
-loan's storage holds, the key that closes a debt of zero, and for a liquidation the expiry and its
+cancelling it, paying an installment, repaying the rest in full, or liquidating it. It also carries
+what the action needs and the contract checks: the debt the loan's storage holds, for an
+installment the proof of the collateral it releases, and for a liquidation the expiry and its
 salt.
 
 An active loan's output also holds the debt in its storage, which is part of its address too. An
@@ -65,7 +67,9 @@ and amount commitments with the hash stored as a parameter. An expiry means chec
 the witness against the salted hash stored as a parameter, then comparing the transaction's block
 height with it. An installment computes with the commitments as curve points: it subtracts the
 installment's commitment from the debt, and adds the generator to the collateral's asset
-commitment, which re-blinds the collateral without changing its asset or amount.
+commitment, which re-blinds the collateral without changing its asset. It then checks a proof, in
+the witness, that the collateral the loan keeps is the share of it the debt left calls for: the
+rest goes back to the borrower.
 
 ## Several contracts in one transaction
 

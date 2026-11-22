@@ -15,6 +15,7 @@ import {
 import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from './deps'
+import type { OpenedOfferCache } from './offerCache'
 import { openAndVerifyOffer, PrivateOfferError, type VerifiedOffer } from './verify'
 
 export type OfferRole = 'lender' | 'borrower'
@@ -64,12 +65,17 @@ const SYNC_HEIGHT_TIP_SLACK = 2
  * unless its result is indeterminate (`INDETERMINATE_CODES`): it is checked again, by txid, in
  * its stored role. Nothing is saved if a request fails or a cheap check hits a local fault, so the
  * next sync scans the same heights again.
+ *
+ * With a `cache`, every offer that verifies is kept opened in it (it owns them: they are not
+ * freed here), an offer it already holds is not opened again, and the offers the state no longer
+ * lists are freed from it at the end.
  */
 export async function syncOffers(
   deps: PrivateFlowDeps,
   key: LendingKey,
   apiBaseUrl: string,
   store: ScanStore,
+  cache?: OpenedOfferCache,
 ): Promise<ScanState> {
   const fingerprint = key.fingerprint()
   const stored = await store.get(fingerprint)
@@ -80,7 +86,7 @@ export async function syncOffers(
   for (const [txid, stale] of Object.entries(offers)) {
     if (stale.result !== 'invalid' || !INDETERMINATE_CODES.has(stale.code)) continue
     try {
-      const result = await checkOffer(deps, key, txid, [stale.role], apiBaseUrl)
+      const result = await checkOffer(deps, key, txid, [stale.role], apiBaseUrl, cache)
       if (result === undefined) delete offers[txid]
       else offers[txid] = result
     } catch (error) {
@@ -116,7 +122,7 @@ export async function syncOffers(
     for (const candidate of fresh) {
       seen.add(candidate.creation_txid)
       if (offers[candidate.creation_txid] !== undefined) continue
-      const result = await scanCandidate(deps, key, candidate, apiBaseUrl)
+      const result = await scanCandidate(deps, key, candidate, apiBaseUrl, cache)
       if (result !== undefined) offers[candidate.creation_txid] = result
     }
     offset += page.items.length
@@ -128,6 +134,7 @@ export async function syncOffers(
       : lastIndexed
   const state: ScanState = { syncedHeight, offers }
   await store.set(fingerprint, state)
+  cache?.retain(Object.keys(offers))
   return state
 }
 
@@ -159,6 +166,24 @@ export async function loadVerifiedOffer(
     )
   }
   return openAndVerifyOffer(deps, role, key, hex)
+}
+
+/**
+ * Runs `read` with the offer of `txid` as `loadVerifiedOffer` loads it, kept in `cache` once opened
+ * and verified: a read of an offer the session opened already neither fetches nor opens it, and
+ * concurrent reads share one opening. The cache owns the offer, so `read` must not free it, keep
+ * it past its return, or hand it to a flow, which frees its offer (flows load theirs fresh).
+ */
+export function withVerifiedOffer<T>(
+  cache: OpenedOfferCache,
+  deps: PrivateFlowDeps,
+  key: LendingKey,
+  txid: string,
+  role: OfferRole,
+  apiBaseUrl: string,
+  read: (offer: VerifiedOffer) => Promise<T> | T,
+): Promise<T> {
+  return cache.use(txid, role, () => loadVerifiedOffer(deps, key, txid, role, apiBaseUrl), read)
 }
 
 /** The candidate's transaction as the indexer serves it, or undefined unless it has that txid. */
@@ -222,10 +247,11 @@ async function scanCandidate(
   key: LendingKey,
   candidate: PrivateCandidate,
   apiBaseUrl: string,
+  cache: OpenedOfferCache | undefined,
 ): Promise<ScanResult | undefined> {
   const roles = candidateRoles(deps, key, candidate)
   if (roles.length === 0) return undefined
-  return checkOffer(deps, key, candidate.creation_txid, roles, apiBaseUrl)
+  return checkOffer(deps, key, candidate.creation_txid, roles, apiBaseUrl, cache)
 }
 
 /**
@@ -239,14 +265,28 @@ async function checkOffer(
   txid: string,
   roles: OfferRole[],
   apiBaseUrl: string,
+  cache: OpenedOfferCache | undefined,
 ): Promise<ScanResult | undefined> {
+  // An offer this session already opened and verified, in the first role that has one.
+  const kept = roles.find(role => cache?.has(txid, role))
+  if (kept !== undefined) return { role: kept, result: 'verified' }
   const hex = await fetchCreationTx(deps, txid, apiBaseUrl)
   if (hex === undefined) return { role: roles[0], result: 'invalid', code: CREATION_TX_MISMATCH }
 
   for (const role of roles) {
-    let offer: VerifiedOffer
     try {
-      offer = await openAndVerifyOffer(deps, role, key, hex)
+      if (cache === undefined) {
+        // Only the result is stored: the opened offer holds the offer's secrets.
+        ;(await openAndVerifyOffer(deps, role, key, hex)).opened.free()
+      } else {
+        // Kept opened in the session's cache, which owns it; readers in flight share the opening.
+        await cache.use(
+          txid,
+          role,
+          () => openAndVerifyOffer(deps, role, key, hex),
+          () => {},
+        )
+      }
     } catch (error) {
       if (!(error instanceof PrivateOfferError)) {
         // The gate throws other errors only once the offer opened, while it builds the offer's
@@ -258,8 +298,6 @@ async function checkOffer(
       if (error.addressedToKey) return { role, result: 'invalid', code: error.code }
       continue
     }
-    // Only the result is kept: the opened offer holds the offer's secrets.
-    offer.opened.free()
     return { role, result: 'verified' }
   }
   return undefined

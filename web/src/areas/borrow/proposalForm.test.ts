@@ -15,6 +15,7 @@ import {
   editProposalForm,
   formatDay,
   loanAmounts,
+  offerBoundsErrors,
   openProposalForm,
   type ProposalFormState,
   proposalOfForm,
@@ -41,6 +42,10 @@ const PAIR: PairTermsInput = {
 const opened = () => openProposalForm(wasm, PAIR, PAIR_INFO)
 const edit = (state: ProposalFormState, field: keyof ProposalFormState['form'], value: string) =>
   editProposalForm(wasm, PAIR, PAIR_INFO, state, field, value)
+
+const TOO_MUCH_COLLATERAL = 'The collateral is more than a lender can accept: ask for less.'
+const TOO_MUCH_REPAYMENT =
+  'The repayment is more than a lender can accept: lower the principal or the APR.'
 
 describe('openProposalForm', () => {
   it("opens at the lender's minimums, the collateral the least for the least principal", () => {
@@ -139,6 +144,47 @@ describe('proposalOfForm', () => {
       wasm.minRepayment(5000n * 10n ** 8n, 725, 90 * BLOCKS_PER_DAY),
     )
     expect(result.proposal?.aprBps).toBe(725)
+  })
+
+  // Review focus 3, O9: the lender refuses collateral above 2^44 base units and a full repayment
+  // above 2^50 − 2, so the borrower's form does too. 2^44 base units of an asset with 8 decimals
+  // are 175,921.86044416.
+  it('takes collateral of 2^44 base units, and refuses one more', () => {
+    const form = {
+      principal: '5000',
+      days: '90',
+      collateral: '175921.86044416',
+      aprPercent: '7.25',
+    }
+    expect(proposalOfForm(wasm, PAIR, PAIR_INFO, form).proposal?.collateral).toBe(1n << 44n)
+    expect(
+      proposalOfForm(wasm, PAIR, PAIR_INFO, { ...form, collateral: '175921.86044417' }),
+    ).toEqual({
+      proposal: null,
+      errors: { collateral: TOO_MUCH_COLLATERAL },
+    })
+  })
+
+  // No pair of these terms reaches a repayment of 2^50 base units: the rule is checked directly.
+  it('takes a full repayment of 2^50 − 2 base units, and refuses one more', () => {
+    expect(offerBoundsErrors(wasm, 1n << 44n, (1n << 50n) - 2n)).toBeNull()
+    expect(offerBoundsErrors(wasm, 1n, (1n << 50n) - 1n)).toEqual({
+      aprPercent: TOO_MUCH_REPAYMENT,
+    })
+    expect(offerBoundsErrors(wasm, (1n << 44n) + 1n, (1n << 50n) - 1n)).toEqual({
+      collateral: TOO_MUCH_COLLATERAL,
+    })
+  })
+
+  // The text names the field that is out of bounds, and is right about which way: a collateral
+  // below 1 is not "above what a lender can accept".
+  it('says that a collateral or a repayment of zero is too little, not too much', () => {
+    expect(offerBoundsErrors(wasm, 0n, 11_000n)).toEqual({
+      collateral: 'The collateral must be more than zero.',
+    })
+    expect(offerBoundsErrors(wasm, 1n, 0n)).toEqual({
+      aprPercent: 'The repayment must be more than zero.',
+    })
   })
 
   it("refuses a message a byte over its limit with the counter's error, sends one at it", () => {

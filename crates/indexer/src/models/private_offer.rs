@@ -34,6 +34,9 @@ pub enum PrivateUtxoType {
     Repayment,
     /// Output 2 of an installment, a repayment that leaves part of the debt.
     Installment,
+    /// One of the two outputs that hold a loan's carry token: creation's output 4 holds the
+    /// whole supply, and each installment's outputs 3 and 4 hold the new carries.
+    Carry,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]

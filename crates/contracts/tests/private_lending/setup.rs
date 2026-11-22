@@ -3,7 +3,9 @@ use simplex::signer::Signer;
 use simplex::simplicityhl::elements::bitcoin::PublicKey;
 use simplex::simplicityhl::elements::confidential;
 use simplex::simplicityhl::elements::encode::serialize;
-use simplex::simplicityhl::elements::secp256k1_zkp::Secp256k1;
+use simplex::simplicityhl::elements::secp256k1_zkp::{
+    self, SECP256K1, Scalar, Secp256k1, SecretKey,
+};
 use simplex::simplicityhl::elements::{
     AssetId, OutPoint, Script, Transaction, TxOut, TxOutSecrets,
 };
@@ -17,16 +19,19 @@ use lending_contracts::programs::asset_auth::{
     AssetAuth, AssetAuthParameters, AssetAuthWitnessParams,
 };
 use lending_contracts::programs::private_lending::{
-    PrivateLendingOffer, PrivateLendingParameters, PrivateLendingWitnessBranch, add_nft_issuances,
-    verify_offer_as_borrower,
+    InstallmentOutputs, InstallmentRelease, PrivateLendingOffer, PrivateLendingParameters,
+    PrivateLendingWitnessBranch, add_nft_issuances, verify_offer_as_borrower,
+    verify_offer_as_lender,
 };
 use lending_contracts::programs::program::SimplexProgram;
 use lending_contracts::utils::confidential::{
     ConfidentialTransaction, ConfidentialTransactionError, PinnedOutput, PinnedOutputExt,
 };
 use private_lending_core::{
-    DebtOpening, LendingKey, Message, NewOffer, OfferTerms, SignedMessage, debt_after,
-    installment_ephemeral_key, lift_lending_key,
+    BlinderTree, DebtOpening, LendingKey, Message, NewOffer, OfferSecrets, OfferTerms,
+    ReleaseProof, ReleaseSecrets, ReleaseStatement, SignedMessage, asset_point, carry_remainder,
+    collateral_at, debt_after, installment_ephemeral_key, lift_lending_key, prove, release_j,
+    rewind, value_point,
 };
 
 use lending_contracts::utils::confidential::wait_for_confirmation;
@@ -65,7 +70,19 @@ pub(super) struct PrivateOfferSetup {
     pub creation_tx: Transaction,
     pub borrower_lending_key: LendingKey,
     pub lender_lending_key: LendingKey,
+    /// The offer's secrets, as the borrower built them.
+    pub secrets: OfferSecrets,
 }
+
+/// The output of a creation transaction that holds the carry supply.
+pub(super) const CARRY_SUPPLY_OUTPUT: usize = 4;
+/// The outputs of an installment that hold the successor loan, the installment and the carries.
+pub(super) const SUCCESSOR_OUTPUT: usize = 1;
+pub(super) const INSTALLMENT_OUTPUT: usize = 2;
+pub(super) const CARRY_OUTPUTS: [usize; 2] = [3, 4];
+/// The amount of the policy asset in the extra confidential output an installment that releases
+/// nothing gives the borrower (proofs, R2).
+const EXTRA_OUTPUT_AMOUNT: u64 = 1_000;
 
 pub(super) fn default_offer_parameters(
     context: &simplex::TestContext,
@@ -168,6 +185,21 @@ pub(super) fn unblind_with(signer: &Signer, txout: &TxOut) -> anyhow::Result<TxO
     let secp = Secp256k1::new();
 
     Ok(txout.unblind(&secp, signer.get_blinding_private_key().inner)?)
+}
+
+/// What the holder of `key` recovers by rewinding the range proof of `txout`, blinded to the key's
+/// lifted public key: the carries and their burns are blinded to the borrower's lending key.
+pub(super) fn open_with_lending_key(
+    key: &LendingKey,
+    txout: &TxOut,
+) -> anyhow::Result<TxOutSecrets> {
+    let nonce = txout
+        .nonce
+        .commitment()
+        .ok_or_else(|| anyhow::anyhow!("the output has no nonce"))?;
+    let shared_secret = OfferSecrets::for_lender(key, &nonce).shared_secret();
+
+    Ok(rewind(txout, shared_secret)?.0)
 }
 
 pub(super) fn fund_lender(
@@ -316,16 +348,22 @@ pub(super) fn setup_pending_private_offer_with(
     let lender_lending_key = LendingKey::from_master_blinding_key(&[2; 32]);
     let lender = lender_lending_key.x_only_public_key();
 
-    split_first_signer_utxo(context, vec![5000, 10000])?;
+    // the third coin issues the carry token and funds the collateral, so that the creation leaves
+    // the largest explicit coin to fund_lender
+    split_first_signer_utxo(
+        context,
+        vec![5000, 10000, 15000 + offer_parameters.collateral_amount],
+    )?;
 
     let principal_asset_id = issue_asset(context, TOTAL_PRINCIPAL_AMOUNT)?;
 
-    // the two smallest explicit coins issue the NFTs: fund_lender takes the largest one
+    // the three smallest explicit coins issue the NFTs and the carry token: fund_lender takes the
+    // largest one
     let mut coins =
         borrower.get_utxos_filter(&|utxo| utxo.explicit_asset() == policy_asset, &|_| false)?;
     coins.sort_by_key(UTXO::explicit_amount);
-    let [borrower_coin, lender_coin, ..] = coins.as_slice() else {
-        anyhow::bail!("the borrower needs two explicit coins to issue the NFTs");
+    let [borrower_coin, lender_coin, carry_coin, ..] = coins.as_slice() else {
+        anyhow::bail!("the borrower needs three explicit coins to issue the NFTs and the carries");
     };
     // input 0 of the creation transaction, the offer's first input
     let first_input = borrower_coin.outpoint;
@@ -360,8 +398,13 @@ pub(super) fn setup_pending_private_offer_with(
 
     let offer = PrivateLendingOffer::new_pending(parameters);
 
-    // the collateral comes from the finalizer's coin selection
-    offer.attach_creation(&mut ctx, &new_offer, borrower.get_address().script_pubkey());
+    // the collateral comes from the carry coin and the finalizer's coin selection
+    offer.attach_creation(
+        &mut ctx,
+        &new_offer,
+        borrower.get_address().script_pubkey(),
+        carry_coin.clone(),
+    );
 
     // an offer that does not verify would strand the collateral: check before broadcasting
     let creation_tx = ctx.finalize(borrower)?;
@@ -379,7 +422,22 @@ pub(super) fn setup_pending_private_offer_with(
         creation_tx,
         borrower_lending_key,
         lender_lending_key,
+        secrets: new_offer.secrets,
     })
+}
+
+/// What the lender knows of the offer from the creation transaction and its lending key alone:
+/// the parameters and the offer's secrets.
+pub(super) fn lender_view(
+    setup: &PrivateOfferSetup,
+) -> anyhow::Result<(PrivateLendingParameters, OfferSecrets)> {
+    let (opened, parameters) = verify_offer_as_lender(
+        &setup.lender_lending_key,
+        &setup.creation_tx,
+        setup.parameters.network,
+    )?;
+
+    Ok((parameters, opened.secrets))
 }
 
 /// The acceptance transaction, before finalization (the lender's view of the terms), its
@@ -485,26 +543,30 @@ pub(super) fn accept_private_offer_with(
 }
 
 /// A loan between two of its transactions: the offer in its current state, the output that holds
-/// it, and the opening of its debt, which the borrower tracks.
+/// it, opened as the collateral it holds, the opening of its debt, and its carries, which the
+/// borrower tracks.
 pub(super) struct Loan {
     pub offer: PrivateLendingOffer,
     pub utxo: UTXO,
     pub opening: DebtOpening,
+    /// The carries, opened: the creation's carry supply until the first installment, then the
+    /// last installment's outputs 3 and 4.
+    pub carries: Vec<UTXO>,
 }
 
 impl Loan {
-    /// The loan that `acceptance_tx` starts, whose debt is the pinned repayment.
-    pub(super) fn accepted(
-        parameters: PrivateLendingParameters,
-        acceptance_tx: &Transaction,
-    ) -> Loan {
+    /// The loan that `acceptance_tx` starts, whose debt is the pinned repayment and whose carry is
+    /// the creation's supply.
+    pub(super) fn accepted(setup: &PrivateOfferSetup, acceptance_tx: &Transaction) -> Loan {
+        let parameters = setup.parameters;
         let offer = PrivateLendingOffer::new_active(parameters);
-        let utxo = find_pinned_utxo(acceptance_tx, &offer.get_collateral());
+        let utxo = find_pinned_utxo(acceptance_tx, &parameters.pinned.active_collateral);
 
         Loan {
             offer,
             utxo,
             opening: DebtOpening::of(&parameters.pinned.repayment),
+            carries: vec![carry_supply(&setup.creation_tx)],
         }
     }
 
@@ -512,24 +574,42 @@ impl Loan {
         *self.offer.get_parameters()
     }
 
-    /// The loan that the installment `tx` of `payment` leaves, whose offer is `successor`.
+    /// The collateral the loan holds, `c_k`.
+    pub(super) fn collateral(&self) -> u64 {
+        self.utxo.amount()
+    }
+
+    /// The loan that the installment `tx` of `payment` leaves, with the outputs `outputs`.
     pub(super) fn after_installment(
         &self,
         tx: &Transaction,
-        successor: PrivateLendingOffer,
+        outputs: InstallmentOutputs,
         payment: DebtOpening,
     ) -> Loan {
-        let utxo = find_pinned_utxo(tx, &successor.get_collateral());
         let opening = self
             .opening
             .after(payment)
             .expect("an installment leaves part of the debt");
 
         Loan {
-            offer: successor,
-            utxo,
+            utxo: find_pinned_utxo(tx, &outputs.collateral),
+            offer: outputs.successor,
             opening,
+            carries: outputs
+                .carries
+                .iter()
+                .map(|carry| find_pinned_utxo(tx, carry))
+                .collect(),
         }
+    }
+}
+
+/// The carry supply of the creation transaction `creation_tx`, explicit.
+pub(super) fn carry_supply(creation_tx: &Transaction) -> UTXO {
+    UTXO {
+        outpoint: OutPoint::new(creation_tx.txid(), CARRY_SUPPLY_OUTPUT as u32),
+        txout: creation_tx.output[CARRY_SUPPLY_OUTPUT].clone(),
+        secrets: None,
     }
 }
 
@@ -541,7 +621,21 @@ pub(super) fn accepted_loan(
 
     let mut setup = setup_pending_private_offer(context, default_offer_parameters(context)?)?;
     let acceptance_tx = accept_private_offer(context, &mut setup, &lender)?;
-    let loan = Loan::accepted(setup.parameters, &acceptance_tx);
+    let loan = Loan::accepted(&setup, &acceptance_tx);
+
+    Ok((setup, lender, loan))
+}
+
+/// [`accepted_loan`] of an offer with `offer_parameters`.
+pub(super) fn accepted_loan_with(
+    context: &simplex::TestContext,
+    offer_parameters: OfferParameters,
+) -> anyhow::Result<(PrivateOfferSetup, Signer, Loan)> {
+    let lender = context.random_signer();
+
+    let mut setup = setup_pending_private_offer(context, offer_parameters)?;
+    let acceptance_tx = accept_private_offer(context, &mut setup, &lender)?;
+    let loan = Loan::accepted(&setup, &acceptance_tx);
 
     Ok((setup, lender, loan))
 }
@@ -555,7 +649,8 @@ pub(super) fn lender_blinding_key(setup: &PrivateOfferSetup) -> PublicKey {
 }
 
 /// The borrower's lifted lending key: the blinding key of the acceptance's outputs as the app
-/// blinds them, with which the borrower reads the lender's message on the principal.
+/// blinds them, with which the borrower reads the lender's message on the principal, and of the
+/// carries and their burns.
 pub(super) fn borrower_blinding_key(setup: &PrivateOfferSetup) -> PublicKey {
     PublicKey::new(lift_lending_key(
         &setup.borrower_lending_key.x_only_public_key(),
@@ -617,57 +712,126 @@ pub(super) fn borrower_nft(
     Ok(borrower.get_utxos_asset(parameters.borrower_nft_asset_id)?[0].clone())
 }
 
-/// The collateral back to `borrower`, blinded to its wallet.
+/// `amount` of the collateral to `receiver`, blinded to its wallet.
 pub(super) fn collateral_to(
-    borrower: &Signer,
+    receiver: &Signer,
     parameters: &PrivateLendingParameters,
+    amount: u64,
 ) -> PartialOutput {
     PartialOutput::new(
-        borrower.get_confidential_address().script_pubkey(),
-        parameters.pinned.active_collateral.amount,
+        receiver.get_confidential_address().script_pubkey(),
+        amount,
         parameters.pinned.active_collateral.asset_id,
     )
-    .with_blinding_key(borrower.get_blinding_public_key())
+    .with_blinding_key(receiver.get_blinding_public_key())
+}
+
+/// `amount` of `asset` back to `signer`, blinded, if it is not 0.
+pub(super) fn add_change(
+    ctx: &mut ConfidentialTransaction,
+    signer: &Signer,
+    asset: AssetId,
+    amount: u64,
+) {
+    if amount > 0 {
+        ctx.add_output(
+            PartialOutput::new(
+                signer.get_confidential_address().script_pubkey(),
+                amount,
+                asset,
+            )
+            .with_blinding_key(signer.get_blinding_public_key()),
+        );
+    }
+}
+
+/// The proofs' R2: an installment that releases nothing gives the borrower one more confidential
+/// output in the release's place, here of the policy asset, so that the number of outputs does not
+/// tell whether it released collateral.
+fn add_extra_borrower_output(ctx: &mut ConfidentialTransaction, borrower: &Signer) {
+    let policy_asset = borrower.get_provider().get_network().policy_asset();
+
+    add_change(ctx, borrower, policy_asset, EXTRA_OUTPUT_AMOUNT);
 }
 
 /// The installment of `payment` on `loan`, before finalization, built with `attach_installment`:
-/// the borrower NFT returns to the borrower's address, and a principal coin of the borrower pays,
-/// its change back to the borrower. The installment carries the borrower's `message`. Returns the
-/// transaction and the offer it leaves.
+/// the borrower NFT returns to the borrower's address, a principal coin of the borrower pays
+/// (input 2), the loan's carries follow, the release goes to the borrower's wallet (or, when
+/// nothing is released, an extra output of R2), and the principal's change returns to the
+/// borrower. The installment carries the borrower's `message`. Returns the transaction and the
+/// outputs it leaves.
 pub(super) fn build_installment(
     setup: &PrivateOfferSetup,
     loan: &Loan,
     borrower: &Signer,
     payment: DebtOpening,
     message: Option<&SignedMessage>,
-) -> anyhow::Result<(ConfidentialTransaction, PrivateLendingOffer)> {
+) -> anyhow::Result<(ConfidentialTransaction, InstallmentOutputs)> {
+    build_installment_to(
+        setup,
+        loan,
+        borrower,
+        payment,
+        message,
+        lender_blinding_key(setup),
+    )
+}
+
+/// [`build_installment`] with the installment and the successor blinded to `lender_key`, with the
+/// installment's nonce derived for it only when `lender_key` is the lender's: a borrower who builds
+/// its own transactions can blind them to a stranger.
+pub(super) fn build_installment_to(
+    setup: &PrivateOfferSetup,
+    loan: &Loan,
+    borrower: &Signer,
+    payment: DebtOpening,
+    message: Option<&SignedMessage>,
+    lender_key: PublicKey,
+) -> anyhow::Result<(ConfidentialTransaction, InstallmentOutputs)> {
     let parameters = loan.parameters();
     let installment = repayment_output(&parameters, payment);
     let coin = coin_of(borrower, installment.asset_id, installment.amount)?;
+    let change = coin.amount() - installment.amount;
     let nft_receiver = borrower.get_address().script_pubkey();
-    let ephemeral_sk = installment_ephemeral_key(
-        &setup.borrower_lending_key,
-        loan.utxo.outpoint,
-        coin.outpoint,
-        &nft_receiver,
-    );
+    let ephemeral_sk = if lender_key == lender_blinding_key(setup) {
+        installment_ephemeral_key(
+            &setup.borrower_lending_key,
+            loan.utxo.outpoint,
+            coin.outpoint,
+            &nft_receiver,
+        )
+    } else {
+        SecretKey::new(&mut rand::thread_rng())
+    };
 
     let mut ctx = ConfidentialTransaction::new();
 
-    let successor = loan.offer.attach_installment(
+    let outputs = loan.offer.attach_installment(
         &mut ctx,
         borrower_nft(borrower, &parameters)?,
         loan.utxo.clone(),
         nft_receiver,
         installment,
-        lender_blinding_key(setup),
+        lender_key,
         ephemeral_sk,
         message,
+        InstallmentRelease {
+            borrower: &setup.borrower_lending_key,
+            secrets: &setup.secrets,
+            debt: loan.opening,
+            principal_coins: vec![coin],
+            carries: loan.carries.clone(),
+            release_receiver: borrower.get_confidential_address().script_pubkey(),
+            release_blinding_key: borrower.get_blinding_public_key(),
+        },
     );
 
-    add_coin_and_change(&mut ctx, borrower, coin, installment.amount);
+    if outputs.release == 0 {
+        add_extra_borrower_output(&mut ctx, borrower);
+    }
+    add_change(&mut ctx, borrower, installment.asset_id, change);
 
-    Ok((ctx, successor))
+    Ok((ctx, outputs))
 }
 
 /// Broadcasts the installment of `payment` on `loan`; returns the transaction and the loan it
@@ -689,20 +853,39 @@ pub(super) fn pay_installment_with(
     payment: DebtOpening,
     message: Option<&SignedMessage>,
 ) -> anyhow::Result<(Transaction, Loan)> {
-    let (ctx, successor) = build_installment(setup, loan, borrower, payment, message)?;
+    let (ctx, outputs) = build_installment(setup, loan, borrower, payment, message)?;
     let tx = broadcast(&ctx, borrower)?;
-    let next = loan.after_installment(&tx, successor, payment);
+    let next = loan.after_installment(&tx, outputs, payment);
 
     Ok((tx, next))
 }
 
+/// `Y = x·G + y·J`, the blinder commitment of the blinders `x` and `y`.
+pub(super) fn blinder_commitment(x: &SecretKey, y: &SecretKey) -> secp256k1_zkp::PublicKey {
+    let y_j = release_j()
+        .mul_tweak(SECP256K1, &Scalar::from(*y))
+        .expect("a nonzero multiple of a curve point");
+
+    secp256k1_zkp::PublicKey::from_secret_key(SECP256K1, x)
+        .combine(&y_j)
+        .expect("not the point at infinity")
+}
+
 /// The witness, the first input and the outputs of an installment, which its failure tests
-/// change. [`InstallmentParts::honest`] gives those of [`build_installment`], with the successor's
-/// storage and collateral from the core's `debt_after` and `collateral_after`.
+/// change. [`InstallmentParts::honest`] gives those of [`build_installment`], computed here from
+/// the core's arithmetic and derivations, so the core and the covenant check each other.
 #[derive(Clone)]
 pub(super) struct InstallmentParts {
     /// The debt the loan input's witness claims: the loan's.
     pub debt: confidential::Value,
+    /// The step the witness claims, the loan's.
+    pub step: u32,
+    /// The leaf whose Merkle path the witness carries: the step's.
+    pub leaf: u32,
+    /// `Y`, the blinder commitment the witness carries: `Y_(step + 1)`.
+    pub blinder_commitment: secp256k1_zkp::PublicKey,
+    /// The release proof of the honest outputs.
+    pub proof: ReleaseProof,
     /// Input 0 and output 0: the borrower NFT, back to the borrower.
     pub first_input: UTXO,
     pub first_output: PartialOutput,
@@ -712,61 +895,197 @@ pub(super) struct InstallmentParts {
     /// Output 2: the installment.
     pub installment_script: Script,
     pub installment: PinnedOutput,
+    /// Outputs 3 and 4: the carries.
+    pub carry_scripts: [Script; 2],
+    pub carries: [PinnedOutput; 2],
+    /// Whether output 3 is explicit.
+    pub explicit_carry: bool,
 }
 
 impl InstallmentParts {
+    /// The parts of the honest installment of `payment` on `loan`.
     pub(super) fn honest(
+        setup: &PrivateOfferSetup,
         loan: &Loan,
         borrower: &Signer,
         payment: DebtOpening,
     ) -> anyhow::Result<InstallmentParts> {
         let parameters = loan.parameters();
+        let pinned = parameters.pinned;
+        let (collateral, full) = (pinned.active_collateral.amount, pinned.repayment.amount);
         let installment = repayment_output(&parameters, payment);
-        let next = loan.offer.get_installments() + 1;
+        let step = loan.offer.get_installments();
         let left = debt_after(&loan.offer.get_debt(), &installment.value_commitment())?;
+        let debt_left = loan
+            .opening
+            .after(payment)
+            .expect("part of the debt is left");
+        let held = collateral_at(debt_left.amount, collateral, full);
+        let e = carry_remainder(debt_left.amount, collateral, full);
+        let carry_asset = loan.carries[0].asset();
+        let carry_lock = parameters
+            .get_principal_output_asset_auth()
+            .get_script_pubkey();
+        let (x, y) = setup.secrets.release_blinders(step + 1);
 
-        Ok(InstallmentParts {
+        let mut parts = InstallmentParts {
             debt: loan.offer.get_debt(),
+            step,
+            leaf: step,
+            blinder_commitment: blinder_commitment(&x, &y),
+            proof: ReleaseProof {
+                t: [blinder_commitment(&x, &y); 7],
+                z: [Scalar::ZERO; 11],
+            },
             first_input: borrower_nft(borrower, &parameters)?,
             first_output: PartialOutput::new(
                 borrower.get_address().script_pubkey(),
                 1,
                 parameters.borrower_nft_asset_id,
             ),
-            successor_script: PrivateLendingOffer::new_active_at(parameters, left, next)
+            successor_script: PrivateLendingOffer::new_active_at(parameters, left, step + 1)
                 .get_script_pubkey(),
-            successor_collateral: parameters.pinned.collateral_after(next),
+            successor_collateral: parameters.loan_collateral(&setup.secrets, step + 1, held),
             installment_script: parameters
                 .get_installment_output_asset_auth()
                 .get_script_pubkey(),
             installment,
-        })
+            carry_scripts: [carry_lock.clone(), carry_lock],
+            carries: [e + 1, full - e].map(|amount| PinnedOutput::new_random(carry_asset, amount)),
+            explicit_carry: false,
+        };
+        let secrets = parts.honest_secrets(setup, loan, (x, y));
+        parts.prove(setup, &secrets);
+
+        Ok(parts)
+    }
+
+    /// The secrets of these parts as an honest borrower computes them, with the blinders
+    /// `blinders` of the successor's step: `c'` and `e` from the debt that output 2 leaves, the
+    /// carries' value blinders from outputs 3 and 4.
+    pub(super) fn honest_secrets(
+        &self,
+        setup: &PrivateOfferSetup,
+        loan: &Loan,
+        blinders: (SecretKey, SecretKey),
+    ) -> ReleaseSecrets {
+        let pinned = setup.parameters.pinned;
+        let debt_left = loan
+            .opening
+            .after(DebtOpening::of(&self.installment))
+            .expect("part of the debt is left");
+
+        ReleaseSecrets::new(
+            &pinned.active_collateral,
+            &pinned.repayment,
+            debt_left,
+            blinders,
+            (
+                self.carries[0].value_blinding_factor,
+                self.carries[1].value_blinding_factor,
+            ),
+        )
+    }
+
+    /// The statement of these parts, every point read from their commitments as the program
+    /// reads them ([`statement_of`]).
+    pub(super) fn statement(&self, parameters: &PrivateLendingParameters) -> ReleaseStatement {
+        let [first, second] = self.carries;
+
+        statement_of(
+            parameters,
+            &self.debt,
+            &self.installment.value_commitment(),
+            &self.successor_collateral.value_commitment(),
+            [
+                (first.asset_commitment(), first.value_commitment()),
+                (second.asset_commitment(), second.value_commitment()),
+            ],
+            self.blinder_commitment,
+        )
+    }
+
+    /// Replaces the proof with the borrower's proof of these parts' statement with `secrets`.
+    pub(super) fn prove(&mut self, setup: &PrivateOfferSetup, secrets: &ReleaseSecrets) {
+        let statement = self.statement(&setup.parameters);
+
+        self.proof = prove(&statement, secrets, &setup.borrower_lending_key);
+    }
+
+    /// The installment witness of these parts.
+    pub(super) fn witness(&self, setup: &PrivateOfferSetup) -> PrivateLendingWitnessBranch {
+        PrivateLendingWitnessBranch::Installment {
+            debt: self.debt,
+            step: self.step,
+            blinder_commitment: self.blinder_commitment,
+            path: BlinderTree::new(&setup.secrets).path(self.leaf),
+            proof: self.proof,
+        }
+    }
+}
+
+/// The release proof's statement of an installment, every point read from the commitments as the
+/// program reads them: `D' = D − V` from the witness's debt `debt` and output 2's `installment`,
+/// `V_s` from output 1's `successor`, `W1`, `A_w1`, `W2` and `A_w2` from outputs 3 and 4's
+/// `carries`, each `(asset, value)`, and `Y` from the witness. The loan's points are the
+/// parameters'.
+pub(super) fn statement_of(
+    parameters: &PrivateLendingParameters,
+    debt: &confidential::Value,
+    installment: &confidential::Value,
+    successor: &confidential::Value,
+    carries: [(confidential::Asset, confidential::Value); 2],
+    y: secp256k1_zkp::PublicKey,
+) -> ReleaseStatement {
+    let points = parameters.statement_points();
+    let value = |value: &confidential::Value| value_point(value).expect("a value commitment");
+    let asset = |asset: &confidential::Asset| asset_point(asset).expect("an asset commitment");
+    let debt_left = debt_after(debt, installment).expect("the installment leaves a debt");
+    let [(first_asset, first_value), (second_asset, second_value)] = carries;
+
+    ReleaseStatement {
+        a: points.repayment_asset,
+        a_c: points.collateral_asset,
+        v_c0: points.collateral_value,
+        d0: points.starting_debt,
+        d_next: value(&debt_left),
+        v_s: value(successor),
+        w1: value(&first_value),
+        a_w1: asset(&first_asset),
+        w2: value(&second_value),
+        a_w2: asset(&second_asset),
+        y,
     }
 }
 
 /// An installment on `loan` built by hand from `parts`, before finalization, where
 /// [`build_installment`] uses `attach_installment`: the loan input takes the installment witness
-/// of `parts.debt`, and a principal coin of the borrower pays what output 2 holds of the principal
-/// asset.
+/// of `parts`, a principal coin of the borrower pays what output 2 holds of the principal asset
+/// (input 2), and the loan's carries follow. The free outputs balance the parts: the collateral
+/// that output 1 does not hold goes to the borrower, and the carry units outputs 3 and 4 do not
+/// hold are burned.
 pub(super) fn build_installment_with(
     setup: &PrivateOfferSetup,
     loan: &Loan,
     parts: &InstallmentParts,
     borrower: &Signer,
 ) -> anyhow::Result<ConfidentialTransaction> {
-    let principal_asset = loan.parameters().pinned.repayment.asset_id;
+    let parameters = loan.parameters();
+    let principal_asset = parameters.pinned.repayment.asset_id;
     let paid = if parts.installment.asset_id == principal_asset {
         parts.installment.amount
     } else {
         0
     };
     let coin = coin_of(borrower, principal_asset, paid)?;
+    let change = coin.amount() - paid;
     let ephemeral_sk = installment_ephemeral_key(
         &setup.borrower_lending_key,
         loan.utxo.outpoint,
         coin.outpoint,
         &parts.first_output.script_pubkey,
     );
+    let borrower_key = borrower_blinding_key(setup);
 
     let mut ctx = ConfidentialTransaction::new();
 
@@ -779,7 +1098,7 @@ pub(super) fn build_installment_with(
     loan.offer.add_program_input(
         &mut ctx,
         loan.utxo.clone(),
-        PrivateLendingWitnessBranch::Installment { debt: parts.debt }.build_witness(),
+        parts.witness(setup).build_witness(),
     );
     ctx.add_pinned_output(
         parts.successor_script.clone(),
@@ -793,16 +1112,60 @@ pub(super) fn build_installment_with(
         ephemeral_sk,
         Vec::new(),
     );
+    for (index, (script, carry)) in parts.carry_scripts.iter().zip(parts.carries).enumerate() {
+        if index == 0 && parts.explicit_carry {
+            ctx.add_output(PartialOutput::new(
+                script.clone(),
+                carry.amount,
+                carry.asset_id,
+            ));
+        } else {
+            ctx.add_pinned_output(script.clone(), carry, borrower_key);
+        }
+    }
 
-    add_coin_and_change(&mut ctx, borrower, coin, paid);
+    ctx.add_input(PartialInput::new(coin), RequiredSignature::NativeEcdsa);
+    add_carry_inputs(&mut ctx, &parameters, loan.carries.clone());
+
+    let released = loan.collateral() - parts.successor_collateral.amount;
+    add_change(
+        &mut ctx,
+        borrower,
+        parameters.pinned.active_collateral.asset_id,
+        released,
+    );
+    let carried: u64 = loan.carries.iter().map(UTXO::amount).sum();
+    let leftover = carried - parts.carries.iter().map(|carry| carry.amount).sum::<u64>();
+    if leftover > 0 {
+        ctx.add_pinned_output(
+            Script::new_op_return(b"burn"),
+            PinnedOutput::new_random(loan.carries[0].asset(), leftover),
+            borrower_key,
+        );
+    }
+    add_change(&mut ctx, borrower, principal_asset, change);
 
     Ok(ctx)
 }
 
+/// Adds `carries` as inputs, each unlocked by the borrower NFT at input 0 and output 0.
+fn add_carry_inputs(
+    ctx: &mut ConfidentialTransaction,
+    parameters: &PrivateLendingParameters,
+    carries: Vec<UTXO>,
+) {
+    let carry_lock = parameters.get_principal_output_asset_auth();
+
+    for carry in carries {
+        carry_lock.attach_unlocking(ctx, carry, AssetAuthWitnessParams::new(0, 0));
+    }
+}
+
 /// The full repayment of `loan`, before finalization, built with `attach_full_repayment`: the
-/// borrower pays the rest of the debt from a principal coin and takes the collateral back
-/// (output 2).
+/// borrower pays the rest of the debt from a principal coin (input 2), takes the collateral back
+/// (output 2) and sweeps the carries (inputs 3 on) into a confidential burn.
 pub(super) fn build_full_repayment(
+    setup: &PrivateOfferSetup,
     loan: &Loan,
     borrower: &Signer,
     lender_blinding_key: PublicKey,
@@ -824,15 +1187,18 @@ pub(super) fn build_full_repayment(
         lender_blinding_key,
     );
 
-    ctx.add_output(collateral_to(borrower, &parameters));
+    ctx.add_output(collateral_to(borrower, &parameters, loan.collateral()));
     add_coin_and_change(&mut ctx, borrower, coin, loan.opening.amount);
+    loan.offer
+        .attach_carry_sweep(&mut ctx, loan.carries.clone(), borrower_blinding_key(setup));
 
     Ok(ctx)
 }
 
 /// A full repayment of `loan` built by hand, before finalization: the loan input takes the full
 /// repayment witness of `debt_hash` and the lender is paid `repayment`, where
-/// `attach_full_repayment` takes the loan's debt hash and pays the opening of its debt.
+/// `attach_full_repayment` takes the loan's debt hash and pays the opening of its debt. The carries
+/// are not swept.
 pub(super) fn build_full_repayment_with(
     loan: &Loan,
     borrower: &Signer,
@@ -867,7 +1233,7 @@ pub(super) fn build_full_repayment_with(
         lender_blinding_key,
     );
 
-    ctx.add_output(collateral_to(borrower, &parameters));
+    ctx.add_output(collateral_to(borrower, &parameters, loan.collateral()));
     add_coin_and_change(&mut ctx, borrower, coin, repayment.amount);
 
     Ok(ctx)

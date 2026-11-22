@@ -12,5 +12,5 @@ mod offer_full_repayment_success_flows;
 mod offer_installment_flows;
 mod offer_liquidation_success_flows;
 mod parity_fixture;
+mod release_proof_jets;
 mod setup;
-mod zero_debt_close_flows;

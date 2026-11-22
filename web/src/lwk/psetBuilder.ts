@@ -63,6 +63,12 @@ export interface PsetOutputSpec {
 // without one. The fee is still estimated on a blinded trial copy.
 const MAX_FEE_RATE_SAT_PER_KVB = 1_000_000
 
+/**
+ * A confidential burn's stand-in in the fee estimate's trial copy: a P2WPKH script (22 bytes), the
+ * shortest that has an address form, longer than any `OP_RETURN "burn"` the flows blind.
+ */
+const TRIAL_BURN_SCRIPT_HEX = `0014${'00'.repeat(20)}`
+
 export type PsetBlinding = 'local' | 'wallet' | 'none'
 
 export interface BuildPsetParams {
@@ -134,7 +140,14 @@ function assemble(params: BuildPsetParams, change: bigint, fee: bigint, trial: b
   ]
   const blinderIndex = trial ? 0 : outputBlinderIndex(params)
   for (const output of outputs) {
-    let outputBuilder = PsetOutputBuilder.newExplicit(output.script, output.amount, output.asset)
+    // LWK's blinding refuses an `OP_RETURN` with a blinding key, which the caller blinds itself
+    // (`none`): the trial copy gives it a spendable script of an address form instead, a few
+    // bytes longer, so the estimate is a little high, never low.
+    const script =
+      trial && output.blindingPubkey && output.script.isProvablyUnspendable()
+        ? new Script(TRIAL_BURN_SCRIPT_HEX)
+        : output.script
+    let outputBuilder = PsetOutputBuilder.newExplicit(script, output.amount, output.asset)
     if (output.blindingPubkey) {
       outputBuilder = outputBuilder.blindingPubkey(output.blindingPubkey).blinderIndex(blinderIndex)
     }

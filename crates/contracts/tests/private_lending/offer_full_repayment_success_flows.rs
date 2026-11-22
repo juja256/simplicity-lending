@@ -1,6 +1,8 @@
+use private_lending_core::CARRY_SUPPLY;
+
 use super::setup::{
-    Loan, accept_private_offer, assert_confidential, broadcast, build_full_repayment,
-    claim_asset_auth_output, default_offer_parameters, find_pinned_utxo,
+    Loan, accept_private_offer, assert_confidential, broadcast, build_full_repayment, carry_supply,
+    claim_asset_auth_output, default_offer_parameters, find_pinned_utxo, open_with_lending_key,
     setup_pending_private_offer, simplicity_spend, unblind_with,
 };
 
@@ -20,9 +22,9 @@ fn private_offer_full_repayment_pays_pinned_repayment(
 
     let acceptance_tx = accept_private_offer(&context, &mut setup, &lender)?;
 
-    let loan = Loan::accepted(parameters, &acceptance_tx);
+    let loan = Loan::accepted(&setup, &acceptance_tx);
     let repayment_tx = broadcast(
-        &build_full_repayment(&loan, borrower, lender.get_blinding_public_key())?,
+        &build_full_repayment(&setup, &loan, borrower, lender.get_blinding_public_key())?,
         borrower,
     )?;
     simplicity_spend("FullRepayment", &repayment_tx, FULL_REPAYMENT_LOAN_INPUT)?;
@@ -50,6 +52,22 @@ fn private_offer_full_repayment_pays_pinned_repayment(
     assert_eq!(
         collateral_return_secrets.value,
         pinned.active_collateral.amount
+    );
+
+    // before any installment the carry is the creation's supply: the borrower NFT (input 0)
+    // unlocks it after the principal coin (input 3), and its units burn in a confidential
+    // OP_RETURN, which the borrower opens
+    let supply = carry_supply(&setup.creation_tx);
+    assert_eq!(repayment_tx.input[3].previous_output, supply.outpoint);
+    let burn = repayment_tx
+        .output
+        .iter()
+        .find(|txout| txout.script_pubkey.is_op_return() && txout.value.is_confidential())
+        .ok_or_else(|| anyhow::anyhow!("the carries are not burned"))?;
+    let burned = open_with_lending_key(&setup.borrower_lending_key, burn)?;
+    assert_eq!(
+        (burned.asset, burned.value),
+        (supply.explicit_asset(), CARRY_SUPPLY)
     );
 
     // the lender decrypts its repayment with its blinding key

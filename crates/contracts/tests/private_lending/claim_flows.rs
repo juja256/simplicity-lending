@@ -1,9 +1,9 @@
 //! The lender's claims. The lender presents the lender NFT to claim installments, one at a time,
-//! and keeps it. The final claim, after the full repayment or the zero-debt close, burns it and
-//! sweeps every unclaimed installment with the combined opening, so that the lender receives `R`
-//! whatever the borrower's range proofs hold. A liquidation has no combined opening: the lender
-//! computes the loan's storage from the chain, without opening any installment, and sweeps the
-//! installments that open.
+//! and keeps it. The final claim, after the full repayment, burns it and sweeps every unclaimed
+//! installment with the combined opening, so that the lender receives `R` whatever the borrower's
+//! range proofs hold. A liquidation has no combined opening: the lender computes the loan's
+//! storage from the chain, opens the collateral by the search, without opening any installment,
+//! and sweeps the installments that open.
 
 use simplex::signer::Signer;
 use simplex::simplicityhl::elements::bitcoin::PublicKey;
@@ -15,20 +15,15 @@ use simplex::transaction::UTXO;
 use lending_contracts::programs::asset_auth::AssetAuthWitnessParams;
 use lending_contracts::programs::private_lending::{PrivateLendingOffer, PrivateLendingParameters};
 use lending_contracts::programs::program::SimplexProgram;
-use lending_contracts::utils::confidential::ConfidentialTransaction;
-use lending_contracts::utils::op_return_payload;
-use private_lending_core::{
-    DebtOpening, InstallmentError, debt_after, sweep_opening, zero_debt_blinder,
-};
+use private_lending_core::{DebtOpening, InstallmentError, debt_after, sweep_opening};
 
 use super::offer_installment_flows::{open_as_lender, random_payment};
 use super::offer_liquidation_success_flows::build_liquidation_of;
 use super::setup::{
-    Loan, PrivateOfferSetup, accepted_loan, add_coin_and_change, add_locked_outputs, borrower_nft,
-    broadcast, build_full_repayment, claim_locked_outputs, coin_of, find_pinned_utxo,
-    lender_blinding_key, mine_until, pay_installment, repayment_output, unblind_with,
+    Loan, PrivateOfferSetup, accepted_loan, add_locked_outputs, broadcast, build_full_repayment,
+    build_installment_to, claim_locked_outputs, lender_blinding_key, lender_view, mine_until,
+    pay_installment, repayment_output, unblind_with,
 };
-use super::zero_debt_close_flows::build_zero_debt_close;
 
 /// The output of an installment that pays the lender.
 const INSTALLMENT_OUTPUT: u32 = 2;
@@ -82,32 +77,16 @@ fn lender_opening(setup: &PrivateOfferSetup, txout: &TxOut) -> anyhow::Result<Op
 /// random nonce. So is the successor loan's, which nobody rewinds: both parties derive its
 /// blinders. Returns the transaction and the loan it leaves.
 fn pay_unopenable_installment(
+    setup: &PrivateOfferSetup,
     loan: &Loan,
     borrower: &Signer,
     payment: DebtOpening,
 ) -> anyhow::Result<(Transaction, Loan)> {
-    let parameters = loan.parameters();
-    let installment = repayment_output(&parameters, payment);
-    let coin = coin_of(borrower, installment.asset_id, installment.amount)?;
-    let mut rng = rand::thread_rng();
-    let stranger = PublicKey::new(SecretKey::new(&mut rng).public_key(SECP256K1));
+    let stranger = PublicKey::new(SecretKey::new(&mut rand::thread_rng()).public_key(SECP256K1));
 
-    let mut ctx = ConfidentialTransaction::new();
-
-    let successor = loan.offer.attach_installment(
-        &mut ctx,
-        borrower_nft(borrower, &parameters)?,
-        loan.utxo.clone(),
-        borrower.get_address().script_pubkey(),
-        installment,
-        stranger,
-        SecretKey::new(&mut rng),
-        None,
-    );
-    add_coin_and_change(&mut ctx, borrower, coin, installment.amount);
-
+    let (ctx, outputs) = build_installment_to(setup, loan, borrower, payment, None, stranger)?;
     let tx = broadcast(&ctx, borrower)?;
-    let next = loan.after_installment(&tx, successor, payment);
+    let next = loan.after_installment(&tx, outputs, payment);
 
     Ok((tx, next))
 }
@@ -241,8 +220,9 @@ fn final_claim_sweeps_unopenable_installments_after_full_repayment(
     let claimed = claim_one_installment(&setup, &lender, &opened)?;
 
     // two that it cannot open, then the full repayment of the rest
-    let (first, loan) = pay_unopenable_installment(&loan, borrower, random_payment(2_000))?;
-    let (second, loan) = pay_unopenable_installment(&loan, borrower, random_payment(3_000))?;
+    let (first, loan) = pay_unopenable_installment(&setup, &loan, borrower, random_payment(2_000))?;
+    let (second, loan) =
+        pay_unopenable_installment(&setup, &loan, borrower, random_payment(3_000))?;
     for tx in [&first, &second] {
         assert_eq!(
             lender_opening(&setup, &tx.output[INSTALLMENT_OUTPUT as usize])?,
@@ -250,13 +230,13 @@ fn final_claim_sweeps_unopenable_installments_after_full_repayment(
         );
     }
     let repayment_tx = broadcast(
-        &build_full_repayment(&loan, borrower, lender_blinding_key(&setup))?,
+        &build_full_repayment(&setup, &loan, borrower, lender_blinding_key(&setup))?,
         borrower,
     )?;
 
     // the unclaimed installments and the repayment add up to the debt at acceptance less the
     // claimed installment
-    let sweep = sweep_opening(DebtOpening::of(&repayment), &[claimed], None)
+    let sweep = sweep_opening(DebtOpening::of(&repayment), &[claimed])
         .expect("the claimed installment is below the debt");
     assert_eq!(sweep.amount, repayment.amount - 1_500);
     let claim_tx = claim_locked_outputs(
@@ -301,75 +281,6 @@ fn final_claim_sweeps_unopenable_installments_after_full_repayment(
 }
 
 #[simplex::test]
-fn final_claim_sweeps_after_a_zero_debt_close(context: simplex::TestContext) -> anyhow::Result<()> {
-    let provider = context.get_default_provider();
-    let borrower = context.get_default_signer();
-    let (setup, lender, loan) = accepted_loan(&context)?;
-    let parameters = setup.parameters;
-    let repayment = parameters.pinned.repayment;
-    let installment_lock = parameters.get_installment_output_asset_auth();
-    assert_eq!(balance(&lender, repayment.asset_id)?, 0);
-
-    // two installments that the lender cannot open
-    let (first, loan) = pay_unopenable_installment(&loan, borrower, random_payment(2_000))?;
-    let (second, loan) = pay_unopenable_installment(&loan, borrower, random_payment(3_000))?;
-    for tx in [&first, &second] {
-        assert_eq!(
-            lender_opening(&setup, &tx.output[INSTALLMENT_OUTPUT as usize])?,
-            None
-        );
-    }
-    // then one of all the amount left under another blinder than the debt's, which the lender
-    // opens and claims: the debt is `k·G`, and no amount is owed
-    let (last, loan) =
-        pay_installment(&setup, &loan, borrower, random_payment(loan.opening.amount))?;
-    assert_eq!(loan.opening.amount, 0);
-    let claimed = claim_one_installment(&setup, &lender, &last)?;
-
-    let close_tx = broadcast(&build_zero_debt_close(&loan, borrower)?, borrower)?;
-
-    // the lender reads `k` from output 1 of the close, and the debt the close spent from the
-    // chain, and recovers the debt's blinder
-    let key: [u8; 32] = op_return_payload(&close_tx.output[1].script_pubkey)
-        .ok_or_else(|| anyhow::anyhow!("output 1 of the close is not an OP_RETURN"))?
-        .try_into()?;
-    let debt = lender_debt(&parameters, &[&first, &second, &last])?;
-    let blinder = zero_debt_blinder(&key, &debt)?;
-
-    // the unclaimed installments add up to the debt at acceptance less the claimed installment
-    // and the debt the close spent
-    let sweep = sweep_opening(DebtOpening::of(&repayment), &[claimed], Some(blinder))
-        .expect("two installments are left to sweep");
-    assert_eq!(sweep.amount, 5_000);
-    let claim_tx = claim_locked_outputs(
-        &lender,
-        &installment_lock,
-        &swept(
-            &parameters,
-            vec![installment_of(&first), installment_of(&second)],
-            sweep,
-        ),
-        true,
-    )?;
-
-    // the lender NFT is burned, and the lender holds R
-    assert!(claim_tx.output[0].script_pubkey.is_op_return());
-    assert!(
-        lender
-            .get_utxos_asset(parameters.lender_nft_asset_id)?
-            .is_empty()
-    );
-    assert_eq!(balance(&lender, repayment.asset_id)?, repayment.amount);
-    assert!(
-        provider
-            .fetch_scripthash_utxos(&installment_lock.get_script_pubkey())?
-            .is_empty()
-    );
-
-    Ok(())
-}
-
-#[simplex::test]
 fn lender_liquidates_a_loan_it_cannot_open(context: simplex::TestContext) -> anyhow::Result<()> {
     let provider = context.get_default_provider();
     let borrower = context.get_default_signer();
@@ -380,17 +291,23 @@ fn lender_liquidates_a_loan_it_cannot_open(context: simplex::TestContext) -> any
     assert_eq!(balance(&lender, pinned.repayment.asset_id)?, 0);
 
     let (first, loan) = pay_installment(&setup, &loan, borrower, random_payment(1_000))?;
-    let (second, loan) = pay_unopenable_installment(&loan, borrower, random_payment(2_000))?;
-    let (third, _) = pay_installment(&setup, &loan, borrower, random_payment(1_500))?;
+    let (second, loan) =
+        pay_unopenable_installment(&setup, &loan, borrower, random_payment(2_000))?;
+    let (third, loan) = pay_installment(&setup, &loan, borrower, random_payment(1_500))?;
     let installments = [&first, &second, &third];
 
     // the lender's view, from `D₀` and the installments' value commitments alone: the loan's
-    // storage after three installments, at the address of the loan's output, which holds the
-    // collateral the offer derives for that state
-    let debt = lender_debt(&parameters, &installments)?;
-    let offer = PrivateLendingOffer::new_active_at(parameters, debt, installments.len() as u32);
+    // storage after three installments, at the address of the loan's output
+    let (lender_parameters, lender_secrets) = lender_view(&setup)?;
+    let debt = lender_debt(&lender_parameters, &installments)?;
+    let offer =
+        PrivateLendingOffer::new_active_at(lender_parameters, debt, installments.len() as u32);
     assert_eq!(third.output[1].script_pubkey, offer.get_script_pubkey());
-    let loan_utxo = find_pinned_utxo(&third, &offer.get_collateral());
+    let loan_utxo = UTXO {
+        outpoint: OutPoint::new(third.txid(), 1),
+        txout: third.output[1].clone(),
+        secrets: None,
+    };
 
     // the installments that open with the lender's key
     let mut opened = Vec::new();
@@ -402,9 +319,12 @@ fn lender_liquidates_a_loan_it_cannot_open(context: simplex::TestContext) -> any
     assert_eq!(opened.len(), 2);
 
     // after the term, the liquidation burns the lender NFT (input 1, output 0), takes the
-    // collateral (output 1) and sweeps the installments that open (inputs 2…, output 2)
+    // collateral (output 1), which the search opens, and sweeps the installments that open
+    // (inputs 2…, output 2)
     mine_until(&context, parameters.loan_expiration_time + 1)?;
-    let mut ctx = build_liquidation_of(&offer, loan_utxo, &lender)?;
+    let (mut ctx, collateral) = build_liquidation_of(&offer, loan_utxo, &lender, &lender_secrets)?;
+    assert_eq!(Some(collateral.secrets()), loan.utxo.secrets);
+    assert!(collateral.amount < pinned.active_collateral.amount);
     add_locked_outputs(
         &mut ctx,
         &lender,
@@ -420,13 +340,10 @@ fn lender_liquidates_a_loan_it_cannot_open(context: simplex::TestContext) -> any
             .get_utxos_asset(parameters.lender_nft_asset_id)?
             .is_empty()
     );
-    let collateral = unblind_with(&lender, &liquidation_tx.output[1])?;
+    let taken = unblind_with(&lender, &liquidation_tx.output[1])?;
     assert_eq!(
-        (collateral.asset, collateral.value),
-        (
-            pinned.active_collateral.asset_id,
-            pinned.active_collateral.amount
-        )
+        (taken.asset, taken.value),
+        (pinned.active_collateral.asset_id, loan.collateral())
     );
     assert_eq!(balance(&lender, pinned.repayment.asset_id)?, 2_500);
     // the installment that does not open stays, stranded now that the lender NFT is burned

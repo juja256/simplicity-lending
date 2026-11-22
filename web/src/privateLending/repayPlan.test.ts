@@ -4,10 +4,15 @@ import { FINALIZED_THRESHOLD, type PrivateTxRecord } from '@/providers/pendingTr
 import { lwk } from '@/test/lwk'
 
 import {
+  checkSameLoan,
   INSTALLMENT_AFTER_TERM_NOTE,
+  INSTALLMENT_LIMIT_NOTE,
   INSTALLMENT_UNSENT_AFTER_TERM_NOTE,
+  installmentRebuildRefusal,
   installmentTraceInputs,
+  installmentTraces,
   keepsDiscardTrace,
+  LOAN_CHANGED_NOTE,
   repayBroadcast,
   repayPlan,
   staleInstallmentRecords,
@@ -17,8 +22,8 @@ const EXPIRY = 3_000_000
 /** 1,100 TEST owed, in base units of an asset with 2 decimals. */
 const OWED = 110_000n
 
-/** The plan of `amountText` on a loan that owes `OWED`, at `tipHeight`. */
-function planOf(amountText: string, tipHeight = EXPIRY - 1440) {
+/** The plan of `amountText` on a loan that owes `OWED`, at `tipHeight`, after `installmentCount`. */
+function planOf(amountText: string, tipHeight = EXPIRY - 1440, installmentCount = 3) {
   return repayPlan({
     remaining: OWED,
     amountText,
@@ -26,6 +31,7 @@ function planOf(amountText: string, tipHeight = EXPIRY - 1440) {
     symbol: 'TEST',
     tipHeight,
     expiry: EXPIRY,
+    installmentCount,
   })
 }
 
@@ -62,6 +68,22 @@ describe('repayPlan', () => {
     )
   })
 
+  // Step 1024 has no leaf for the next installment: the contract refuses one there.
+  it('offers only the full repayment once the loan has had 1,024 installments', () => {
+    expect(planOf('1099.99', EXPIRY - 1440, 1023)).toEqual({
+      kind: 'installment',
+      amount: OWED - 1n,
+    })
+    for (const count of [1024, 1025]) {
+      expect(planOf('1099.99', EXPIRY - 1440, count)).toEqual({
+        kind: 'refused',
+        message: INSTALLMENT_LIMIT_NOTE,
+      })
+      expect(planOf('1100', EXPIRY - 1440, count)).toEqual({ kind: 'full', amount: OWED })
+    }
+    expect(INSTALLMENT_LIMIT_NOTE).toContain('1,024 installments')
+  })
+
   it('refuses an installment while the tip is unknown, and still repays in full', () => {
     expect(planOf('500', 0)).toMatchObject({ kind: 'refused' })
     expect(planOf('1100', 0)).toEqual({ kind: 'full', amount: OWED })
@@ -70,6 +92,18 @@ describe('repayPlan', () => {
 
 // Review focus 4, for a saved installment: the form's plan for its amount turns `refused` at the
 // expiry, so the saved record's kind must keep its check and block it.
+// The form shows what the loan owes and the collateral it releases for the loan output it read;
+// a build on a newer one would pay on figures the borrower did not see.
+describe('the loan a payment builds on', () => {
+  it("is the form's loan output, or the payment is refused", () => {
+    expect(() => checkSameLoan(`${'aa'.repeat(32)}:1`, `${'aa'.repeat(32)}:1`)).not.toThrow()
+    expect(() => checkSameLoan(`${'aa'.repeat(32)}:1`, `${'bb'.repeat(32)}:1`)).toThrow(
+      LOAN_CHANGED_NOTE,
+    )
+    expect(() => checkSameLoan(undefined, `${'bb'.repeat(32)}:1`)).toThrow(LOAN_CHANGED_NOTE)
+  })
+})
+
 describe('the broadcast of the repay form', () => {
   const installment = { kind: 'private_installment' } as const
   const repayment = { kind: 'private_repay_offer' } as const
@@ -152,7 +186,6 @@ describe('an earlier installment of the loan', () => {
     expect(keepsDiscardTrace({ kind: 'private_installment' })).toBe(true)
     for (const kind of [
       'private_repay_offer',
-      'private_zero_debt_close',
       'private_accept_offer',
       'private_create_offer',
     ] as const) {
@@ -238,5 +271,62 @@ describe('the traces a finalized spend of their loan output makes stale', () => 
     expect(staleInstallmentRecords(lwk, [discarded, tracked, repayment], depthOf)).toEqual([
       discarded,
     ])
+  })
+})
+
+describe('a rebuild of a loan state', () => {
+  const nft = `${'01'.repeat(32)}:0`
+  const firstCoin = `${'02'.repeat(32)}:3`
+  const secondCoin = `${'03'.repeat(32)}:0`
+  const earlier = (amount: bigint | undefined, firstWalletInput = firstCoin) => ({
+    txid: 'ee'.repeat(32),
+    firstWalletInput,
+    amount,
+  })
+
+  it('gives each installment of the loan output once, and nothing else', () => {
+    const first = record('private_installment', [nft, LOAN, firstCoin])
+    const other = record('private_installment', [nft, OTHER_LOAN, secondCoin])
+    const repayment = record('private_repay_offer', [nft, LOAN, secondCoin])
+    expect(installmentTraces(lwk, [first, other, repayment, first], LOAN)).toEqual([first])
+    expect(installmentTraces(lwk, [first, other], OTHER_LOAN)).toEqual([other])
+  })
+
+  // The design note's rule (proofs, L1): two builds at one step share the successor's blinder.
+  it('builds the first of a loan state freely', () => {
+    expect(installmentRebuildRefusal([], 500n, firstCoin)).toBeUndefined()
+  })
+
+  it('rebuilds only with the same amount, from a first wallet input no build used', () => {
+    expect(installmentRebuildRefusal([earlier(500n)], 500n, secondCoin)).toBeUndefined()
+    expect(
+      installmentRebuildRefusal(
+        [earlier(500n), earlier(500n, secondCoin)],
+        500n,
+        `${'04'.repeat(32)}:1`,
+      ),
+    ).toBeUndefined()
+    // another amount, one unit off either way
+    for (const amount of [499n, 501n]) {
+      expect(installmentRebuildRefusal([earlier(500n)], amount, secondCoin)).toMatch(
+        /paid 500 base units: a new one must pay exactly that/,
+      )
+    }
+    // the same amount from a first wallet input an earlier build used, the latest or another
+    expect(installmentRebuildRefusal([earlier(500n)], 500n, firstCoin)).toMatch(
+      `started from the coin ${firstCoin}`,
+    )
+    expect(
+      installmentRebuildRefusal([earlier(500n, secondCoin), earlier(500n)], 500n, firstCoin),
+    ).toMatch(`started from the coin ${firstCoin}`)
+  })
+
+  it('refuses any rebuild after a build whose amount does not read back', () => {
+    expect(installmentRebuildRefusal([earlier(undefined)], 500n, secondCoin)).toMatch(
+      /does not read back with your key/,
+    )
+    expect(
+      installmentRebuildRefusal([earlier(500n), earlier(undefined)], 500n, secondCoin),
+    ).toMatch(/does not read back/)
   })
 })

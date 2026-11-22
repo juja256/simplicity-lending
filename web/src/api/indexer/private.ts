@@ -44,9 +44,11 @@ export const privateOfferStatusSchema = zod.enum([
 export type PrivateOfferStatus = zod.infer<typeof privateOfferStatusSchema>
 
 /**
- * `active_offer` is the loan: an installment spends it and leaves its successor at output 1 and the
- * `installment` at output 2. `repayment` is the full repayment's output; a zero-debt close leaves
- * none.
+ * `active_offer` is the loan: an installment spends it and leaves its successor at output 1, the
+ * `installment` at output 2 and the new `carry` outputs at outputs 3 and 4. The creation's output
+ * 4, the carry supply, is the loan's first `carry`; an installment, the full repayment or the
+ * cancellation spends the carries. `repayment` is the full repayment's output. The indexer checks
+ * only the layout: the app verifies each carry on chain before spending it.
  */
 export const privateUtxoTypeSchema = zod.enum([
   'pending_offer',
@@ -54,6 +56,7 @@ export const privateUtxoTypeSchema = zod.enum([
   'principal',
   'repayment',
   'installment',
+  'carry',
 ])
 export type PrivateUtxoType = zod.infer<typeof privateUtxoTypeSchema>
 
