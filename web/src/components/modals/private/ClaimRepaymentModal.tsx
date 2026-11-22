@@ -3,7 +3,7 @@ import { useMemo } from 'react'
 
 import { loanBookFigures } from '@/areas/lend/bookSummary'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
-import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
+import { finalClaimWeightUnits } from '@/privateLending/actionWeights'
 import { closedLoanUtxo, unspentUtxo, utxoOutpoint } from '@/privateLending/candidate'
 import { findLenderNft } from '@/privateLending/flows/claimInstallments'
 import { buildFinalClaim, closedLoanOutpoint } from '@/privateLending/flows/claimRepayment'
@@ -12,10 +12,6 @@ import { esploraSpentBy } from '@/privateLending/hooks/usePrivateFlowDeps'
 import { loadLoan } from '@/privateLending/loan'
 import { selectFeeCoins } from '@/privateLending/wallet'
 import { useWallet } from '@/providers/wallet/useWallet'
-import {
-  ASSET_AUTH_BURN_MAX_WEIGHT_TO_SATISFY,
-  ASSET_AUTH_MAX_WEIGHT_TO_SATISFY,
-} from '@/simplicity/asset-auth/witness'
 
 import PrivateOfferActionShell, {
   type FreshOffer,
@@ -54,14 +50,10 @@ export default function ClaimRepaymentModal(props: PrivateOfferActionModalProps)
       .filter(installment => installment.spent_txid === null)
       .map(utxoOutpoint)
     const lenderNftOutpoint = await findLenderNft(deps, offer, fresh, esploraSpentBy)
-    // The lender NFT, the repayment at its asset_auth (burn) after a full repayment, and each
-    // installment at its own.
-    const repaymentWeight =
-      unspentUtxo(candidate, 'repayment') === undefined ? 0 : ASSET_AUTH_BURN_MAX_WEIGHT_TO_SATISFY
-    const weightUnits =
-      EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY +
-      repaymentWeight +
-      unspentInstallments.length * ASSET_AUTH_MAX_WEIGHT_TO_SATISFY
+    const weightUnits = finalClaimWeightUnits(
+      unspentUtxo(candidate, 'repayment') !== undefined,
+      unspentInstallments.length,
+    )
     const feeCoins = selectFeeCoins(
       deps.walletUtxos(),
       deps.assets.policy,

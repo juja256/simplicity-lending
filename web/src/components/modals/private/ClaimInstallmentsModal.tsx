@@ -2,7 +2,7 @@ import { Chip } from '@heroui/react'
 import { useMemo } from 'react'
 
 import { useFormatAmount } from '@/hooks/useFormatAmount'
-import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
+import { installmentClaimWeightUnits } from '@/privateLending/actionWeights'
 import { utxoOutpoint } from '@/privateLending/candidate'
 import {
   buildInstallmentClaim,
@@ -15,7 +15,6 @@ import { loadLoan } from '@/privateLending/loan'
 import { claimableInstallments } from '@/privateLending/offerView'
 import { selectFeeCoins } from '@/privateLending/wallet'
 import { useWallet } from '@/providers/wallet/useWallet'
-import { ASSET_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/asset-auth/witness'
 
 import PrivateOfferActionShell, {
   type FreshOffer,
@@ -48,12 +47,10 @@ export default function ClaimInstallmentsModal(props: PrivateOfferActionModalPro
       throw new Error('The indexer lists no unclaimed installment that opens with your key')
     }
     const lenderNftOutpoint = await findLenderNft(deps, offer, fresh, esploraSpentBy)
-    // The lender NFT, and each installment at its asset_auth (no burn).
     const feeCoins = selectFeeCoins(
       deps.walletUtxos(),
       deps.assets.policy,
-      EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY +
-        installments.length * ASSET_AUTH_MAX_WEIGHT_TO_SATISFY,
+      installmentClaimWeightUnits(installments.length),
       deps.feeRate,
     )
     return buildInstallmentClaim(deps, offer, fresh, {

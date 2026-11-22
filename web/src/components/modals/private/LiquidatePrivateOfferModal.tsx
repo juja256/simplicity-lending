@@ -5,7 +5,7 @@ import { useBlockHeight } from '@/api/esplora/hooks'
 import { fetchLatestBlockHeight } from '@/api/esplora/methods'
 import Notice from '@/components/Notice'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
-import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
+import { liquidationWeightUnits } from '@/privateLending/actionWeights'
 import { utxoOutpoint } from '@/privateLending/candidate'
 import { findCollateralInWorker } from '@/privateLending/collateralSearch'
 import { findLenderNft } from '@/privateLending/flows/claimInstallments'
@@ -15,17 +15,11 @@ import { loadLoan } from '@/privateLending/loan'
 import { isPastExpiry } from '@/privateLending/offerView'
 import { selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
 import { useWallet } from '@/providers/wallet/useWallet'
-import { ASSET_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/asset-auth/witness'
-import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
 
 import PrivateOfferActionShell, {
   type FreshOffer,
   type PrivateOfferActionModalProps,
 } from './PrivateOfferActionShell'
-
-// The active offer (Liquidation), and the lender NFT, a wallet output.
-const LIQUIDATE_WEIGHT_UNITS =
-  PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.Liquidation + EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY
 
 /**
  * The lender takes the collateral of an expired loan, burning its lender NFT, and sweeps the
@@ -57,7 +51,7 @@ export default function LiquidatePrivateOfferModal(props: PrivateOfferActionModa
     const feeCoins = selectFeeCoins(
       deps.walletUtxos(),
       deps.assets.policy,
-      LIQUIDATE_WEIGHT_UNITS + unspentInstallments.length * ASSET_AUTH_MAX_WEIGHT_TO_SATISFY,
+      liquidationWeightUnits(unspentInstallments.length),
       deps.feeRate,
     )
     return buildPrivateLiquidation(deps, offer, loan, {

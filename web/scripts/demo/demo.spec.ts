@@ -591,7 +591,8 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     await expect(await bookCell(mainLoan, 'Claimable')).toHaveText('–', { timeout: CHAIN_TIMEOUT })
     await expect(claim).toHaveCount(0)
 
-    // The borrower repays the rest, which closes the loan.
+    // The borrower repays the rest, which closes the loan, gives back the collateral the
+    // installment left and burns the loan's carries.
     await repay.click()
     await expect(amount).toHaveValue(unitsToDecimal(rest, PRINCIPAL.decimals), {
       timeout: 2 * MINUTE,
