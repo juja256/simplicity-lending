@@ -5,7 +5,7 @@
 use std::fmt::Display;
 
 use elements::hex::{FromHex, ToHex};
-use private_lending_core::{CreationError, OpenError};
+use private_lending_core::{CreationError, OpenError, ReleaseError};
 
 /// The error string `<code>: <message>`.
 pub(crate) fn err(code: &str, message: impl Display) -> String {
@@ -21,6 +21,12 @@ pub(crate) fn bad_input(message: impl Display) -> String {
 /// installments, or as its close, is not the loan's.
 pub(crate) fn loan_mismatch(message: impl Display) -> String {
     err("loan-mismatch", message)
+}
+
+/// An `out-of-bounds` error: the collateral or the repayment is outside the bounds of
+/// proportional release, `1 ≤ C ≤ 2^44` and `1 ≤ R ≤ 2^50 − 2`.
+pub(crate) fn out_of_bounds(error: ReleaseError) -> String {
+    err("out-of-bounds", error)
 }
 
 /// The code of an open error. `view-tag-mismatch`, `not-mine` and `rewind-failed` mean the offer

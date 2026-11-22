@@ -7,7 +7,10 @@ use wasm_bindgen::prelude::*;
 use crate::blind::PinnedBlinding;
 use crate::error::{bad_input, encode_hex};
 use crate::keys::LendingKey;
-use crate::open::{ContractArguments, PinnedOutputInfo, PinnedRole, message_text, pinned_output};
+use crate::open::{
+    ContractArguments, PinnedOutputInfo, PinnedRole, SharedTree, check_offer_bounds, message_text,
+    pinned_output, tree_of,
+};
 use crate::scan::parse;
 
 /// The terms of an offer to build; validated by [`NewOffer::build`].
@@ -42,6 +45,7 @@ impl OfferTermsInput {
 #[wasm_bindgen]
 pub struct NewOffer {
     pub(crate) inner: CoreNewOffer,
+    tree: SharedTree,
 }
 
 #[wasm_bindgen]
@@ -51,7 +55,8 @@ impl NewOffer {
     /// `message` to the lender in the signed terms.
     ///
     /// `bad-input` for an empty message, and for one longer than 2915 bytes (UTF-8), naming its
-    /// length and the limit.
+    /// length and the limit. `out-of-bounds` for a collateral or a repayment the lender would
+    /// refuse (`checkOfferBounds`).
     pub fn build(
         borrower: &LendingKey,
         lender_x_only: &str,
@@ -77,7 +82,11 @@ impl NewOffer {
             message,
         )
         .map_err(bad_input)?;
-        Ok(Self { inner })
+        check_offer_bounds(collateral_amount, terms.0.repayment_amount)?;
+        Ok(Self {
+            inner,
+            tree: SharedTree::default(),
+        })
     }
 
     /// The 37-byte marker for the `OP_RETURN` output, hex.
@@ -85,12 +94,15 @@ impl NewOffer {
         encode_hex(&self.inner.marker.encode())
     }
 
+    /// The arguments of the offer's contract. The first call builds the offer's tree of blinder
+    /// commitments, which the offer keeps.
     #[wasm_bindgen(js_name = contractArguments)]
-    pub fn contract_arguments(&self) -> ContractArguments {
+    pub fn contract_arguments(&self) -> Result<ContractArguments, String> {
         ContractArguments::new(
             &self.inner.signed_terms.terms,
             &self.inner.pinned,
             &self.inner.secrets,
+            tree_of(&self.tree, &self.inner.secrets),
         )
     }
 
@@ -144,7 +156,7 @@ pub(crate) mod tests {
     use crate::blind::{InputSecret, blind_pset};
     use crate::error::encode_hex;
     use crate::keys::LendingKey;
-    use crate::open::open_creation_as_lender_hex;
+    use crate::open::{open_creation_as_borrower_hex, open_creation_as_lender_hex};
     use elements::encode::serialize;
     use elements::hashes::Hash;
     use elements::pset::{Input, Output, PartiallySignedTransaction};
@@ -178,6 +190,10 @@ pub(crate) mod tests {
     }
 
     fn terms_input(principal: u64) -> OfferTermsInput {
+        terms_repaying(principal, 11_000)
+    }
+
+    fn terms_repaying(principal: u64, repayment: u64) -> OfferTermsInput {
         let borrower_nft = issued_asset_id(
             &first_input().to_string(),
             &ContractHash::from_byte_array(BORROWER_HASH).to_string(),
@@ -191,7 +207,7 @@ pub(crate) mod tests {
         OfferTermsInput::new(
             &asset(0xaa).to_string(),
             principal,
-            11_000,
+            repayment,
             1_000,
             1_000,
             &borrower_nft,
@@ -307,7 +323,10 @@ pub(crate) mod tests {
             .unwrap();
 
         let opened = open_creation_as_lender_hex(&key(2), &encode_hex(&serialize(&tx))).unwrap();
-        let (a, b) = (opened.contract_arguments(), offer.contract_arguments());
+        let (a, b) = (
+            opened.contract_arguments().unwrap(),
+            offer.contract_arguments().unwrap(),
+        );
         assert_eq!(a.borrower_nft_asset_id(), b.borrower_nft_asset_id());
         assert_eq!(a.lender_nft_asset_id(), b.lender_nft_asset_id());
         assert_eq!(
@@ -322,6 +341,8 @@ pub(crate) mod tests {
         assert_eq!(a.repayment_commitment(), b.repayment_commitment());
         assert_eq!(a.loan_expiration_time(), b.loan_expiration_time());
         assert_eq!(a.expiry_hash(), b.expiry_hash());
+        assert_eq!(a.fs_iv(), b.fs_iv());
+        assert_eq!(a.blinder_root(), b.blinder_root());
         assert_eq!(opened.lender_public_key(), offer.lender_public_key());
     }
 
@@ -413,5 +434,89 @@ pub(crate) mod tests {
             .err()
             .unwrap();
         assert!(error.starts_with("bad-input:"), "{error}");
+    }
+
+    /// An offer of `collateral` that repays `repayment`.
+    fn offer_of(collateral: u64, repayment: u64) -> Result<NewOffer, String> {
+        NewOffer::build(
+            &key(1),
+            &key(2).x_only_public_key(),
+            &first_input().to_string(),
+            &asset(0xcc).to_string(),
+            collateral,
+            &terms_repaying(10_000, repayment),
+            None,
+        )
+    }
+
+    #[test]
+    fn an_offer_outside_the_bounds_opens_only_for_its_borrower() {
+        // an offer whose repayment is one above the bound, which the core alone builds
+        let terms = terms_repaying(10_000, (1 << 50) - 1);
+        let inner = CoreNewOffer::build(
+            key(1).inner(),
+            &key(2).inner().x_only_public_key(),
+            &first_input(),
+            crate::program_id(),
+            asset(0xcc),
+            50_000,
+            terms.0,
+            None,
+        )
+        .unwrap();
+        let offer = NewOffer {
+            inner,
+            tree: SharedTree::default(),
+        };
+        let (pset, secrets) = creation_pset(&offer);
+        let blinded = blind_pset(
+            &pset.to_string(),
+            secrets,
+            vec![offer.collateral_blinding(3)],
+        )
+        .unwrap();
+        let tx = blinded
+            .parse::<PartiallySignedTransaction>()
+            .unwrap()
+            .extract_tx()
+            .unwrap();
+
+        // the lender does not open it; its borrower does, so that it can still cancel it, but
+        // the bounds check refuses it and no loan of it reads
+        let hex = encode_hex(&serialize(&tx));
+        let error = open_creation_as_lender_hex(&key(2), &hex).err().unwrap();
+        assert!(error.starts_with("out-of-bounds:"), "{error}");
+        let opened = open_creation_as_borrower_hex(&key(1), &hex).unwrap();
+        let error = opened.check_offer_bounds().unwrap_err();
+        assert!(error.starts_with("out-of-bounds:"), "{error}");
+        let error = opened.loan_state(&key(1), "zz", Vec::new()).err().unwrap();
+        assert!(error.starts_with("out-of-bounds:"), "{error}");
+    }
+
+    #[test]
+    fn the_borrower_builds_no_offer_outside_the_bounds() {
+        const MAX_COLLATERAL: u64 = 1 << 44;
+        const MAX_REPAYMENT: u64 = (1 << 50) - 2;
+
+        // the largest collateral and repayment the lender accepts, and one more of either
+        assert!(offer_of(MAX_COLLATERAL, MAX_REPAYMENT).is_ok());
+        assert!(crate::open::check_offer_bounds(MAX_COLLATERAL, MAX_REPAYMENT).is_ok());
+        for (collateral, repayment) in [
+            (MAX_COLLATERAL + 1, 11_000),
+            (50_000, MAX_REPAYMENT + 1),
+            (u64::MAX, u64::MAX),
+        ] {
+            let error = offer_of(collateral, repayment).err().unwrap();
+            assert!(error.starts_with("out-of-bounds:"), "{error}");
+            let error = crate::open::check_offer_bounds(collateral, repayment).unwrap_err();
+            assert!(error.starts_with("out-of-bounds:"), "{error}");
+        }
+        // zero amounts are the core's to refuse, as caller input
+        let error = offer_of(0, 11_000).err().unwrap();
+        assert!(error.starts_with("bad-input:"), "{error}");
+        for (collateral, repayment) in [(0, 1), (1, 0)] {
+            let error = crate::open::check_offer_bounds(collateral, repayment).unwrap_err();
+            assert!(error.starts_with("out-of-bounds:"), "{error}");
+        }
     }
 }

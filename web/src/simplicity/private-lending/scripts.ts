@@ -43,6 +43,19 @@ export interface PrivateOfferArguments {
    */
   repaymentAssetPrefixBit: number
   repaymentAssetX: string
+  /**
+   * The release proof's points fixed for the loan, each a curve point as its `x ‖ y` (64 bytes,
+   * hex): `A`, the active collateral's asset and value commitments `A_c` and `V_c0`, and the debt
+   * at acceptance `D₀`.
+   */
+  repaymentAssetPoint: string
+  collateralAssetPoint: string
+  collateralValuePoint: string
+  startingDebtPoint: string
+  /** The chaining value of the release proof's challenge (32 bytes, hex). */
+  fsIv: string
+  /** The root of the tree of the blinder commitments (32 bytes, hex). */
+  blinderRoot: string
 }
 
 export interface PrivateOfferScripts {
@@ -75,6 +88,12 @@ export function toPrivateOfferArguments(args: ContractArguments): PrivateOfferAr
     expiryHash: args.expiryHash,
     repaymentAssetPrefixBit: args.repaymentAssetPrefixBit,
     repaymentAssetX: args.repaymentAssetX,
+    repaymentAssetPoint: args.repaymentAssetPoint,
+    collateralAssetPoint: args.collateralAssetPoint,
+    collateralValuePoint: args.collateralValuePoint,
+    startingDebtPoint: args.startingDebtPoint,
+    fsIv: args.fsIv,
+    blinderRoot: args.blinderRoot,
   }
 }
 
@@ -103,6 +122,12 @@ function commitment(prefixBit: number, x: string): SimplicityTypedValue {
     SimplicityTypedValue.fromBoolean(prefixBit === 1),
     u256(x),
   ])
+}
+
+/** A curve point as the program takes it, a `Ge`: its `x ‖ y` (64 bytes, hex) as `(x, y)`. */
+function point(hex: string): SimplicityTypedValue {
+  if (!isHexStringOfByteLength(hex, 64)) throw new Error('A point is 64 bytes of hex')
+  return SimplicityTypedValue.fromElements([u256(hex.slice(0, 64)), u256(hex.slice(64))])
 }
 
 /** The program's storage: whether the offer is active, and the debt hash, `h(A, D)`. */
@@ -183,7 +208,13 @@ export function privateOfferScripts(
       .addValue('REPAYMENT_ASSET', commitment(args.repaymentAssetPrefixBit, args.repaymentAssetX))
       .addValue('PRINCIPAL_OUTPUT_SCRIPT_HASH', u256(principalOutputScriptHash))
       .addValue('REPAYMENT_OUTPUT_SCRIPT_HASH', u256(repaymentOutputScriptHash))
-      .addValue('INSTALLMENT_OUTPUT_SCRIPT_HASH', u256(installmentOutputScriptHash)),
+      .addValue('INSTALLMENT_OUTPUT_SCRIPT_HASH', u256(installmentOutputScriptHash))
+      .addValue('REPAYMENT_ASSET_POINT', point(args.repaymentAssetPoint))
+      .addValue('COLLATERAL_ASSET_POINT', point(args.collateralAssetPoint))
+      .addValue('COLLATERAL_VALUE_POINT', point(args.collateralValuePoint))
+      .addValue('STARTING_DEBT_POINT', point(args.startingDebtPoint))
+      .addValue('FS_IV', u256(args.fsIv))
+      .addValue('BLINDER_ROOT', u256(args.blinderRoot)),
   )
 
   // Until the first installment, the debt is the pinned repayment.

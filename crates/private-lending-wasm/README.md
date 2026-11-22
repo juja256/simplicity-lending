@@ -39,17 +39,27 @@ panic outside wasm, so native tests call the same functions.
   `rewind-failed`.
 - Addressed to this key but invalid (show as invalid): `terms-invalid`, `collateral-mismatch`,
   `invalid-terms`, `lender-nft-not-unique`, `nft-output-mismatch`.
+- Outside the bounds of proportional release, `1 ≤ C ≤ 2^44` and `1 ≤ R ≤ 2^50 − 2`:
+  `out-of-bounds`, from `checkOfferBounds`, `NewOffer.build`, `openCreationAsLender` and
+  `loanState`. The lender must not accept such an offer: the release proof is sound only within
+  the bounds.
 - A transaction given as a loan's acceptance, installment or close that is not the loan's:
   `loan-mismatch`, naming the acceptance or the installment (from 1).
 - Bad caller input: `bad-input`.
+- A release proof that does not verify: `proof-invalid`, from `planInstallment`, a bug. The
+  installment must not be broadcast.
 
 The borrower's pre-broadcast self-check of an offer it just built must treat every code as fatal.
 
 ### Validity
 
 A successful `openCreationAsLender` / `openCreationAsBorrower` does not make an offer valid: the
-terms and the collateral are checked, but not the addresses. The address check,
-`verifyOfferAddresses` in `web/src/simplicity/private-lending/scripts.ts`, must also pass.
+terms and the collateral are checked, but not the bounds nor the addresses. Before accepting, the
+lender also runs `OpenedOffer.checkOfferBounds()` and the address check, `verifyOfferAddresses` in
+`web/src/simplicity/private-lending/scripts.ts`, with `contractArguments()`, which recomputes
+every argument, the release proof's points, `FS_IV` and `BLINDER_ROOT` included, from the shared
+secret and the terms (proofs, O9). `openCreationAsLender` already refuses an offer outside the
+bounds; `openCreationAsBorrower` opens it, so that its borrower can cancel it.
 
 ### Blinding
 
@@ -84,20 +94,28 @@ Opening:
 
 - `openCreationAsLender(key, creationTxHex)`, `openCreationAsBorrower(key, creationTxHex)`: open an
   offer into an `OpenedOffer`. Only terms of version 2, which carry the borrower's message, open;
-  any other version is `terms-invalid`.
+  any other version is `terms-invalid`. The lender's also refuses an offer outside the bounds of
+  release (`out-of-bounds`).
 - `OpenedOffer` getters: `principalAsset`, `principalAmount`, `repaymentAmount`, `interestRateBps`,
   `loanExpirationTime`, `borrowerNft`, `lenderNft`, `borrowerPublicKey`, `lenderPublicKey`,
   `collateralAsset`, `collateralAmount`, `firstInput`.
 - `OpenedOffer.borrowerBlindingKey()`, `OpenedOffer.lenderBlindingKey()`: the lifted keys.
-- `OpenedOffer.contractArguments()`: the `ContractArguments` of the offer's contract.
+- `OpenedOffer.contractArguments()`: the `ContractArguments` of the offer's contract. Besides the
+  phase 5 arguments it has the release proof's `repaymentAssetPoint`, `collateralAssetPoint`,
+  `collateralValuePoint` and `startingDebtPoint` (curve points as `x ‖ y`, 64 bytes, hex), `fsIv`
+  and `blinderRoot`. The first call builds the offer's tree of blinder commitments (2,048 scalar
+  multiplications); the offer keeps it, and its loan states and plans share it.
+- `OpenedOffer.checkOfferBounds()`, `checkOfferBounds(collateral, repayment)`: the bounds of
+  proportional release, `out-of-bounds` outside them. `carrySupply()`: the carry token's supply,
+  `S = 2^50`, which the creation issues at input 2 and holds, explicit, at output 4.
 - `OpenedOffer.pinned(role)`: the `PinnedOutputInfo` (asset, amount, blinders, commitments) of a
   `PinnedRole`.
 
 Building and blinding:
 
 - `OfferTermsInput`, `NewOffer.build(..., terms, message?)`: validate terms and build an offer,
-  with the borrower's message to the lender in the signed terms; `marker()`,
-  `contractArguments()`, `pinned(role)`, `lenderPublicKey()`.
+  with the borrower's message to the lender in the signed terms (`out-of-bounds` outside the bounds
+  of release); `marker()`, `contractArguments()`, `pinned(role)`, `lenderPublicKey()`.
 - `NewOffer.collateralBlinding(outputIndex)`, `NewOffer.collateralBlindingKey()`: how and to which
   key to blind the creation's collateral output.
 - `issuedAssetId(outpoint, contractHash)`: the id of an asset before its issuing transaction exists.
@@ -119,28 +137,66 @@ Loans:
 
 - `OpenedOffer.loanState(key, acceptanceTxHex, installmentTxHexes)`: the `LoanState` after the
   acceptance and the installments, read with the lending key of the party that opened the offer.
-  The acceptance must spend the creation's pending offer (output 3) at input 0 and hold the active
-  collateral at output 0. Each installment must spend the previous loan output at input 1, hold
-  the collateral after it at output 1 and pay `A` at output 2. The scripts are the caller's to
-  check, against `activeOfferAt(state.debtHashAt(j))` in
-  `web/src/simplicity/private-lending/scripts.ts`.
+  `out-of-bounds` for an offer outside the bounds of release. The acceptance must spend the
+  creation's pending offer (output 3) at input 0 and hold the active collateral at output 0. Each
+  installment must spend the previous loan output at input 1, pay `A` at output 2, and hold at
+  output 1 the collateral of its step `j`: the asset commitment `A_c + j·G` always, and exactly
+  `c_j = ceil(d_j·C/R)` with the step's blinders when the party knows the debt `d_j`. A loan has at
+  most 1024 installments. The scripts are the caller's to check, against
+  `activeOfferAt(state.debtHashAt(j))` in `web/src/simplicity/private-lending/scripts.ts`.
 - `LoanState` getters: `installmentCount`, `loanOutpoint`, `debtCommitment`, `debtHash`, `paid`
   (what opened for the party) and `remaining` (`undefined` unless every installment opened);
-  `debtHashAt(j)` (0 the acceptance's loan output), `installment(j)` (from 1),
-  `loanInputSecret(inputIndex)` and `collateral()`.
+  `debtHashAt(j)` (0 the acceptance's loan output), `installment(j)` (from 1).
 - `installment(j)` is an `InstallmentInfo`: `outpoint`, `amount` and `message`, the borrower's
   message read in the same rewind (`undefined` when it does not open or carries none,
   `bad-input` when its field does not decode).
-- Borrower only, else `bad-input`: `planInstallment(amount, firstWalletInput,
-  nftReceiverScript, message?)`, an `InstallmentPlan` (`debtWitness`, `successorDebtHash`,
-  `ephemeralPublicKey`, the installment's nonce, `installment`, `successor`,
-  `installmentBlinding(i)`, `successorBlinding(i)`) for an amount above 0 and below the remaining
-  debt, the message signed for `Installment` of `installmentCount + 1`; `repaymentBlinding(i,
-  message?)` while an amount is owed, the message signed for `FullRepayment`; `zeroDebtKey()`
-  once none is.
+- The collateral, `c_k` at step `k`: `collateral()`, a `PinnedOutputInfo` (`undefined` while
+  `c_k` is unknown), and `loanInputSecret(inputIndex)` (`bad-input` while it is). It is known when
+  the debt is, and `C` at acceptance. The collateral released is the offer's
+  `collateralAmount()` less `c_k`.
+- The lender's search, when an installment does not open: `collateralSearch()`, a
+  `CollateralSearch` of plain values (`valueCommitment`, `assetCommitment`, `blinder`, the step's
+  secret `x_k`, and `max`, the collateral `C`); `findCollateral(valueCommitment, assetCommitment,
+  blinder, max)`, a free function for a Web Worker, which gives `c_k` or `undefined` (about 1 s
+  and 32 MiB at `max = 2^44`, `bad-input` above it); then `setCollateral(c_k)`, which refuses an
+  amount that does not open the loan output. `collateralOpening(step, amount, assetBlinder,
+  blinder)` gives the blinders of the collateral of `amount` at `step`, from 1 to 1024.
+- `releasePreview(amount)`: the collateral that paying `amount` releases now, from 1 to the
+  amount owed (which releases all of `c_k`), while the debt is known.
+- Borrower only, else `bad-input`:
+  - `carries()`: the loan's `Carry`s (`outpoint`, `asset`, `amount`, `inputSecret(i)`), opened
+    from the chain: the creation's carry supply before the first installment, then the last
+    installment's outputs 3 and 4, rewound with the borrower's lending key. `loan-mismatch`
+    unless they are of the creation's carry token and hold `e + 1` and `R − e` units. An
+    installment and the full repayment spend them after the principal coins.
+  - `carrySweep()`: the full repayment's burn of every carry unit, a `CarrySweep` with `burn`
+    (its `PinnedOutputInfo`, commitments included, blinders drawn once) and `blinding(i)` for its
+    `OP_RETURN`, whose PSET output carries `borrowerBlindingKey()`.
+  - `planInstallment(amount, firstWalletInput, nftReceiverScript, message?)`: an
+    `InstallmentPlan`, for an amount above 0 and below the remaining debt, before step 1024, the
+    message signed for `Installment` of `installmentCount + 1`. The plan proves the release and
+    verifies the proof with the loan's `FS_IV`, and `Y` against `BLINDER_ROOT`, before it returns
+    (proofs, O7). It has:
+    - the witness: `debtWitness`, `index`, `blinderCommitment`, `pathIsRight`, `pathSiblings`,
+      `commitments` (`T1 … T7`) and `responses` (eleven), as
+      `web/src/simplicity/private-lending/witness.ts` takes them;
+    - `successorDebtHash`, `ephemeralPublicKey` (the installment's nonce), `installment`,
+      `successor`, `installmentBlinding(i)` and `successorBlinding(i)`;
+    - `carry(k)` and `carryBlinding(k, i)`, `k` 0 for `W1` (output 3, `e + 1` units) and 1 for
+      `W2` (output 4, `R − e`), whose PSET outputs carry `borrowerBlindingKey()`;
+    - `release`, the collateral released to the borrower, which can be 0;
+    - `leftover`, the carry units the first installment burns (`S − R − 1`, 0 later),
+      `leftoverBurn` (its `PinnedOutputInfo`) and `leftoverBlinding(i)` for its `OP_RETURN`, both
+      `undefined` when there is none.
+
+    Each plan draws random blinders. Two plans at one step share `x_(k+1)`: save a build and
+    rebroadcast it rather than plan again (design note, "Never rebuild an index with another
+    amount").
+  - `repaymentBlinding(i, message?)` while an amount is owed, the message signed for
+    `FullRepayment`.
 - Lender only, else `bad-input`: `sweep(closeTxHex, unspent)`, the `Sweep` (`outpoints()`,
-  `amount`, `inputSecret(position, inputIndex)`) of the final claim after the full repayment or
-  the zero-debt close, or of a liquidation when `closeTxHex` is `undefined`.
+  `amount`, `inputSecret(position, inputIndex)`) of the final claim after the full repayment, or
+  of a liquidation when `closeTxHex` is `undefined`.
 
 Messages (the format and the limits are in the core's `message.rs`):
 
