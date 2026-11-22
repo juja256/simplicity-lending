@@ -168,10 +168,12 @@ restart when the lender accepts.
    Wait for confirmation and indexing. Acceptance is not offered once a proposal's expiry has
    passed. The review shows the borrower's message, if any, under **Message from the borrower**,
    and you may answer with a private message of your own.
-5. The loan then appears in **Loan book**, with what the borrower has repaid, what remains and what
-   you can claim. When the borrower pays an installment, select **Claim** to receive it; the lender
-   role token comes back to you. **Released / left** shows the collateral the installments gave
-   back to the borrower and the collateral the loan still holds. Once the borrower repays the rest,
+5. The loan then appears in **Loan book**. **Lent** shows the principal with the repayment under
+   it, **Repaid** what the borrower has repaid with what it still owes under it, and **Claimable**
+   what you can claim; **Status** shows when the loan is due. When the borrower pays an
+   installment, select **Claim** to receive it; the lender role token comes back to you. Under
+   **Collateral**, the loan book shows the collateral the installments gave back to the borrower
+   ("released") and the collateral the loan still holds ("left"). Once the borrower repays the rest,
    select **Claim repayment**: it receives the repayment and every installment you have not
    claimed, and consumes the lender role token. A repaid loan is not fully claimed until this
    separate transaction completes.
@@ -185,11 +187,11 @@ says that its collateral or its repayment is outside what a lender can accept, a
 action.
 
 An installment the borrower built outside this app may not open with your key. **Claimable** then
-marks it "amount unknown", and **Remaining** shows the debt as "at most" the repayment less what
+marks it "amount unknown", and **Repaid** shows what is owed as "at most" the repayment less what
 you can read. **Claim repayment** still takes it, and you receive the repayment in full; a
 liquidation leaves it unclaimed. Without its amount, the console cannot compute the collateral the
 loan holds, so it searches for it, from the chain and the offer's secrets alone, in the background:
-**Released / left** says "computing…" for about a second, and the liquidation uses what it finds.
+**Collateral** says "computing…" for about a second, and the liquidation uses what it finds.
 
 The summary at the top of **Proposals** counts the proposals waiting for you, the active loans, the
 principal lent out, the collateral held, and the loans due within 7 days or overdue. These are this

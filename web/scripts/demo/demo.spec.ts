@@ -135,6 +135,11 @@ function exactly(text: string): RegExp {
   return new RegExp(`^${escapeRegExp(text)}$`)
 }
 
+/** A cell's stacked lines (the loan book's figure over its companions), exactly. */
+function stacked(...lines: string[]): RegExp {
+  return new RegExp(`^${lines.map(escapeRegExp).join('\\s*')}$`)
+}
+
 /** A row of a details panel or a transaction's summary: its label, then its value. */
 function detailRow(label: string, value: string): RegExp {
   return new RegExp(`${escapeRegExp(label)}\\s*${escapeRegExp(value)}`)
@@ -161,6 +166,19 @@ async function expectWithinWidth(page: Page, locator: Locator, what: string): Pr
   expect(box, `${what} is laid out`).not.toBeNull()
   expect(box!.x, `${what}: left edge`).toBeGreaterThanOrEqual(0)
   expect(box!.x + box!.width, `${what}: right edge`).toBeLessThanOrEqual(width)
+}
+
+/** The page's table is no wider than its scroll area: every column shows without scrolling. */
+async function expectTableFits(page: Page): Promise<void> {
+  const { scrollWidth, clientWidth } = await page
+    .getByRole('main')
+    .locator('table')
+    .first()
+    .evaluate(table => ({
+      scrollWidth: table.parentElement?.scrollWidth ?? 0,
+      clientWidth: table.parentElement?.clientWidth ?? 0,
+    }))
+  expect(scrollWidth, 'the table: scrollWidth ≤ clientWidth').toBeLessThanOrEqual(clientWidth)
 }
 
 /**
@@ -542,17 +560,28 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     const mainLoan = lender
       .getByRole('main')
       .getByRole('row')
-      .filter({ has: lender.getByRole('cell', { name: lent, exact: true }) })
+      .filter({
+        has: lender.getByRole('cell', { name: new RegExp(`^${escapeRegExp(lent)}\\s*repays `) }),
+      })
     const claim = mainLoan.getByRole('button', { name: 'Claim', exact: true })
     await expect(claim).toBeVisible({ timeout: CHAIN_TIMEOUT })
-    await expect(await bookCell(mainLoan, 'Repaid')).toHaveText(principalText(half))
-    await expect(await bookCell(mainLoan, 'Remaining')).toHaveText(principalText(rest))
+    await expect(await bookCell(mainLoan, 'Repaid')).toHaveText(
+      stacked(principalText(half), `${principalText(rest)} owed`),
+    )
     await expect(await bookCell(mainLoan, 'Claimable')).toHaveText(principalText(half))
-    // The lender reads the installment, so it computes the collateral released and left.
-    await expect(await bookCell(mainLoan, 'Released / left')).toHaveText(
-      `${collateralText(release)} / ${collateralText(left)}`,
+    // The lender reads the installment, so it computes the collateral released and left, which
+    // the loan book stacks under the collateral.
+    const collateralCell = await bookCell(mainLoan, 'Collateral')
+    await expect(collateralCell).toHaveText(
+      stacked(
+        collateralText(collateralUnits),
+        `${amountText(release, COLLATERAL.decimals)} released`,
+        `${amountText(left, COLLATERAL.decimals)} left`,
+      ),
       { timeout: 2 * MINUTE },
     )
+    // The row fits the console's width: nothing hides behind the table's sideways scroll.
+    await expectTableFits(lender)
     await shot(lender, 'lend-loans-installment')
     await claim.click()
     await confirmTransaction(lender, exactly('Claim installments'), {
@@ -601,10 +630,10 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     })
     // The book shows the loan repaid in full, with nothing left to claim.
     await expect(mainLoan).toContainText('Claimed', { timeout: CHAIN_TIMEOUT })
-    await expect(await bookCell(mainLoan, 'Repaid')).toHaveText(principalText(repayment), {
-      timeout: 2 * MINUTE,
-    })
-    await expect(await bookCell(mainLoan, 'Remaining')).toHaveText(principalText(0n))
+    await expect(await bookCell(mainLoan, 'Repaid')).toHaveText(
+      stacked(principalText(repayment), `${principalText(0n)} owed`),
+      { timeout: 2 * MINUTE },
+    )
     await expect(await bookCell(mainLoan, 'Claimable')).toHaveText('–')
     await expect(claimRepayment).toHaveCount(0)
     await shot(lender, 'lend-loans-claimed')

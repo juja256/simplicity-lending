@@ -2591,18 +2591,18 @@ proposed for `main`. Each check names the screen of the app as phase 4 leaves it
    (a demo run once stalled there for 20 minutes while the indexer had the loan repaid; not
    reproduced).
 8. **A liquidation after an installment the lender cannot open** (phase 7). The app blinds every
-   installment to the lender, so no app flow makes such a loan, and no automated test loads the
-   real search Web Worker (`searchWorker.ts`): the e2e calls the wasm's search in Node, and the
-   unit tests stub `Worker`. One way to make the lender's browser miss an installment: take a loan
-   with one installment, past its expiry, and in the lender's browser override esplora's response
-   for that installment's `/tx/<txid>/hex` (devtools, Local Overrides) with the same hex but one
-   byte of output 2's range proof changed, which leaves the txid unchanged and the proof
-   unrewindable. The e2e's `liquidate-dry` does the same in Node and the builder liquidates by the
-   search; the browser recipe itself is untried. Reload the lender console from an empty
-   site-data profile, so nothing is cached. Expected: the loan book's **Released / left** says "computing…", then shows the
-   figures the borrower's My loans shows; **Liquidate** builds and confirms, the lender receives
-   that collateral, and the installment it cannot open stays unswept. Run it once on `pnpm dev`
-   and once on `pnpm build && pnpm preview`, where the worker is a separate bundle.
+   installment to the lender, so no app flow makes such a loan, and no automated test loads the real
+   search Web Worker (`searchWorker.ts`): the e2e calls the wasm's search in Node, and the unit
+   tests stub `Worker`. One way to make the lender's browser miss an installment: take a loan with
+   one installment, past its expiry, and in the lender's browser override esplora's response for
+   that installment's `/tx/<txid>/hex` (devtools, Local Overrides) with the same hex but one byte of
+   output 2's range proof changed, which leaves the txid unchanged and the proof unrewindable. The
+   e2e's `liquidate-dry` does the same in Node and the builder liquidates by the search; the browser
+   recipe itself is untried. Reload the lender console from an empty site-data profile, so nothing
+   is cached. Expected: the loan book's **Collateral** says "computing…", then shows the figures the
+   borrower's My loans shows; **Liquidate** builds and confirms, the lender receives that
+   collateral, and the installment it cannot open stays unswept. Run it once on `pnpm dev` and once
+   on `pnpm build && pnpm preview`, where the worker is a separate bundle.
 9. **A Jade signs the release and the sweep** (phase 7). As the borrower with a Jade, pay an
    installment that releases collateral, then repay the rest. Expected: the Jade shows the
    outputs it can (the release back to the wallet among them) and signs both; the installment
@@ -2614,14 +2614,7 @@ proposed for `main`. Each check names the screen of the app as phase 4 leaves it
     release collateral. As the borrower, take a loan whose repayment in base units is larger than
     its collateral in base units (TEST has 3 decimals and tL-BTC 8: more than 100,000 TEST per
     tL-BTC, accepted outside the terms if need be), and pay an installment small enough to release
-    nothing (the form's **Collateral released** says 0). Expected: it confirms with 1,000 sats of L-BTC in the
-    release's place (R2's output), My loans' **Released** stays as it was, and a later
-    installment releases what the two add up to.
-11. **The loan book's width with the collateral column** (phase 7). The demo's
-    `lend-loans-installment` screenshot, at 1280 px, shows the table wider than its area: with
-    **Released / left** added, **Claimable** and the row's actions sit past the right edge, behind
-    the table's sideways scroll. Expected: with a loan that has a release and one with an action,
-    at 1280 px and wider, the actions can be found and used without hunting for the scroll, or the
-    layout is changed so that they can.
-
+    nothing (the form's **Collateral released** says 0). Expected: it confirms with 1,000 sats of
+    L-BTC in the release's place (R2's output), My loans' **Released** stays as it was, and a
+    later installment releases what the two add up to.
 Record the results in the commit that ticks them off.

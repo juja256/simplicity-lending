@@ -407,8 +407,9 @@ part:
    (screenshot `borrow-messages`); the borrower receives the principal; the repay form opens on
    the whole repayment, with nothing of the collateral released, and the borrower pays half of it
    as an installment, which releases the collateral it pays for: the form's summary, My loans
-   (**Released**, **Left**) and the loan book (**Released / left**) show the release the release
-   rule gives (`releaseForPayment`); the loan book shows the installment as repaid and claimable;
+   (**Released**, **Left**) and the loan book (released and left under **Collateral**) show the
+   release the release rule gives (`releaseForPayment`), and the loan book's table fits its area at
+   1280 px with no sideways scroll; the loan book shows the installment as repaid and claimable;
    the lender claims it; the borrower repays the rest, which gives back the collateral left, and
    the lender's final claim takes that repayment, with no installment left to sweep: the loan book
    then shows the loan claimed, repaid in full, with nothing left to claim;

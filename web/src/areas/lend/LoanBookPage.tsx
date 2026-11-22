@@ -1,5 +1,5 @@
 import { Chip } from '@heroui/react'
-import { useMemo } from 'react'
+import { type ReactNode, useMemo } from 'react'
 
 import { useBlockHeight } from '@/api/esplora/hooks'
 import KeyFingerprint from '@/components/KeyFingerprint'
@@ -51,19 +51,31 @@ const LOAN_ACTIONS: OfferActions<
   },
 }
 
+// Paired figures stack in one cell, a figure over its muted companion, so that a row fits the
+// console's width at 1280 px with every column shown.
 const COLUMNS: LedgerColumn[] = [
   { label: 'Borrower' },
+  // the principal, with the repayment under it
   { label: 'Lent', align: 'right' },
+  // the offer's collateral, with what the loan released and has left under it
   { label: 'Collateral', align: 'right' },
-  { label: 'Released / left', align: 'right' },
-  { label: 'Repayment', align: 'right' },
+  // what the borrower repaid, with what it still owes under it
   { label: 'Repaid', align: 'right' },
-  { label: 'Remaining', align: 'right' },
   { label: 'Claimable', align: 'right' },
-  { label: 'Due', align: 'right' },
+  // the status, with when the loan is due under it
   { label: 'Status' },
   { label: 'Action', hideLabel: true },
 ]
+
+/** A figure with its muted companion under it, both on one line each, aligned right. */
+function Stacked({ children, under }: { children: ReactNode; under?: ReactNode }) {
+  return (
+    <div className='flex flex-col items-end'>
+      <span>{children}</span>
+      {under && <div className='text-muted flex flex-col items-end text-xs'>{under}</div>}
+    </div>
+  )
+}
 
 /** The statuses of a loan: accepted once, whatever happened since. */
 const LOAN_STATUSES = new Set(['active', 'repaid', 'liquidated'])
@@ -78,14 +90,14 @@ function rank(item: OpenedOfferItem, tipHeight: number): number {
   return status === 'repaid' ? 2 : 3
 }
 
-/** When an active loan is due, from the tip: `in 41 days`, `2 days ago`. */
+/** When an active loan is due, from the tip: `Due in 41 days`, `Due 2 days ago`. */
 function dueLabel(expiry: number, tipHeight: number): string {
-  if (tipHeight === 0) return `Block #${expiry}`
+  if (tipHeight === 0) return `Due at block #${expiry}`
   const blocksLeft = expiry - tipHeight
-  if (blocksLeft === 0) return 'This block'
+  if (blocksLeft === 0) return 'Due this block'
   return blocksLeft > 0
-    ? `in ${formatBlockSpan(blocksLeft)}`
-    : `${formatBlockSpan(-blocksLeft)} ago`
+    ? `Due in ${formatBlockSpan(blocksLeft)}`
+    : `Due ${formatBlockSpan(-blocksLeft)} ago`
 }
 
 interface LoanRowProps {
@@ -99,39 +111,43 @@ interface LoanRowProps {
   onOpen: (action: LenderAction, item: OpenedOfferItem, unsentTx?: PrivateTxRecord) => void
 }
 
-/** A loan's released and left collateral: "computing" while the lender's search runs. */
-function CollateralCell({ state }: { state: CollateralLeft }) {
-  const { formatCollateralDisplay } = useFormatAmount()
-  switch (state.kind) {
-    case 'known':
-      return (
-        <span>
-          {formatCollateralDisplay(state.released)} / {formatCollateralDisplay(state.left)}
-        </span>
-      )
-    case 'computing':
-      return (
-        <span
-          className='text-muted'
-          role='status'
-          title='An installment does not open with your key: the app is searching for the collateral left. This takes a few seconds.'
-        >
-          computing…
-        </span>
-      )
-    case 'unknown':
-      return (
-        <span className='text-muted' title='The collateral left could not be found.'>
-          unknown
-        </span>
-      )
-    case 'unread':
-      return <span className='text-muted'>–</span>
-  }
+/**
+ * A loan's collateral: the offer's, and under it, while the loan is active, what it released and
+ * has left, or "computing" while the lender's search runs. The figures stack, so that the row fits
+ * the console's width.
+ */
+function CollateralFigures({ total, state }: { total: bigint; state: CollateralLeft }) {
+  // the unit is the total's, above
+  const { formatCollateralAmount, formatCollateralDisplay } = useFormatAmount()
+  const detail = (() => {
+    switch (state.kind) {
+      case 'known':
+        return (
+          <>
+            <span>{formatCollateralAmount(state.released)} released</span>
+            <span>{formatCollateralAmount(state.left)} left</span>
+          </>
+        )
+      case 'computing':
+        return (
+          <span
+            role='status'
+            title='An installment does not open with your key: the app is searching for the collateral left. This takes a few seconds.'
+          >
+            computing…
+          </span>
+        )
+      case 'unknown':
+        return <span title='The collateral left could not be found.'>left unknown</span>
+      case 'unread':
+        return null
+    }
+  })()
+  return <Stacked under={detail}>{formatCollateralDisplay(total)}</Stacked>
 }
 
 function LoanRow({ item, borrowerName, tipHeight, loan, figures, state, onOpen }: LoanRowProps) {
-  const { formatCollateralDisplay, formatPrincipalAmount } = useFormatAmount()
+  const { formatPrincipalAmount } = useFormatAmount()
   const { terms, candidate } = item
   const status = displayStatus(candidate)
   const overdue = status === 'active' && isPastExpiry(terms, tipHeight)
@@ -151,24 +167,38 @@ function LoanRow({ item, borrowerName, tipHeight, loan, figures, state, onOpen }
           <MessagesLink item={item} />
         </div>
       </Cell>
-      <Cell align='right'>{formatPrincipalAmount(terms.principalAmount)}</Cell>
-      <Cell align='right'>{formatCollateralDisplay(terms.collateralAmount)}</Cell>
-      <Cell align='right' title={loanTitle}>
-        <CollateralCell state={status === 'active' ? collateral : { kind: 'unread' }} />
-      </Cell>
-      <Cell align='right'>{formatPrincipalAmount(terms.repaymentAmount)}</Cell>
-      <Cell align='right' title={loanTitle}>
-        {unread ? <span className='text-muted'>–</span> : formatPrincipalAmount(figures.repaid)}
+      <Cell align='right'>
+        <Stacked under={`repays ${formatPrincipalAmount(terms.repaymentAmount)}`}>
+          {formatPrincipalAmount(terms.principalAmount)}
+        </Stacked>
       </Cell>
       <Cell align='right' title={loanTitle}>
-        {unread || figures.remaining === null ? (
+        <CollateralFigures
+          total={terms.collateralAmount}
+          state={status === 'active' ? collateral : { kind: 'unread' }}
+        />
+      </Cell>
+      <Cell align='right' title={loanTitle}>
+        {unread ? (
           <span className='text-muted'>–</span>
-        ) : figures.remaining.exact ? (
-          formatPrincipalAmount(figures.remaining.amount)
         ) : (
-          <span title='An installment does not open with your key: its amount is unknown.'>
-            at most {formatPrincipalAmount(figures.remaining.amount)}
-          </span>
+          <Stacked
+            under={
+              figures.remaining === null ? undefined : figures.remaining.exact ? (
+                `${formatPrincipalAmount(figures.remaining.amount)} owed`
+              ) : (
+                <span
+                  className='flex flex-col items-end'
+                  title='An installment does not open with your key: its amount is unknown.'
+                >
+                  <span>at most</span>
+                  <span>{formatPrincipalAmount(figures.remaining.amount)} owed</span>
+                </span>
+              )
+            }
+          >
+            {formatPrincipalAmount(figures.repaid)}
+          </Stacked>
         )}
       </Cell>
       <Cell align='right' title={loanTitle}>
@@ -178,22 +208,25 @@ function LoanRow({ item, borrowerName, tipHeight, loan, figures, state, onOpen }
           <ClaimableText figures={figures} format={formatPrincipalAmount} />
         )}
       </Cell>
-      <Cell align='right' title={`Expires at block #${terms.loanExpirationTime}`}>
-        {status === 'active' ? (
-          dueLabel(terms.loanExpirationTime, tipHeight)
-        ) : (
-          <span className='text-muted'>Block #{terms.loanExpirationTime}</span>
-        )}
-      </Cell>
       <Cell>
-        {overdue && !state.isProcessing ? (
-          <Chip color='danger' variant='soft' size='sm'>
-            <span className='mr-1 size-1.5 shrink-0 rounded-full bg-current' aria-hidden='true' />
-            Overdue
-          </Chip>
-        ) : (
-          <OfferStatusChip status={status} isProcessing={state.isProcessing} />
-        )}
+        <div className='flex flex-col items-start gap-1'>
+          {overdue && !state.isProcessing ? (
+            <Chip color='danger' variant='soft' size='sm'>
+              <span className='mr-1 size-1.5 shrink-0 rounded-full bg-current' aria-hidden='true' />
+              Overdue
+            </Chip>
+          ) : (
+            <OfferStatusChip status={status} isProcessing={state.isProcessing} />
+          )}
+          <span
+            className='text-muted text-xs whitespace-nowrap'
+            title={`Expires at block #${terms.loanExpirationTime}`}
+          >
+            {status === 'active'
+              ? dueLabel(terms.loanExpirationTime, tipHeight)
+              : `Block #${terms.loanExpirationTime}`}
+          </span>
+        </div>
       </Cell>
       <ActionCell state={state} onOpen={onOpen} />
     </tr>
