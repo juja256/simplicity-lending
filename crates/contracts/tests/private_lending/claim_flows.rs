@@ -236,7 +236,7 @@ fn final_claim_sweeps_unopenable_installments_after_full_repayment(
 
     // the unclaimed installments and the repayment add up to the debt at acceptance less the
     // claimed installment
-    let sweep = sweep_opening(DebtOpening::of(&repayment), &[claimed], None)
+    let sweep = sweep_opening(DebtOpening::of(&repayment), &[claimed])
         .expect("the claimed installment is below the debt");
     assert_eq!(sweep.amount, repayment.amount - 1_500);
     let claim_tx = claim_locked_outputs(

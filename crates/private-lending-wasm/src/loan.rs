@@ -438,9 +438,10 @@ impl LoanState {
     }
 
     /// The loan's carries, opened by the borrower: the creation's carry supply before the first
-    /// installment, then the last installment's outputs 3 and 4. They must be of the creation's
-    /// carry token, and the installment's must hold `e + 1` and `R − e` units, or `R + 1` in all
-    /// when the debt is unknown.
+    /// installment, then the last installment's outputs 3 and 4. They must be of the asset of the
+    /// creation's output 4, `S` explicit units (whose issuance this does not check), and the
+    /// installment's must hold `e + 1` and `R − e` units, or `R + 1` in all when the debt is
+    /// unknown.
     fn opened_carries(&self) -> Result<Vec<(OutPoint, TxOutSecrets)>, String> {
         if self.party != Party::Borrower {
             return Err(bad_input("only the borrower opens the carries"));
@@ -611,7 +612,7 @@ impl LoanState {
             .chain([OutPoint::new(txid, CLOSE_OUTPUT)])
             .collect();
         let start = DebtOpening::of(&self.pinned.repayment);
-        let opening = sweep_opening(start, &claimed, None).ok_or_else(|| {
+        let opening = sweep_opening(start, &claimed).ok_or_else(|| {
             loan_mismatch(
                 "the claimed installments and the outputs left do not add up to the debt at \
                  acceptance",
@@ -1020,9 +1021,11 @@ impl LoanState {
     /// The loan's carries, which the next installment or the full repayment spends after the
     /// principal coins, opened by the borrower from the chain: the creation's carry supply (output
     /// 4) before the first installment, then the last installment's outputs 3 and 4, rewound with
-    /// the borrower's lending key. `bad-input` for the lender; `loan-mismatch` when they are not
-    /// the loan's carries: not of the creation's carry token, or not holding the remainder of the
-    /// debt, `e + 1` and `R − e` units.
+    /// the borrower's lending key. `bad-input` for the lender; `loan-mismatch` when the creation's
+    /// output 4 is not `S` explicit units, or the installment's carries are not of its asset or do
+    /// not hold the remainder of the debt, `e + 1` and `R − e` units. It does not check that the
+    /// creation's input 2 issued that asset: the caller checks the creation (the app's
+    /// `creationCarrySupply`).
     pub fn carries(&self) -> Result<Vec<Carry>, String> {
         Ok(self
             .opened_carries()?
@@ -1176,8 +1179,8 @@ impl LoanState {
 /// `undefined` if none is in `[1, max]`. `bad-input` for malformed hex, a commitment that is not
 /// one, and `max` outside `[1, 2^44]`.
 ///
-/// It takes plain values so that a Web Worker can run it: about 1 s in wasm and 32 MiB at
-/// `max = 2^44`.
+/// It takes plain values so that a Web Worker can run it: about 1 s in wasm and 45 MiB of linear
+/// memory at `max = 2^44`, its table of 32 MiB included.
 #[wasm_bindgen(js_name = findCollateral)]
 pub fn find_collateral_hex(
     value_commitment: &str,
@@ -2203,6 +2206,29 @@ mod tests {
     /// The 32 bytes that count up from `first`, as the parity fixture's blinders.
     fn counting_from(first: u8) -> [u8; 32] {
         std::array::from_fn(|i| first + i as u8)
+    }
+
+    /// The contract checks only the borrower NFT's asset and amount at an installment's output 0,
+    /// so an installment may burn the NFT there: the loan reads it as an installment, whose
+    /// successor holds the loan, for both parties (the indexer records it as one too).
+    #[test]
+    fn an_installment_burning_the_borrower_nft_reads_as_one() {
+        let f = Fixture::load();
+        let mut burned = tx_of(&f.installment);
+        burned.output[0].script_pubkey = Script::new_op_return(&[]);
+        let burned_hex = tx_hex(&burned);
+
+        for state in [
+            f.as_borrower(&[&burned_hex]).unwrap(),
+            f.as_lender(&[&burned_hex]).unwrap(),
+        ] {
+            assert_eq!(state.installment_count(), 1);
+            assert_eq!(
+                state.loan_outpoint(),
+                outpoint_string(&OutPoint::new(burned.txid(), 1))
+            );
+            assert_eq!(state.debt_hash(), f.value["loan"]["debt_hashes"][1]);
+        }
     }
 
     #[test]

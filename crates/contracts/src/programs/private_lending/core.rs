@@ -234,7 +234,9 @@ impl PrivateLendingOffer {
     /// transaction, the borrower checks it with
     /// [`verify_offer_as_borrower`](crate::programs::private_lending::verify_offer_as_borrower):
     /// an offer that does not verify would never be accepted, and the borrower could not rebuild
-    /// it from the chain to cancel it.
+    /// it from the chain to cancel it. That check, like this function, refuses an offer outside
+    /// the bounds of [`check_bounds`]; the wasm's `openCreationAsBorrower` opens one anyway, so
+    /// that the borrower can cancel it.
     ///
     /// # Panics
     /// Panics if the offer is active, the transaction has other inputs than the two NFT issuances

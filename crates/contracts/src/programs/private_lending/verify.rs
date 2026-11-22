@@ -76,6 +76,10 @@ pub fn verify_offer_as_lender(
 /// C's front end must too): an offer that does not verify would never be accepted, and the
 /// borrower could not rebuild it from the chain to cancel it, which strands the collateral.
 ///
+/// Like the lender's check, it refuses an offer outside the bounds of proportional release
+/// ([`VerifyError::OutOfBounds`]). The wasm's `openCreationAsBorrower` differs: it opens such an
+/// offer, so that a borrower whose offer was broadcast anyway can still cancel it.
+///
 /// # Errors
 /// As [`verify_offer_as_lender`].
 pub fn verify_offer_as_borrower(

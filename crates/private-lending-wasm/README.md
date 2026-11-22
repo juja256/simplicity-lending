@@ -158,9 +158,10 @@ Loans:
   `CollateralSearch` of plain values (`valueCommitment`, `assetCommitment`, `blinder`, the step's
   secret `x_k`, and `max`, the collateral `C`); `findCollateral(valueCommitment, assetCommitment,
   blinder, max)`, a free function for a Web Worker, which gives `c_k` or `undefined` (about 1 s
-  and 32 MiB at `max = 2^44`, `bad-input` above it); then `setCollateral(c_k)`, which refuses an
-  amount that does not open the loan output. `collateralOpening(step, amount, assetBlinder,
-  blinder)` gives the blinders of the collateral of `amount` at `step`, from 1 to 1024.
+  and 45 MiB of linear memory at `max = 2^44`, `bad-input` above it); then `setCollateral(c_k)`,
+  which refuses an amount that does not open the loan output. `collateralOpening(step, amount,
+  assetBlinder, blinder)` gives the blinders of the collateral of `amount` at `step`, from 1 to
+  1024.
 - `releasePreview(amount)`: the collateral that paying `amount` releases now, from 1 to the
   amount owed (which releases all of `c_k`), while the debt is known.
 - Borrower only, else `bad-input`:

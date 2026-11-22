@@ -42,7 +42,6 @@ pub use creation::{
 pub use debt::{
     DebtError, DebtOpening, InstallmentError, asset_plus_generator, asset_point, debt_after,
     debt_hash, open_installment, open_installment_with_extra_data, sweep_opening, value_point,
-    zero_debt_blinder, zero_debt_key,
 };
 pub use directory::{
     DIRECTORY_TAG, DirectoryAction, DirectorySignError, directory_message, sign_directory_action,
