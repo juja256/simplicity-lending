@@ -7,6 +7,7 @@ import type { LoanFigures } from './hooks/useLoan'
 import type { PrivateOfferItem } from './hooks/usePrivateOffers'
 import { proposalExpiry, TERM_MARGIN_BLOCKS } from './lenderTerms'
 import {
+  blockedNote,
   borrowerActions,
   borrowerSendable,
   borrowerStatus,
@@ -614,5 +615,25 @@ describe("the borrower's saved creation", () => {
   it('waits while the tip is unknown', () => {
     expect(creationSendable(term, 0)).toBe('unknown')
     expect(() => checkCreationSendable(term, 0)).toThrow('The chain tip is not known')
+  })
+})
+
+describe('blockedNote', () => {
+  it('names the bounds of release for an offer the lender must refuse, not a failed check', () => {
+    const invalid = (code: string) =>
+      ({
+        txid: TXID,
+        role: 'lender',
+        result: 'invalid',
+        code,
+        candidate: null,
+        terms: null,
+      }) as PrivateOfferItem
+    expect(blockedNote(invalid('out-of-bounds'))).toBe(
+      'Its collateral or its repayment is outside what a lender can accept: no action is possible.',
+    )
+    expect(blockedNote(invalid('address-mismatch'))).toBe(
+      'It failed verification: no action is possible.',
+    )
   })
 })

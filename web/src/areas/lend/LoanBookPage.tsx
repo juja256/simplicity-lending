@@ -11,6 +11,8 @@ import { OfferStatusChip } from '@/components/OfferStatusChip'
 import { ScanNote } from '@/components/ScanNote'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { useKeyedModal } from '@/hooks/useKeyedModal'
+import type { CollateralLeft } from '@/privateLending/collateralFigures'
+import { useCollateralLeft } from '@/privateLending/hooks/useCollateralLeft'
 import { useDirectory } from '@/privateLending/hooks/useDirectory'
 import { type LoanRead, useLoans } from '@/privateLending/hooks/useLoan'
 import { usePrivateOffers } from '@/privateLending/hooks/usePrivateOffers'
@@ -53,6 +55,7 @@ const COLUMNS: LedgerColumn[] = [
   { label: 'Borrower' },
   { label: 'Lent', align: 'right' },
   { label: 'Collateral', align: 'right' },
+  { label: 'Released / left', align: 'right' },
   { label: 'Repayment', align: 'right' },
   { label: 'Repaid', align: 'right' },
   { label: 'Remaining', align: 'right' },
@@ -96,12 +99,46 @@ interface LoanRowProps {
   onOpen: (action: LenderAction, item: OpenedOfferItem, unsentTx?: PrivateTxRecord) => void
 }
 
+/** A loan's released and left collateral: "computing" while the lender's search runs. */
+function CollateralCell({ state }: { state: CollateralLeft }) {
+  const { formatCollateralDisplay } = useFormatAmount()
+  switch (state.kind) {
+    case 'known':
+      return (
+        <span>
+          {formatCollateralDisplay(state.released)} / {formatCollateralDisplay(state.left)}
+        </span>
+      )
+    case 'computing':
+      return (
+        <span
+          className='text-muted'
+          role='status'
+          title='An installment does not open with your key: the app is searching for the collateral left. This takes a few seconds.'
+        >
+          computing…
+        </span>
+      )
+    case 'unknown':
+      return (
+        <span className='text-muted' title='The collateral left could not be found.'>
+          unknown
+        </span>
+      )
+    case 'unread':
+      return <span className='text-muted'>–</span>
+  }
+}
+
 function LoanRow({ item, borrowerName, tipHeight, loan, figures, state, onOpen }: LoanRowProps) {
   const { formatCollateralDisplay, formatPrincipalAmount } = useFormatAmount()
   const { terms, candidate } = item
   const status = displayStatus(candidate)
   const overdue = status === 'active' && isPastExpiry(terms, tipHeight)
   const unread = figures === null
+  // While the loan is active; the search, when an installment does not open for the lender, runs
+  // in a Web Worker and the cell says "computing" until it answers.
+  const collateral = useCollateralLeft(terms.collateralAmount, loan?.figures, status === 'active')
   const loanTitle = loan?.error
     ? `The loan could not be read: ${ErrorHandler.describe(loan.error)}`
     : undefined
@@ -116,6 +153,9 @@ function LoanRow({ item, borrowerName, tipHeight, loan, figures, state, onOpen }
       </Cell>
       <Cell align='right'>{formatPrincipalAmount(terms.principalAmount)}</Cell>
       <Cell align='right'>{formatCollateralDisplay(terms.collateralAmount)}</Cell>
+      <Cell align='right' title={loanTitle}>
+        <CollateralCell state={status === 'active' ? collateral : { kind: 'unread' }} />
+      </Cell>
       <Cell align='right'>{formatPrincipalAmount(terms.repaymentAmount)}</Cell>
       <Cell align='right' title={loanTitle}>
         {unread ? <span className='text-muted'>–</span> : formatPrincipalAmount(figures.repaid)}

@@ -60,6 +60,13 @@ function item(
   }
 }
 
+const NO_LOAN: LoanFigures = {
+  loanOutpoint: `${'0a'.repeat(32)}:1`,
+  installments: [],
+  paid: 0n,
+  remaining: undefined,
+}
+
 const amounts = (principal: bigint, collateral: bigint) => ({ principal, collateral })
 
 const BOOK = [
@@ -91,6 +98,14 @@ describe('bookSummary', () => {
       repaid: 0n,
       claimable: 0n,
     })
+  })
+
+  it("counts the collateral an active loan holds after its releases, not the offer's", () => {
+    const loan = item('active', 3 * BLOCKS_PER_DAY, amounts(100n, 10n))
+    const figures: LoanFigures = { ...NO_LOAN, collateral: 4n }
+    expect(bookSummary([loan], TIP, new Map([[loan.txid, figures]])).collateralHeld).toBe(4n)
+    // a loan whose collateral is not known (a search not run) is counted at its most, the offer's
+    expect(bookSummary([loan], TIP, new Map([[loan.txid, NO_LOAN]])).collateralHeld).toBe(10n)
   })
 
   it('no longer counts a proposal waiting at its expiry block', () => {

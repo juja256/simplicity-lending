@@ -15,8 +15,9 @@ import {
   copyMessage,
   type LoanMessage,
 } from '@/privateLending/loanMessages'
+import { openedOffersOf } from '@/privateLending/offerCache'
 import type { OpenedOfferItem } from '@/privateLending/offerView'
-import { loadVerifiedOffer } from '@/privateLending/scan'
+import { cachedVerifiedOffer } from '@/privateLending/scan'
 import { type SentMessage, sentMessagesOf } from '@/privateLending/sentMessages'
 import { useLwk } from '@/providers/lwk/useLwk'
 import { useWallet } from '@/providers/wallet/useWallet'
@@ -60,23 +61,27 @@ async function readRepayment(
     return undefined
   }
   if (item.role === 'borrower') return { txid: repaymentTxid }
-  const offer = await loadVerifiedOffer(deps, key, item.txid, item.role, PRIVATE_API_BASE_URL)
-  try {
-    const lock = tx.outputs[REPAYMENT_OUTPUT.repayment]?.scriptPubkey().jet_sha256_hex()
-    if (lock !== offer.scripts.repaymentOutputScriptHash) return undefined
-    const read = copyMessage(() =>
-      offer.opened.readMessage(
-        key,
-        item.txid,
-        tx.toString(),
-        REPAYMENT_OUTPUT.repayment,
-        deps.wasm.MessagePhase.FullRepayment,
-      ),
-    )
-    return { txid: repaymentTxid, read }
-  } finally {
-    offer.opened.free()
-  }
+  // The session's cache owns the opened offer.
+  const offer = await cachedVerifiedOffer(
+    openedOffersOf(key),
+    deps,
+    key,
+    item.txid,
+    item.role,
+    PRIVATE_API_BASE_URL,
+  )
+  const lock = tx.outputs[REPAYMENT_OUTPUT.repayment]?.scriptPubkey().jet_sha256_hex()
+  if (lock !== offer.scripts.repaymentOutputScriptHash) return undefined
+  const read = copyMessage(() =>
+    offer.opened.readMessage(
+      key,
+      item.txid,
+      tx.toString(),
+      REPAYMENT_OUTPUT.repayment,
+      deps.wasm.MessagePhase.FullRepayment,
+    ),
+  )
+  return { txid: repaymentTxid, read }
 }
 
 /**

@@ -18,6 +18,7 @@ import { ScanNote } from '@/components/ScanNote'
 import { UiButton } from '@/components/ui/UiButton'
 import { RoutePath } from '@/constants/routes'
 import { useKeyedModal } from '@/hooks/useKeyedModal'
+import { useCollateralLeft } from '@/privateLending/hooks/useCollateralLeft'
 import { useDirectory } from '@/privateLending/hooks/useDirectory'
 import { type LoanFigures, useLoans } from '@/privateLending/hooks/useLoan'
 import { type PrivateOfferItem, usePrivateOffers } from '@/privateLending/hooks/usePrivateOffers'
@@ -199,6 +200,14 @@ function LoanRow({ item, lenderName, tipHeight, loan, state, onOpen }: LoanRowPr
   const lender = counterpartyOf(item)
   const terms = item.terms !== null && usesConfiguredAssets(item.terms) ? item.terms : null
   const status = isOpenedOffer(item) ? borrowerStatus(item, tipHeight, loan) : null
+  // What the loan has released and still holds, while it is active: a closed loan's last loan
+  // output is no longer the borrower's collateral. The borrower reads it with the loan, with no
+  // search.
+  const collateral = useCollateralLeft(
+    terms?.collateralAmount ?? 0n,
+    status?.kind === 'active' ? loan : undefined,
+    false,
+  )
   const { button, note, isProcessing } = state
 
   return (
@@ -227,6 +236,12 @@ function LoanRow({ item, lenderName, tipHeight, loan, state, onOpen }: LoanRowPr
         <dl className='flex flex-wrap gap-x-8 gap-y-2'>
           <Figure label='Principal'>{coins(terms.principalAmount, PRINCIPAL)}</Figure>
           <Figure label='Collateral'>{coins(terms.collateralAmount, COLLATERAL)}</Figure>
+          {collateral.kind === 'known' && (
+            <>
+              <Figure label='Released'>{coins(collateral.released, COLLATERAL)}</Figure>
+              <Figure label='Left'>{coins(collateral.left, COLLATERAL)}</Figure>
+            </>
+          )}
         </dl>
       )}
 

@@ -14,7 +14,11 @@ export interface BookSummary {
   active: number
   /** The principal of the active loans, in base units. */
   lent: bigint
-  /** The collateral of the active loans, in base units. */
+  /**
+   * The collateral the active loans hold, in base units: `c_k` where the loan was read with it,
+   * else the offer's collateral, which is the most it can hold (a lender that cannot read an
+   * installment learns `c_k` only by the search, which the book's rows run).
+   */
   collateralHeld: bigint
   /** Active loans whose expiry is at most seven days after the tip, and after it. */
   dueWithin7Days: number
@@ -128,7 +132,7 @@ export function bookSummary(
     } else if (candidate.status === 'active') {
       summary.active++
       summary.lent += terms.principalAmount
-      summary.collateralHeld += terms.collateralAmount
+      summary.collateralHeld += loans.get(item.txid)?.collateral ?? terms.collateralAmount
       // Overdue: the tip known and past the expiry, as `isPastExpiry` reads it.
       if (known && blocksLeft < 0) summary.overdue++
       else if (known && blocksLeft > 0 && blocksLeft <= DUE_SOON_BLOCKS) summary.dueWithin7Days++

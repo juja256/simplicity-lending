@@ -12,9 +12,9 @@ import { NETWORK_CONFIG } from '@/constants/network-config'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { useReadError } from '@/hooks/useReadError'
 import type { AsyncUpdatedPset } from '@/lwk/updatedPset'
-import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { asBorrowerError } from '@/privateLending/borrowerErrors'
 import { loanBorrowerNftOutpoint, unspentCarries, utxoOutpoint } from '@/privateLending/candidate'
+import { releaseForPayment } from '@/privateLending/collateralFigures'
 import {
   buildPrivateInstallment,
   type InstallmentSummary,
@@ -35,6 +35,7 @@ import {
   type RepayPlan,
   repayPlan,
 } from '@/privateLending/repayPlan'
+import { INSTALLMENT_WEIGHT_UNITS, REPAY_WEIGHT_UNITS } from '@/privateLending/repayWeights'
 import { recordingSent, sentMessagesOf } from '@/privateLending/sentMessages'
 import { selectAssetCoins, selectFeeCoins, walletReceiver } from '@/privateLending/wallet'
 import { useLwk } from '@/providers/lwk/useLwk'
@@ -42,36 +43,12 @@ import { loadPrivateTxsForWallet } from '@/providers/pendingTransactions/storage
 import type { PrivateTxRecord } from '@/providers/pendingTransactions/types'
 import { usePendingTransactions } from '@/providers/pendingTransactions/usePendingTransactions'
 import { useWallet } from '@/providers/wallet/useWallet'
-import { ASSET_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/asset-auth/witness'
-import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
 import { ErrorHandler } from '@/utils/errorHandler'
 
 import PrivateOfferActionShell, {
   type FreshOffer,
   type PrivateOfferActionModalProps,
 } from './PrivateOfferActionShell'
-
-/**
- * What a confidential output weighs, its range proof and surjection proof included: about 4.4 kWU
- * in the contracts' regtest installments.
- */
-const CONFIDENTIAL_OUTPUT_WEIGHT_UNITS = 4_400
-/** A loan has at most two carries: one before its first installment, two after. */
-const MAX_CARRIES = 2
-// The active offer (FullRepayment or Installment), the borrower NFT, a wallet output, and the
-// carries at their asset_auth. The full repayment adds the carries' confidential burn; the
-// installment the two new carries, the release (or R2's output in its place) and, at the first,
-// the burn of the leftover.
-const REPAY_WEIGHT_UNITS =
-  PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.FullRepayment +
-  EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY +
-  MAX_CARRIES * ASSET_AUTH_MAX_WEIGHT_TO_SATISFY +
-  CONFIDENTIAL_OUTPUT_WEIGHT_UNITS
-const INSTALLMENT_WEIGHT_UNITS =
-  PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY.Installment +
-  EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY +
-  MAX_CARRIES * ASSET_AUTH_MAX_WEIGHT_TO_SATISFY +
-  4 * CONFIDENTIAL_OUTPUT_WEIGHT_UNITS
 
 /** The kinds the repay form saves. */
 const REPAY_TX_KINDS = ['private_installment', 'private_repay_offer'] as const
@@ -129,6 +106,22 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
     expiry,
   )
   const pays = plan?.kind === 'refused' ? undefined : plan?.amount
+  // The collateral the loan holds now, and what this payment releases of it: the whole for the
+  // full repayment, `c_k − ceil((d_k − p)·C/R)` for an installment (it can be 0). The build
+  // checks the same figure against the wasm's `releasePreview`.
+  const held = loan?.collateral
+  const release =
+    held === undefined || owed === undefined || pays === undefined
+      ? undefined
+      : releaseForPayment(
+          {
+            total: terms.collateralAmount,
+            repayment: terms.repaymentAmount,
+            owed,
+            held,
+          },
+          pays,
+        )
   const insufficientBalance =
     pays !== undefined && BigInt(confirmedBalances[principalAsset.id] ?? 0) < pays
   // From the expiry block on, as the plan refuses an installment.
@@ -300,30 +293,38 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
             },
             {
               label: 'Collateral back to you',
-              value: formatCollateralDisplay(terms.collateralAmount),
+              value: held === undefined ? 'What the loan holds' : formatCollateralDisplay(held),
             },
           ]
     }
     if (pays === undefined || owed === undefined) return []
-    return plan?.kind === 'full'
-      ? [
-          { label: 'You repay', value: formatPrincipalAmount(pays) },
-          {
-            label: 'Collateral back to you',
-            value: formatCollateralDisplay(terms.collateralAmount),
-          },
-        ]
-      : [
-          { label: 'You pay', value: formatPrincipalAmount(pays) },
-          { label: 'Still owed after it', value: formatPrincipalAmount(owed - pays) },
-        ]
+    if (plan?.kind === 'full') {
+      return [
+        { label: 'You repay', value: formatPrincipalAmount(pays) },
+        {
+          label: 'Collateral back to you',
+          value: held === undefined ? 'What the loan holds' : formatCollateralDisplay(held),
+        },
+      ]
+    }
+    return [
+      { label: 'You pay', value: formatPrincipalAmount(pays) },
+      { label: 'Still owed after it', value: formatPrincipalAmount(owed - pays) },
+      ...(release === undefined || held === undefined
+        ? []
+        : [
+            { label: 'Collateral released', value: formatCollateralDisplay(release) },
+            { label: 'Collateral left after it', value: formatCollateralDisplay(held - release) },
+          ]),
+    ]
   }, [
     unsentRecord,
     isInstallment,
     owed,
     pays,
+    held,
+    release,
     plan?.kind,
-    terms,
     formatCollateralDisplay,
     formatPrincipalAmount,
   ])
@@ -356,6 +357,15 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
             rows={[
               { label: 'Paid so far', value: formatPrincipalAmount(loan.paid) },
               { label: 'Still owed', value: formatPrincipalAmount(owed) },
+              ...(held === undefined
+                ? []
+                : [
+                    {
+                      label: 'Collateral released so far',
+                      value: formatCollateralDisplay(terms.collateralAmount - held),
+                    },
+                    { label: 'Collateral left', value: formatCollateralDisplay(held) },
+                  ]),
             ]}
           />
           <UiTextField
@@ -368,7 +378,8 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
             description={
               plan?.kind === 'full'
                 ? 'The whole debt: your collateral comes back to you.'
-                : 'Less than you owe pays an installment; the rest stays owed.'
+                : 'Less than you owe pays an installment, which releases part of your collateral; ' +
+                  'the rest stays owed.'
             }
             errorMessage={plan?.kind === 'refused' ? plan.message : undefined}
           />

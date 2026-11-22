@@ -43,6 +43,10 @@ const opened = () => openProposalForm(wasm, PAIR, PAIR_INFO)
 const edit = (state: ProposalFormState, field: keyof ProposalFormState['form'], value: string) =>
   editProposalForm(wasm, PAIR, PAIR_INFO, state, field, value)
 
+const TOO_MUCH_COLLATERAL = 'The collateral is more than a lender can accept: ask for less.'
+const TOO_MUCH_REPAYMENT =
+  'The repayment is more than a lender can accept: lower the principal or the APR.'
+
 describe('openProposalForm', () => {
   it("opens at the lender's minimums, the collateral the least for the least principal", () => {
     expect(opened()).toEqual({
@@ -157,7 +161,7 @@ describe('proposalOfForm', () => {
       proposalOfForm(wasm, PAIR, PAIR_INFO, { ...form, collateral: '175921.86044417' }),
     ).toEqual({
       proposal: null,
-      errors: { collateral: 'The collateral is above what a lender can accept.' },
+      errors: { collateral: TOO_MUCH_COLLATERAL },
     })
   })
 
@@ -165,10 +169,21 @@ describe('proposalOfForm', () => {
   it('takes a full repayment of 2^50 − 2 base units, and refuses one more', () => {
     expect(offerBoundsErrors(wasm, 1n << 44n, (1n << 50n) - 2n)).toBeNull()
     expect(offerBoundsErrors(wasm, 1n, (1n << 50n) - 1n)).toEqual({
-      aprPercent: 'The repayment is above what a lender can accept.',
+      aprPercent: TOO_MUCH_REPAYMENT,
     })
     expect(offerBoundsErrors(wasm, (1n << 44n) + 1n, (1n << 50n) - 1n)).toEqual({
-      collateral: 'The collateral is above what a lender can accept.',
+      collateral: TOO_MUCH_COLLATERAL,
+    })
+  })
+
+  // The text names the field that is out of bounds, and is right about which way: a collateral
+  // below 1 is not "above what a lender can accept".
+  it('says that a collateral or a repayment of zero is too little, not too much', () => {
+    expect(offerBoundsErrors(wasm, 0n, 11_000n)).toEqual({
+      collateral: 'The collateral must be more than zero.',
+    })
+    expect(offerBoundsErrors(wasm, 1n, 0n)).toEqual({
+      aprPercent: 'The repayment must be more than zero.',
     })
   })
 

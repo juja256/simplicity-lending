@@ -54,7 +54,11 @@ export function isOpenedOffer(item: PrivateOfferItem): item is OpenedOfferItem {
  * exactly when `isOpenedOffer` holds.
  */
 export function blockedNote(item: PrivateOfferItem): string | null {
-  if (item.result === 'invalid') return 'It failed verification: no action is possible.'
+  if (item.result === 'invalid') {
+    return item.code === 'out-of-bounds'
+      ? 'Its collateral or its repayment is outside what a lender can accept: no action is possible.'
+      : 'It failed verification: no action is possible.'
+  }
   if (item.terms === null) return 'Its terms could not be opened; retried on the next sync.'
   if (item.candidate === null) return 'The indexer no longer lists this proposal.'
   if (!usesConfiguredAssets(item.terms)) return 'It uses assets this app does not support.'

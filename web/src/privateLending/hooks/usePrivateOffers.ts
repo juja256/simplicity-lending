@@ -14,7 +14,9 @@ import { privateQueryKeys } from '@/api/indexer/queryKeys'
 import { openIdbBackend } from '@/lib/sync-kv/idbBackend'
 import { PersistentKv } from '@/lib/sync-kv/persistentKv'
 import type { PrivateFlowDeps } from '@/privateLending/deps'
+import { openedOffersOf } from '@/privateLending/offerCache'
 import {
+  cachedVerifiedOffer,
   loadVerifiedOffer,
   type OfferRole,
   type ScanResult,
@@ -125,7 +127,7 @@ function syncOnce(
     () => {},
   )
   const sync = Promise.resolve(settled).then(() =>
-    syncOffers(deps, key, scope.apiBaseUrl, kvScanStore(kv, scope)),
+    syncOffers(deps, key, scope.apiBaseUrl, kvScanStore(kv, scope), openedOffersOf(key)),
   )
   const entry = { key, sync }
   runningSyncs.set(id, entry)
@@ -142,32 +144,35 @@ async function openTerms(
   txid: string,
   role: OfferRole,
 ): Promise<PrivateOfferTerms> {
-  const { opened } = await loadVerifiedOffer(deps, key, txid, role, PRIVATE_API_BASE_URL)
-  try {
-    const borrowerPublicKey = opened.borrowerPublicKey()
-    const lenderPublicKey = opened.lenderPublicKey()
-    const principalAmount = opened.principalAmount()
-    const repaymentAmount = opened.repaymentAmount()
-    const message = opened.message()
-    return {
-      borrowerPublicKey,
-      borrowerFingerprint: deps.wasm.keyFingerprint(borrowerPublicKey),
-      lenderPublicKey,
-      lenderFingerprint: deps.wasm.keyFingerprint(lenderPublicKey),
-      collateralAsset: opened.collateralAsset(),
-      collateralAmount: opened.collateralAmount(),
-      principalAsset: opened.principalAsset(),
-      principalAmount,
-      repaymentAmount,
-      interest: repaymentAmount - principalAmount,
-      loanExpirationTime: opened.loanExpirationTime(),
-      borrowerNft: opened.borrowerNft(),
-      lenderNft: opened.lenderNft(),
-      ...(message === undefined ? {} : { message }),
-    }
-  } finally {
-    // Only the plain values above are kept; the opened offer holds the offer's secrets.
-    opened.free()
+  // The session's cache owns the opened offer: only the plain values below are kept.
+  const { opened } = await cachedVerifiedOffer(
+    openedOffersOf(key),
+    deps,
+    key,
+    txid,
+    role,
+    PRIVATE_API_BASE_URL,
+  )
+  const borrowerPublicKey = opened.borrowerPublicKey()
+  const lenderPublicKey = opened.lenderPublicKey()
+  const principalAmount = opened.principalAmount()
+  const repaymentAmount = opened.repaymentAmount()
+  const message = opened.message()
+  return {
+    borrowerPublicKey,
+    borrowerFingerprint: deps.wasm.keyFingerprint(borrowerPublicKey),
+    lenderPublicKey,
+    lenderFingerprint: deps.wasm.keyFingerprint(lenderPublicKey),
+    collateralAsset: opened.collateralAsset(),
+    collateralAmount: opened.collateralAmount(),
+    principalAsset: opened.principalAsset(),
+    principalAmount,
+    repaymentAmount,
+    interest: repaymentAmount - principalAmount,
+    loanExpirationTime: opened.loanExpirationTime(),
+    borrowerNft: opened.borrowerNft(),
+    lenderNft: opened.lenderNft(),
+    ...(message === undefined ? {} : { message }),
   }
 }
 
