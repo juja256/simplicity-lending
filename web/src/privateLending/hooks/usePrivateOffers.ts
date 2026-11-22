@@ -16,12 +16,12 @@ import { PersistentKv } from '@/lib/sync-kv/persistentKv'
 import type { PrivateFlowDeps } from '@/privateLending/deps'
 import { openedOffersOf } from '@/privateLending/offerCache'
 import {
-  cachedVerifiedOffer,
   loadVerifiedOffer,
   type OfferRole,
   type ScanResult,
   type ScanState,
   syncOffers,
+  withVerifiedOffer,
 } from '@/privateLending/scan'
 import { kvScanStore, type ScanScope, scanStoreKey } from '@/privateLending/scanStore'
 import type { VerifiedOffer } from '@/privateLending/verify'
@@ -145,35 +145,37 @@ async function openTerms(
   role: OfferRole,
 ): Promise<PrivateOfferTerms> {
   // The session's cache owns the opened offer: only the plain values below are kept.
-  const { opened } = await cachedVerifiedOffer(
+  return withVerifiedOffer(
     openedOffersOf(key),
     deps,
     key,
     txid,
     role,
     PRIVATE_API_BASE_URL,
+    ({ opened }): PrivateOfferTerms => {
+      const borrowerPublicKey = opened.borrowerPublicKey()
+      const lenderPublicKey = opened.lenderPublicKey()
+      const principalAmount = opened.principalAmount()
+      const repaymentAmount = opened.repaymentAmount()
+      const message = opened.message()
+      return {
+        borrowerPublicKey,
+        borrowerFingerprint: deps.wasm.keyFingerprint(borrowerPublicKey),
+        lenderPublicKey,
+        lenderFingerprint: deps.wasm.keyFingerprint(lenderPublicKey),
+        collateralAsset: opened.collateralAsset(),
+        collateralAmount: opened.collateralAmount(),
+        principalAsset: opened.principalAsset(),
+        principalAmount,
+        repaymentAmount,
+        interest: repaymentAmount - principalAmount,
+        loanExpirationTime: opened.loanExpirationTime(),
+        borrowerNft: opened.borrowerNft(),
+        lenderNft: opened.lenderNft(),
+        ...(message === undefined ? {} : { message }),
+      }
+    },
   )
-  const borrowerPublicKey = opened.borrowerPublicKey()
-  const lenderPublicKey = opened.lenderPublicKey()
-  const principalAmount = opened.principalAmount()
-  const repaymentAmount = opened.repaymentAmount()
-  const message = opened.message()
-  return {
-    borrowerPublicKey,
-    borrowerFingerprint: deps.wasm.keyFingerprint(borrowerPublicKey),
-    lenderPublicKey,
-    lenderFingerprint: deps.wasm.keyFingerprint(lenderPublicKey),
-    collateralAsset: opened.collateralAsset(),
-    collateralAmount: opened.collateralAmount(),
-    principalAsset: opened.principalAsset(),
-    principalAmount,
-    repaymentAmount,
-    interest: repaymentAmount - principalAmount,
-    loanExpirationTime: opened.loanExpirationTime(),
-    borrowerNft: opened.borrowerNft(),
-    lenderNft: opened.lenderNft(),
-    ...(message === undefined ? {} : { message }),
-  }
 }
 
 async function fetchCandidate(txid: string): Promise<PrivateCandidateDetails | null> {

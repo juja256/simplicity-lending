@@ -169,24 +169,21 @@ export async function loadVerifiedOffer(
 }
 
 /**
- * The offer of `txid` as `loadVerifiedOffer` loads it, kept in `cache` once opened and verified:
- * a read of an offer the session opened already neither fetches nor opens it. The cache owns the
- * offer, so the caller must not free it, and must not hand it to a flow, which frees its offer
- * (flows load theirs fresh).
+ * Runs `read` with the offer of `txid` as `loadVerifiedOffer` loads it, kept in `cache` once opened
+ * and verified: a read of an offer the session opened already neither fetches nor opens it, and
+ * concurrent reads share one opening. The cache owns the offer, so `read` must not free it, keep
+ * it past its return, or hand it to a flow, which frees its offer (flows load theirs fresh).
  */
-export async function cachedVerifiedOffer(
+export function withVerifiedOffer<T>(
   cache: OpenedOfferCache,
   deps: PrivateFlowDeps,
   key: LendingKey,
   txid: string,
   role: OfferRole,
   apiBaseUrl: string,
-): Promise<VerifiedOffer> {
-  const kept = cache.get(txid, role)
-  if (kept !== undefined) return kept
-  const offer = await loadVerifiedOffer(deps, key, txid, role, apiBaseUrl)
-  cache.put(txid, role, offer)
-  return offer
+  read: (offer: VerifiedOffer) => Promise<T> | T,
+): Promise<T> {
+  return cache.use(txid, role, () => loadVerifiedOffer(deps, key, txid, role, apiBaseUrl), read)
 }
 
 /** The candidate's transaction as the indexer serves it, or undefined unless it has that txid. */
@@ -271,15 +268,25 @@ async function checkOffer(
   cache: OpenedOfferCache | undefined,
 ): Promise<ScanResult | undefined> {
   // An offer this session already opened and verified, in the first role that has one.
-  const kept = roles.find(role => cache?.get(txid, role) !== undefined)
+  const kept = roles.find(role => cache?.has(txid, role))
   if (kept !== undefined) return { role: kept, result: 'verified' }
   const hex = await fetchCreationTx(deps, txid, apiBaseUrl)
   if (hex === undefined) return { role: roles[0], result: 'invalid', code: CREATION_TX_MISMATCH }
 
   for (const role of roles) {
-    let offer: VerifiedOffer
     try {
-      offer = await openAndVerifyOffer(deps, role, key, hex)
+      if (cache === undefined) {
+        // Only the result is stored: the opened offer holds the offer's secrets.
+        ;(await openAndVerifyOffer(deps, role, key, hex)).opened.free()
+      } else {
+        // Kept opened in the session's cache, which owns it; readers in flight share the opening.
+        await cache.use(
+          txid,
+          role,
+          () => openAndVerifyOffer(deps, role, key, hex),
+          () => {},
+        )
+      }
     } catch (error) {
       if (!(error instanceof PrivateOfferError)) {
         // The gate throws other errors only once the offer opened, while it builds the offer's
@@ -291,10 +298,6 @@ async function checkOffer(
       if (error.addressedToKey) return { role, result: 'invalid', code: error.code }
       continue
     }
-    // Only the result is stored: the opened offer holds the offer's secrets, and lives in the
-    // session's cache, or is freed.
-    if (cache === undefined) offer.opened.free()
-    else cache.put(txid, role, offer)
     return { role, result: 'verified' }
   }
   return undefined

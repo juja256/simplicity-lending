@@ -16,7 +16,7 @@ import { loadLoan, type Loan } from '@/privateLending/loan'
 import { type LoanChainMessages, loanChainMessages } from '@/privateLending/loanMessages'
 import { openedOffersOf } from '@/privateLending/offerCache'
 import type { OpenedOfferItem } from '@/privateLending/offerView'
-import { cachedVerifiedOffer } from '@/privateLending/scan'
+import { withVerifiedOffer } from '@/privateLending/scan'
 import { useLwk } from '@/providers/lwk/useLwk'
 import { useWallet } from '@/providers/wallet/useWallet'
 
@@ -120,21 +120,23 @@ function useLoanQuery(): (item: OpenedOfferItem) => UseQueryOptions<LoanWithMess
           const [deps, key] = await Promise.all([getDeps(), getLendingKey()])
           const { txid, role } = item
           // The session's cache owns the opened offer, which stays for the next read.
-          const offer = await cachedVerifiedOffer(
+          return withVerifiedOffer(
             openedOffersOf(key),
             deps,
             key,
             txid,
             role,
             PRIVATE_API_BASE_URL,
+            async offer => {
+              const loan = await loadLoan(deps, offer, key, loanOutpoint)
+              try {
+                const messages = loanChainMessages(deps.wasm, offer, key, role, loan)
+                return { ...loanFigures(loan), messages }
+              } finally {
+                loan.state.free()
+              }
+            },
           )
-          const loan = await loadLoan(deps, offer, key, loanOutpoint)
-          try {
-            const messages = loanChainMessages(deps.wasm, offer, key, role, loan)
-            return { ...loanFigures(loan), messages }
-          } finally {
-            loan.state.free()
-          }
         },
       }
     },

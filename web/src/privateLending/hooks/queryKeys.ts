@@ -5,6 +5,7 @@
 import type { QueryClient } from '@tanstack/react-query'
 
 import { privateQueryKeys } from '@/api/indexer/queryKeys'
+import { clearFoundCollaterals } from '@/privateLending/collateralSearch'
 import { dropOpenedOffers } from '@/privateLending/offerCache'
 
 const LENDING_KEY_IDENTITY_ROOT = 'lending-key-identity'
@@ -99,4 +100,5 @@ const SESSION_QUERY_ROOTS: readonly (readonly unknown[])[] = [
 export function removePrivateSessionQueries(queryClient: QueryClient): void {
   for (const queryKey of SESSION_QUERY_ROOTS) queryClient.removeQueries({ queryKey })
   dropOpenedOffers()
+  clearFoundCollaterals()
 }

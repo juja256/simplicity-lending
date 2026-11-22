@@ -4,7 +4,7 @@ import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from './deps'
 import { dropOpenedOffers, OpenedOfferCache, openedOffersOf } from './offerCache'
-import { cachedVerifiedOffer, type ScanState, type ScanStore, syncOffers } from './scan'
+import { type ScanState, type ScanStore, syncOffers, withVerifiedOffer } from './scan'
 import type { VerifiedOffer } from './verify'
 
 const TXID_A = 'aa'.repeat(32)
@@ -53,6 +53,15 @@ function candidate(txid: string) {
   }
 }
 
+/** Puts `offer` in `cache` as a scan does: opened by the cache's first reader, then left there. */
+const keep = (cache: OpenedOfferCache, txid: string, offer: VerifiedOffer) =>
+  cache.use(
+    txid,
+    'lender',
+    async () => offer,
+    () => {},
+  )
+
 describe('the opened offers cache', () => {
   beforeEach(() => {
     dropOpenedOffers()
@@ -61,24 +70,24 @@ describe('the opened offers cache', () => {
     indexer.creationTx.mockReset()
   })
 
-  it('frees only the offers no longer listed, and all of them at the end of the session', () => {
+  it('frees only the offers no longer listed, and all of them at the end of the session', async () => {
     const cache = new OpenedOfferCache()
     const [a, b] = [opened(), opened()]
-    cache.put(TXID_A, 'lender', a)
-    cache.put(TXID_B, 'lender', b)
+    await keep(cache, TXID_A, a)
+    await keep(cache, TXID_B, b)
     cache.retain([TXID_A])
     expect(a.free).not.toHaveBeenCalled()
     expect(b.free).toHaveBeenCalledOnce()
-    expect(cache.get(TXID_B, 'lender')).toBeUndefined()
-    dropOpenedOffers()
+    expect(cache.has(TXID_B, 'lender')).toBe(false)
     cache.clear()
     expect(a.free).toHaveBeenCalledOnce()
+    expect(b.free).toHaveBeenCalledOnce()
   })
 
-  it('starts a cache for another key and frees the old key’s offers', () => {
+  it('starts a cache for another key and frees the old key’s offers', async () => {
     const first = openedOffersOf(key)
     const offer = opened()
-    first.put(TXID_A, 'lender', offer)
+    await keep(first, TXID_A, offer)
     expect(openedOffersOf(key)).toBe(first)
     const other = openedOffersOf({ fingerprint: () => 'other' } as unknown as LendingKey)
     expect(other).not.toBe(first)
@@ -86,19 +95,97 @@ describe('the opened offers cache', () => {
     expect(other.size).toBe(0)
   })
 
-  it('opens an offer once for many reads', async () => {
-    verify.open.mockImplementation(async () => opened())
+  it('opens an offer once for many reads, also concurrent ones', async () => {
+    let finish: (offer: VerifiedOffer) => void = () => {}
+    verify.open.mockImplementation(() => new Promise<VerifiedOffer>(resolve => (finish = resolve)))
     indexer.creationTx.mockResolvedValue(TXID_A)
     const cache = new OpenedOfferCache()
-    const read = () => cachedVerifiedOffer(cache, deps, key, TXID_A, 'lender', 'http://indexer')
-    const first = await read()
-    expect(await read()).toBe(first)
+    const seen: VerifiedOffer[] = []
+    const read = () =>
+      withVerifiedOffer(cache, deps, key, TXID_A, 'lender', 'http://indexer', offer => {
+        seen.push(offer)
+      })
+    const reads = Promise.all([read(), read()])
+    await vi.waitFor(() => expect(verify.open).toHaveBeenCalledTimes(1))
+    const offer = opened()
+    finish(offer)
+    await reads
+    await read()
     expect(verify.open).toHaveBeenCalledTimes(1)
     expect(indexer.creationTx).toHaveBeenCalledTimes(1)
+    expect(seen).toEqual([offer, offer, offer])
+    expect(offer.free).not.toHaveBeenCalled()
+  })
+
+  it('does not forget a failed opening: the next read opens again', async () => {
+    const cache = new OpenedOfferCache()
+    const failing = () =>
+      cache.use(
+        TXID_A,
+        'lender',
+        () => Promise.reject(new Error('no')),
+        () => {},
+      )
+    await expect(failing()).rejects.toThrow('no')
+    await keep(cache, TXID_A, opened())
+    expect(cache.has(TXID_A, 'lender')).toBe(true)
+  })
+
+  it('does not free an offer under a reader that is inside it: the last reader frees it', async () => {
+    const cache = new OpenedOfferCache()
+    const offer = opened()
+    await keep(cache, TXID_A, offer)
+    let release: () => void = () => {}
+    const holding = cache.use(
+      TXID_A,
+      'lender',
+      async () => opened(),
+      () => new Promise<void>(resolve => (release = resolve)),
+    )
+    await vi.waitFor(() => expect(release).not.toBe(undefined))
+    // dropped from the listing, and then the session ends, while the reader is still inside
+    cache.retain([])
+    cache.clear()
+    expect(offer.free).not.toHaveBeenCalled()
+    release()
+    await holding
+    expect(offer.free).toHaveBeenCalledOnce()
+    // the dropped entry is gone: the next read opens its own
+    expect(cache.has(TXID_A, 'lender')).toBe(false)
+  })
+
+  it('shares one opening between a scan and a reader that overlap', async () => {
+    let finish: (offer: VerifiedOffer) => void = () => {}
+    verify.open.mockImplementation(() => new Promise<VerifiedOffer>(resolve => (finish = resolve)))
+    indexer.creationTx.mockImplementation(async (txid: string) => txid)
+    indexer.candidates.mockResolvedValue({ last_indexed_height: 50, items: [candidate(TXID_A)] })
+    const cache = new OpenedOfferCache()
+    const reader = withVerifiedOffer(
+      cache,
+      deps,
+      key,
+      TXID_A,
+      'lender',
+      'http://indexer',
+      offer => offer,
+    )
+    await vi.waitFor(() => expect(verify.open).toHaveBeenCalledTimes(1))
+    const store = { get: async () => undefined, set: async () => {} }
+    const scan = syncOffers(deps, key, 'http://indexer', store, cache)
+    const offer = opened()
+    finish(offer)
+    const [read] = await Promise.all([reader, scan])
+    expect(read).toBe(offer)
+    expect(verify.open).toHaveBeenCalledTimes(1)
+    expect(offer.free).not.toHaveBeenCalled()
   })
 
   it('does not open an unchanged offer again in a second scan, and opens only the new one', async () => {
-    verify.open.mockImplementation(async () => opened())
+    const offers: ReturnType<typeof opened>[] = []
+    verify.open.mockImplementation(async () => {
+      offers.push(opened())
+      return offers[offers.length - 1]
+    })
     indexer.creationTx.mockImplementation(async (txid: string) => txid)
     const listed = [candidate(TXID_A)]
     indexer.candidates.mockImplementation(async () => ({
@@ -116,15 +203,14 @@ describe('the opened offers cache', () => {
 
     await syncOffers(deps, key, 'http://indexer', makeStore(), cache)
     expect(verify.open).toHaveBeenCalledTimes(1)
-    const kept = cache.get(TXID_A, 'lender')
-    expect(kept).toBeDefined()
+    expect(cache.has(TXID_A, 'lender')).toBe(true)
 
     // a refresh with a new offer: only the new one is opened, the first is kept, not freed
     listed.push(candidate(TXID_B))
     await syncOffers(deps, key, 'http://indexer', makeStore(), cache)
     expect(verify.open).toHaveBeenCalledTimes(2)
-    expect(cache.get(TXID_A, 'lender')).toBe(kept)
-    expect((kept?.opened.free as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(0)
+    expect(cache.has(TXID_A, 'lender')).toBe(true)
+    expect(offers[0].free).not.toHaveBeenCalled()
 
     // a scan that lost its state (a cleared store) finds the offers kept, and opens none again
     stored.state = undefined
@@ -139,11 +225,11 @@ describe('the opened offers cache', () => {
     indexer.candidates.mockResolvedValue({ last_indexed_height: 50, items: [candidate(TXID_A)] })
     const cache = new OpenedOfferCache()
     const gone = opened()
-    cache.put(TXID_B, 'lender', gone)
+    await keep(cache, TXID_B, gone)
     const store = { get: async () => undefined, set: async () => {} }
     await syncOffers(deps, key, 'http://indexer', store, cache)
     expect(gone.free).toHaveBeenCalledOnce()
-    expect(cache.get(TXID_B, 'lender')).toBeUndefined()
-    expect(cache.get(TXID_A, 'lender')).toBeDefined()
+    expect(cache.has(TXID_B, 'lender')).toBe(false)
+    expect(cache.has(TXID_A, 'lender')).toBe(true)
   })
 })

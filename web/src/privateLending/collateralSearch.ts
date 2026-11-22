@@ -8,6 +8,28 @@ import type { SearchRequest, SearchResponse } from './searchWorker'
 const found = new Map<string, Promise<bigint | undefined>>()
 let nextId = 0
 
+/** Searches running at once: each takes a worker's CPU for seconds, and holds its own wasm copy. */
+const MAX_RUNNING = Math.max(1, Math.min(2, globalThis.navigator?.hardwareConcurrency ?? 2))
+let running = 0
+const waiting: (() => void)[] = []
+
+/** `run` when fewer than `MAX_RUNNING` searches run; later ones wait their turn. */
+async function queued<T>(run: () => Promise<T>): Promise<T> {
+  if (running >= MAX_RUNNING) await new Promise<void>(resolve => waiting.push(resolve))
+  running += 1
+  try {
+    return await run()
+  } finally {
+    running -= 1
+    waiting.shift()?.()
+  }
+}
+
+/** Forgets the searches' answers: the session that asked for them ended. */
+export function clearFoundCollaterals(): void {
+  found.clear()
+}
+
 function searchKey(search: CollateralSearchInput): string {
   return `${search.valueCommitment}:${search.assetCommitment}:${search.max}`
 }
@@ -41,7 +63,7 @@ export const findCollateralInWorker: CollateralFinder = search => {
   const key = searchKey(search)
   const known = found.get(key)
   if (known !== undefined) return known
-  const result = searchInWorker(search)
+  const result = queued(() => searchInWorker(search))
   found.set(key, result)
   result.catch(() => found.delete(key))
   return result
