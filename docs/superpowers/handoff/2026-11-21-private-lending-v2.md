@@ -1,14 +1,80 @@
-# Private lending v2: session handoff (2026-11-21)
+# Private lending v2: session handoff (2026-11-21, phase 7 added 2026-11-22)
 
-Read this file first. It covers v2 phases 5 and 6: both built, verified and reviewed; phase 5 is
-merged into `v2/main`, phase 6 waits for the user's go-ahead to merge. Every v2 phase is then
-done (phase 7 is postponed), and what remains is the user's final manual checks. This file
+Read this file first. It covers v2 phases 5, 6 and 7: all built, verified and reviewed; phases 5
+and 6 are merged into `v2/main`, phase 7 waits for the user's go-ahead to merge. Every v2 phase is
+then done, and what remains is the user's final manual checks (items 1 to 10). This file
 replaces `2026-11-16-private-lending-v2.md` for everything but the environment notes, which that
 file still holds (both machines) and this one only extends. The binding design is the spec,
 `docs/superpowers/specs/2026-11-06-private-lending-v2-design.md`; the plan is
 `docs/superpowers/plans/2026-11-12-private-lending-v2.md`.
 
-## Where things stand
+## Phase 7: proportional collateral release (spec item 3(b)), 2026-11-22
+
+**Where it stands.** On `v2/phase-7-proportional-release` (from `v2/main` at `dcc18a3`), pushed to
+the user's fork: tasks 1 to 11, the whole-branch review (two Opus seats, crates and web/docs) and
+its fix wave (`6c381af..5fecd68`), plus this handoff. Not merged.
+
+**What it built.** Each installment releases `c_k − c_(k+1)` of the collateral, with
+`c_k = ⌈d_k·C/R⌉`, proved in zero knowledge by a Sigma proof (V1–V7, the blinder tree's Merkle
+check and the index check) that the program verifies on chain. A per-loan carry token (`S = 2^50`,
+issued at creation output 4) holds the rounding remainder in two outputs (`e+1`, `R−e`); the
+first installment burns the leftover, the full repayment sweeps the carries, the cancellation
+burns the supply. The lender recovers `c_k` by a batched baby-step giant-step search (about 1 s
+and 45 MiB in wasm at `C = 2^44`) when an installment does not open, in a Web Worker. Bounds:
+`1 ≤ C ≤ 2^44`, `1 ≤ R ≤ 2^50 − 2`, at most 1024 installments. The zero-debt close is gone. The
+soundness proofs are `docs/superpowers/specs/2026-11-21-phase-7-proofs.md` (obligations O1–O11,
+all checked by the review); the design is the spec's "Phase 7 design note".
+
+**Verification (task 11, `6ba837a`; the fix wave re-ran what it touched).** Rust 319 tests, the
+2^44 search, 66 regtest tests, clippy, fmt, sqlx prepare; web 282 tests (287 after the fix wave),
+build, lint, parity, check:config, tsc on three configs; all 20 e2e stages on testnet from an empty
+state with a fresh indexer database (two installments released 6,654 and 4,436, the repayment gave
+back 8,910 of 20,000); `pnpm demo:testnet` (19.7 min; again 20.1 min after the fix wave); both
+compose builds; the docs build. Measured: an installment 45.5–49.9 kWU, a full repayment 30.1 kWU.
+
+**The review's fix wave.** The indexer read an installment that burns the borrower NFT as a full
+repayment (the program allows that burn, since phase 5), so the lender's app would show a repaid
+loan and never offer the liquidation; the indexer now tells the two apart by output 1's lock, and
+the web reads such an installment. The liquidation's confirm screen showed `C` instead of `c_k`.
+The full repayment refused when the indexer omitted a carry, though the carries come from the
+chain. Plus the zero-debt leftovers, a stale-state check in the repay form, the book's "Collateral
+held", freeing the wasm objects that hold blinders, two privacy tests, docs, and an e2e race.
+
+**Rulings made for the user in phase 7.** Each: what was decided, and what it costs if wrong.
+
+- R2: the installment's output count does not depend on the release — when nothing is released
+  the flow adds one extra confidential borrower output (1,000 sats of L-BTC from the fee coins).
+  Cost if the user meant an extra output on every installment: one output's weight each time.
+- R1: the proof's nonces also bind every witness secret. Cost: none.
+- L1: a saved installment that cannot be broadcast may be rebuilt for the same loan state only
+  with the same amount and a fresh first wallet input (input 2). Cost: a borrower who wants
+  another amount waits for the build to fail out or repays in full.
+- O11 / N5: input 2 stays the first principal coin; the carries follow the principal coins.
+- O10: carry burns are confidential with the same range-proof parameters as other outputs.
+- The lender's app refuses offers outside the bounds; the borrower's still opens them, so a
+  borrower can always cancel.
+- The wasm recomputes the contract's six new arguments with the core's functions (the contracts
+  crate does not build for wasm32), pinned to `from_terms` by a test.
+- Fee reserves cover the testnet-measured installment and full repayment before the margin; the
+  other actions' reserves are pinned in sats against their measured fees (Liquid charges on the
+  discounted size). Cost: a change of fee rate or discount trips the tests, not users.
+- The burned-NFT installment is fixed in the indexer and the web; the program stays frozen (a
+  change would change the program id and void the verification). Cost: the program still accepts
+  that burn; only the borrower who makes it is harmed. An indexer database filled before
+  `6c381af` keeps such a loan as repaid until re-indexed (the web refuses its claim).
+- The spec's and proofs' stale figures were synced (search 38 s → about 1 s; measured cost).
+
+**Left for later** (judged "can wait" by the reviews): four copies of `Y = x·G + y·J` pinned
+equal by tests; `crates/private-lending-wasm/src/loan.rs` at 3,700 lines; the parity script
+tampers 4 of the 6 new arguments; an unused binding in the program; the search queue may briefly
+run one more worker than its cap; tautological weight tests; duplicated Elements parsers in tests
+and the e2e; an unreachable branch in `proposalForm.ts`; `claimRepayment.ts`'s "reveal its key"
+wording and its unreachable `NothingToClaimError`; `pinned()` objects not freed in acceptance,
+principal claim, cancellation and creation. Final manual checks 8–10 cover what no automated run
+reaches: the real search Web Worker, a Jade signing the release and the carry sweep, and an
+installment that releases nothing.
+
+## Where things stand (phases 5 and 6, kept as history)
 
 - **Branches.** `v2/main` has phases 1 to 5 merged (phase 5 with `0f8dd34`). Phase 6 is on
   `v2/phase-6-messages`, pushed to the user's fork, ending with the review's fix wave
@@ -233,8 +299,10 @@ signature proves a put, not the key's latest.
    dev` on testnet; then `v2` may be proposed for `main`.
 
 Phase 6 is merged (`552aab6`). On 2026-11-21 the user brought phase 7 back for its feasibility
-spike, then postponed it again: the note and prototypes are in
-`docs/superpowers/specs/2026-11-21-phase-7-spike/`, and the plan's phase 7 section sums it up.
+spike, postponed it, then chose to build it (2026-11-21/22, above). Next, on the user's go-ahead:
+
+1. **Merge phase 7** into `v2/main` (`git merge --no-ff v2/phase-7-proportional-release`) and push.
+2. **Final manual checks** 1 to 10 in `pnpm dev` on testnet; then `v2` may be proposed for `main`.
 
 ## Environment (the user's Mac), additions to the 2026-11-16 handoff
 
@@ -246,8 +314,10 @@ spike, then postponed it again: the note and prototypes are in
   API used 8001 (`APPLICATION__PORT=8001`, and `VITE_API_URL=http://localhost:8001
   VITE_ESPLORA_BASE_URL=https://liquid.network/liquidtestnet` for the e2e).
 - Databases added: `lending-indexer-phase5-fix`, `lending-indexer-p6t8`,
-  `lending-indexer-p6t8-demo{,2,3}`, `lending-indexer-p6t9` and `lending-indexer-p6t9-demo` (all
-  free to drop).
+  `lending-indexer-p6t8-demo{,2,3}`, `lending-indexer-p6t9` and `lending-indexer-p6t9-demo`;
+  phase 7's `lending-indexer-p7t10{,-demo}`, `lending-indexer-p7t11-{sqlx,e2e,demo}` and
+  `lending-indexer-p7fix-{sqlx,e2e,demo}` (all free to drop). Phase 7's e2e states are kept as
+  `state.p7t10.json` and `state.p7t11.json`.
 - Old e2e states beside `web/.e2e-private/state.json`: `state.pre-p5-mac.json`,
   `state.p5fix-mac.json`, `state.p6t8.json`; keep them. Demo outputs of phase 6's task 8 are in
   `web/.e2e-private/demo-output.p6t8-run{1,2}` (run 2 is the stalled one).
