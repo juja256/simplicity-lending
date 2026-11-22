@@ -23,6 +23,10 @@ use crate::{
 
 /// The output of a creation transaction that holds the pending offer.
 const OFFER_VOUT: u32 = 3;
+/// The output of a creation transaction that holds the whole carry supply.
+const CREATION_CARRY_VOUT: u32 = 4;
+/// The outputs of an installment that hold the new carries.
+const INSTALLMENT_CARRY_VOUTS: [u32; 2] = [3, 4];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingSpend {
@@ -34,11 +38,10 @@ enum PendingSpend {
 enum ActiveSpend {
     Installment,
     FullRepayment,
-    ZeroDebtClose,
     Liquidation,
 }
 
-/// The input at which the borrower's branches (installment, full repayment, zero-debt close)
+/// The input at which the borrower's branches (installment, full repayment)
 /// spend the loan.
 const BORROWER_LOAN_INPUT: usize = 1;
 /// The input at which the liquidation spends the loan.
@@ -72,9 +75,8 @@ fn classify_pending_spend(tx: &Transaction, lender_nft: AssetId) -> PendingSpend
 /// branches, which the indexer sees without opening a commitment.
 ///
 /// The borrower's branches spend the loan at input 1, and output 0 tells them apart. A burned
-/// borrower NFT closes the loan: by the zero-debt close when output 1 is an `OP_RETURN` (the
-/// debt's blinder), and by the full repayment otherwise. An unburned one is an installment, with
-/// the successor loan at output 1 and the installment at output 2. The liquidation spends the loan
+/// borrower NFT is the full repayment. An unburned one is an installment, with the successor loan
+/// at output 1, the installment at output 2 and the new carries at outputs 3 and 4. The liquidation spends the loan
 /// at input 0 and burns the lender NFT in output 0. A spend that matches none of these layouts
 /// gives `None`: a real loan cannot make it, so the indexer does not guess.
 fn classify_active_spend(
@@ -84,13 +86,9 @@ fn classify_active_spend(
     lender_nft: AssetId,
 ) -> Option<ActiveSpend> {
     match loan_input {
-        BORROWER_LOAN_INPUT if burns_first(tx, borrower_nft) => tx.output.get(1).map(|out| {
-            if out.script_pubkey.is_op_return() {
-                ActiveSpend::ZeroDebtClose
-            } else {
-                ActiveSpend::FullRepayment
-            }
-        }),
+        BORROWER_LOAN_INPUT if burns_first(tx, borrower_nft) => {
+            tx.output.get(1).map(|_| ActiveSpend::FullRepayment)
+        }
         BORROWER_LOAN_INPUT if holds_first(tx, borrower_nft) && tx.output.len() > 2 => {
             Some(ActiveSpend::Installment)
         }
@@ -249,6 +247,17 @@ impl PrivateOffersTracker {
                             block_height,
                         )
                         .await?;
+                        for vout in INSTALLMENT_CARRY_VOUTS {
+                            self.add_utxo(
+                                sql_tx,
+                                tx,
+                                entry,
+                                PrivateUtxoType::Carry,
+                                vout,
+                                block_height,
+                            )
+                            .await?;
+                        }
                         tracing::info!(%offer_id, %txid, "Private offer installment paid");
                     }
                     Some(ActiveSpend::FullRepayment) => {
@@ -270,16 +279,6 @@ impl PrivateOffersTracker {
                         .await?;
                         tracing::info!(%offer_id, %txid, "Private offer repaid");
                     }
-                    Some(ActiveSpend::ZeroDebtClose) => {
-                        update_private_offer_status(
-                            sql_tx,
-                            offer_id,
-                            PrivateOfferStatus::Repaid,
-                            block_height,
-                        )
-                        .await?;
-                        tracing::info!(%offer_id, %txid, "Private offer closed at zero debt");
-                    }
                     Some(ActiveSpend::Liquidation) => {
                         update_private_offer_status(
                             sql_tx,
@@ -300,6 +299,11 @@ impl PrivateOffersTracker {
                         );
                     }
                 }
+            }
+            // An installment, the full repayment or the cancellation spends the carries, and the
+            // spend is recorded above. A liquidation leaves them unspent.
+            PrivateUtxoType::Carry => {
+                tracing::info!(%offer_id, %txid, "Private offer carry spent");
             }
             PrivateUtxoType::Principal
             | PrivateUtxoType::Repayment
@@ -387,32 +391,39 @@ impl PrivateOffersTracker {
             return Ok(());
         };
 
-        insert_private_offer_utxo(
-            sql_tx,
-            &PrivateOfferUtxoModel {
-                offer_id,
-                txid: offer.creation_txid.clone(),
-                vout: OFFER_VOUT as i32,
-                utxo_type: PrivateUtxoType::PendingOffer,
-                created_at_height: height,
-                spent_txid: None,
-                spent_at_height: None,
-            },
-        )
-        .await?;
-
-        self.cache.insert(
-            OutPoint {
-                txid,
-                vout: OFFER_VOUT,
-            },
-            PrivateOfferWatchEntry {
-                offer_id,
-                utxo_type: PrivateUtxoType::PendingOffer,
-                borrower_nft: found.borrower_nft,
-                lender_nft: found.lender_nft,
-            },
-        );
+        let entry = PrivateOfferWatchEntry {
+            offer_id,
+            utxo_type: PrivateUtxoType::PendingOffer,
+            borrower_nft: found.borrower_nft,
+            lender_nft: found.lender_nft,
+        };
+        for (vout, utxo_type) in [
+            (OFFER_VOUT, PrivateUtxoType::PendingOffer),
+            (CREATION_CARRY_VOUT, PrivateUtxoType::Carry),
+        ] {
+            // A creation without the carry output records the offer alone; the contract never
+            // lets a real one lack it.
+            if vout as usize >= tx.output.len() {
+                continue;
+            }
+            insert_private_offer_utxo(
+                sql_tx,
+                &PrivateOfferUtxoModel {
+                    offer_id,
+                    txid: offer.creation_txid.clone(),
+                    vout: vout as i32,
+                    utxo_type,
+                    created_at_height: height,
+                    spent_txid: None,
+                    spent_at_height: None,
+                },
+            )
+            .await?;
+            self.cache.insert(
+                OutPoint { txid, vout },
+                PrivateOfferWatchEntry { utxo_type, ..entry },
+            );
+        }
 
         tracing::info!(%offer_id, %txid, "Private offer indexed on creation");
 
@@ -494,13 +505,6 @@ mod tests {
         classify_active_spend(&tx, loan_input, asset(1), asset(2))
     }
 
-    fn op_return(data: &[u8]) -> TxOut {
-        TxOut {
-            script_pubkey: Script::new_op_return(data),
-            ..Default::default()
-        }
-    }
-
     #[test]
     fn active_spend_holding_the_borrower_nft_is_an_installment() {
         assert_eq!(
@@ -520,17 +524,6 @@ mod tests {
                 vec![burn(asset(1)), plain(asset(8)), plain(asset(9))]
             )),
             Some(ActiveSpend::FullRepayment)
-        );
-    }
-
-    #[test]
-    fn active_spend_burning_the_borrower_nft_with_an_op_return_is_a_zero_debt_close() {
-        assert_eq!(
-            classify(spend(
-                1,
-                vec![burn(asset(1)), op_return(&[7; 32]), plain(asset(9))]
-            )),
-            Some(ActiveSpend::ZeroDebtClose)
         );
     }
 

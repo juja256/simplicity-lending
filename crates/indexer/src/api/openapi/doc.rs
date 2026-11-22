@@ -140,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn openapi_utxo_types_include_the_installment() {
+    fn openapi_utxo_types_include_the_installment_and_the_carry() {
         let spec = ApiDoc::openapi();
         let schemas = spec.components.expect("components").schemas;
         let utxo_type = serde_json::to_value(&schemas["PrivateUtxoType"]).expect("serialize");
@@ -151,7 +151,8 @@ mod tests {
                 "active_offer",
                 "principal",
                 "repayment",
-                "installment"
+                "installment",
+                "carry"
             ])
         );
     }

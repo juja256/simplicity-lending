@@ -124,7 +124,11 @@ async fn candidate_details_include_its_utxos() -> anyhow::Result<()> {
     let (borrower, lender) = (lending_key(1), lending_key(2));
     let creation = private_creation(&borrower, &lender, outpoint_with_txid_byte(0x31, 7));
     let accept = acceptance_tx(&creation);
-    let repay = repayment_tx(&creation, OutPoint::new(accept.txid(), 0));
+    let repay = repayment_tx(
+        &creation,
+        OutPoint::new(accept.txid(), 0),
+        &[OutPoint::new(creation.tx.txid(), 4)],
+    );
     let mut processor = block_processor(&pool).await?;
     index_block(&mut processor, 100, std::slice::from_ref(&creation.tx)).await?;
     index_block(&mut processor, 101, std::slice::from_ref(&accept)).await?;
@@ -144,12 +148,21 @@ async fn candidate_details_include_its_utxos() -> anyhow::Result<()> {
         .collect();
     assert_eq!(
         types,
-        ["pending_offer", "active_offer", "principal", "repayment"]
+        [
+            "pending_offer",
+            "carry",
+            "active_offer",
+            "principal",
+            "repayment"
+        ]
     );
     assert_eq!(utxos[0]["spent_txid"], accept.txid().to_string());
     assert_eq!(utxos[0]["spent_at_height"], 101);
-    assert!(utxos[3]["spent_txid"].is_null());
-    assert!(utxos[3]["spent_at_height"].is_null());
+    // The carry is served with its type and is spent by the full repayment.
+    assert_eq!(utxos[1]["spent_txid"], repay.txid().to_string());
+    assert_eq!(utxos[1]["spent_at_height"], 102);
+    assert!(utxos[4]["spent_txid"].is_null());
+    assert!(utxos[4]["spent_at_height"].is_null());
     Ok(())
 }
 

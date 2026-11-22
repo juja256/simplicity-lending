@@ -15,7 +15,6 @@ use crate::common::{
     index_block, installment_claim_tx, installment_tx, lending_key, liquidation_tx, normal_output,
     outpoint_with_txid_byte, private_creation, private_offer_count, private_offer_row,
     private_program_id, private_utxo_rows, repayment_tx, test_pool, tx_with_input, tx_with_inputs,
-    zero_debt_close_tx,
 };
 
 #[tokio::test]
@@ -64,20 +63,22 @@ async fn private_offer_creation_is_indexed() -> anyhow::Result<()> {
     );
 
     let utxos = private_utxo_rows(&pool, row.id).await?;
-    assert_eq!(utxos.len(), 1);
+    let creation_txid = creation.tx.txid().to_byte_array().to_vec();
     assert_eq!(
-        (
-            utxos[0].utxo_type,
-            utxos[0].txid.clone(),
-            utxos[0].vout,
-            utxos[0].spent_txid.clone()
-        ),
-        (
-            PrivateUtxoType::PendingOffer,
-            creation.tx.txid().to_byte_array().to_vec(),
-            3,
-            None
-        )
+        utxos
+            .iter()
+            .map(|u| (u.utxo_type, u.txid.clone(), u.vout, u.spent_txid.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                PrivateUtxoType::PendingOffer,
+                creation_txid.clone(),
+                3,
+                None
+            ),
+            // Creation's output 4 is the first carry.
+            (PrivateUtxoType::Carry, creation_txid, 4, None),
+        ]
     );
     Ok(())
 }
@@ -101,7 +102,7 @@ async fn reindexing_a_creation_does_not_duplicate_it() -> anyhow::Result<()> {
         .await?
         .expect("indexed");
     assert_eq!(row.created_at_height, 100);
-    assert_eq!(private_utxo_rows(&pool, row.id).await?.len(), 1);
+    assert_eq!(private_utxo_rows(&pool, row.id).await?.len(), 2);
     Ok(())
 }
 
@@ -214,6 +215,7 @@ async fn accepted_offer_becomes_active() -> anyhow::Result<()> {
                 outpoint(&c.tx, 3),
                 Some((OutPoint { txid: a, vout: 0 }, 101)),
             ),
+            (PrivateUtxoType::Carry, outpoint(&c.tx, 4), None),
             (PrivateUtxoType::ActiveOffer, outpoint(&accept, 0), None),
             (PrivateUtxoType::Principal, outpoint(&accept, 1), None),
         ],
@@ -240,17 +242,19 @@ async fn cancelled_offer_is_cancelled() -> anyhow::Result<()> {
     assert_utxos(
         &pool,
         row.id,
-        &[(
-            PrivateUtxoType::PendingOffer,
-            outpoint(&c.tx, 3),
-            Some((
-                OutPoint {
-                    txid: cancel.txid(),
-                    vout: 0,
-                },
-                101,
-            )),
-        )],
+        &[
+            (
+                PrivateUtxoType::PendingOffer,
+                outpoint(&c.tx, 3),
+                spent_by(&cancel, 101),
+            ),
+            // The cancellation spends creation's carry and burns it.
+            (
+                PrivateUtxoType::Carry,
+                outpoint(&c.tx, 4),
+                spent_by(&cancel, 101),
+            ),
+        ],
     )
     .await;
     Ok(())
@@ -263,7 +267,7 @@ async fn repaid_offer_and_both_claims() -> anyhow::Result<()> {
     let mut processor = block_processor(&pool).await?;
     let c = creation();
     let accept = acceptance_tx(&c);
-    let repay = repayment_tx(&c, outpoint(&accept, 0));
+    let repay = repayment_tx(&c, outpoint(&accept, 0), &[outpoint(&c.tx, 4)]);
     index_block(&mut processor, 100, std::slice::from_ref(&c.tx)).await?;
     index_block(&mut processor, 101, std::slice::from_ref(&accept)).await?;
     index_block(&mut processor, 102, std::slice::from_ref(&repay)).await?;
@@ -324,6 +328,11 @@ async fn repaid_offer_and_both_claims() -> anyhow::Result<()> {
                 )),
             ),
             (
+                PrivateUtxoType::Carry,
+                outpoint(&c.tx, 4),
+                Some((OutPoint { txid: r, vout: 0 }, 102)),
+            ),
+            (
                 PrivateUtxoType::ActiveOffer,
                 outpoint(&accept, 0),
                 Some((OutPoint { txid: r, vout: 0 }, 102)),
@@ -375,6 +384,15 @@ async fn liquidated_offer_is_liquidated() -> anyhow::Result<()> {
             .iter()
             .all(|u| u.utxo_type != PrivateUtxoType::Repayment)
     );
+    // The liquidation does not spend the carries: they stay with the borrower.
+    let carry = utxos
+        .iter()
+        .find(|u| u.utxo_type == PrivateUtxoType::Carry)
+        .expect("carry utxo");
+    assert_eq!(
+        (carry.spent_txid.clone(), carry.spent_at_height),
+        (None, None)
+    );
     Ok(())
 }
 
@@ -393,12 +411,22 @@ async fn installment_keeps_the_offer_active() -> anyhow::Result<()> {
     let mut processor = block_processor(&pool).await?;
     let c = creation();
     let accept = acceptance_tx(&c);
-    let first = installment_tx(&c, outpoint(&c.tx, 0), outpoint(&accept, 0));
-    let second = installment_tx(&c, outpoint(&first, 0), outpoint(&first, 1));
+    let first = installment_tx(
+        &c,
+        outpoint(&c.tx, 0),
+        outpoint(&accept, 0),
+        &[outpoint(&c.tx, 4)],
+    );
+    let second = installment_tx(
+        &c,
+        outpoint(&first, 0),
+        outpoint(&first, 1),
+        &[outpoint(&first, 3), outpoint(&first, 4)],
+    );
     index_block(&mut processor, 100, std::slice::from_ref(&c.tx)).await?;
     index_block(&mut processor, 101, std::slice::from_ref(&accept)).await?;
     index_block(&mut processor, 102, std::slice::from_ref(&first)).await?;
-    // After a restart the successor loan's watch entry comes from the database.
+    // After a restart the successor loan's and the carries' watch entries come from the database.
     let mut processor = block_processor(&pool).await?;
     index_block(&mut processor, 103, std::slice::from_ref(&second)).await?;
 
@@ -418,6 +446,11 @@ async fn installment_keeps_the_offer_active() -> anyhow::Result<()> {
                 spent_by(&accept, 101),
             ),
             (
+                PrivateUtxoType::Carry,
+                outpoint(&c.tx, 4),
+                spent_by(&first, 102),
+            ),
+            (
                 PrivateUtxoType::ActiveOffer,
                 outpoint(&accept, 0),
                 spent_by(&first, 102),
@@ -429,8 +462,20 @@ async fn installment_keeps_the_offer_active() -> anyhow::Result<()> {
                 spent_by(&second, 103),
             ),
             (PrivateUtxoType::Installment, outpoint(&first, 2), None),
+            (
+                PrivateUtxoType::Carry,
+                outpoint(&first, 3),
+                spent_by(&second, 103),
+            ),
+            (
+                PrivateUtxoType::Carry,
+                outpoint(&first, 4),
+                spent_by(&second, 103),
+            ),
             (PrivateUtxoType::ActiveOffer, outpoint(&second, 1), None),
             (PrivateUtxoType::Installment, outpoint(&second, 2), None),
+            (PrivateUtxoType::Carry, outpoint(&second, 3), None),
+            (PrivateUtxoType::Carry, outpoint(&second, 4), None),
         ],
     )
     .await;
@@ -439,51 +484,61 @@ async fn installment_keeps_the_offer_active() -> anyhow::Result<()> {
 
 #[tokio::test]
 #[serial]
-async fn zero_debt_close_is_repaid_without_a_repayment_utxo() -> anyhow::Result<()> {
+async fn full_repayment_after_an_installment_spends_the_carries() -> anyhow::Result<()> {
     let pool = test_pool().await?;
     let mut processor = block_processor(&pool).await?;
     let c = creation();
     let accept = acceptance_tx(&c);
-    let installment = installment_tx(&c, outpoint(&c.tx, 0), outpoint(&accept, 0));
-    let close = zero_debt_close_tx(&c, outpoint(&installment, 0), outpoint(&installment, 1));
+    let installment = installment_tx(
+        &c,
+        outpoint(&c.tx, 0),
+        outpoint(&accept, 0),
+        &[outpoint(&c.tx, 4)],
+    );
+    // The borrower NFT at input 0 and the loan at input 1, then the two carries.
+    let terms = &c.offer.signed_terms.terms;
+    let repay = tx_with_inputs(
+        vec![
+            outpoint(&installment, 0),
+            outpoint(&installment, 1),
+            outpoint(&installment, 3),
+            outpoint(&installment, 4),
+        ],
+        vec![
+            burn_output(terms.borrower_nft),
+            explicit_output(terms.principal_asset, terms.repayment_amount),
+            explicit_output(AssetId::from_slice(&[9; 32]).expect("asset"), 5_000),
+        ],
+    );
     index_block(&mut processor, 100, std::slice::from_ref(&c.tx)).await?;
     index_block(&mut processor, 101, std::slice::from_ref(&accept)).await?;
     index_block(&mut processor, 102, std::slice::from_ref(&installment)).await?;
-    index_block(&mut processor, 103, std::slice::from_ref(&close)).await?;
+    index_block(&mut processor, 103, std::slice::from_ref(&repay)).await?;
 
     let row = private_offer_row(&pool, c.tx.txid()).await?.expect("row");
     assert_eq!(
         (row.current_status, row.updated_at_height),
         (PrivateOfferStatus::Repaid, 103)
     );
-    assert_utxos(
-        &pool,
-        row.id,
-        &[
+    let carries: Vec<_> = private_utxo_rows(&pool, row.id)
+        .await?
+        .into_iter()
+        .filter(|u| u.utxo_type == PrivateUtxoType::Carry)
+        .map(|u| (u.vout, u.spent_txid, u.spent_at_height))
+        .collect();
+    let spent = |height| (Some(repay.txid().to_byte_array().to_vec()), Some(height));
+    assert_eq!(
+        carries,
+        vec![
             (
-                PrivateUtxoType::PendingOffer,
-                outpoint(&c.tx, 3),
-                spent_by(&accept, 101),
+                4,
+                Some(installment.txid().to_byte_array().to_vec()),
+                Some(102)
             ),
-            (
-                PrivateUtxoType::ActiveOffer,
-                outpoint(&accept, 0),
-                spent_by(&installment, 102),
-            ),
-            (PrivateUtxoType::Principal, outpoint(&accept, 1), None),
-            (
-                PrivateUtxoType::ActiveOffer,
-                outpoint(&installment, 1),
-                spent_by(&close, 103),
-            ),
-            (
-                PrivateUtxoType::Installment,
-                outpoint(&installment, 2),
-                None,
-            ),
-        ],
-    )
-    .await;
+            (3, spent(103).0, spent(103).1),
+            (4, spent(103).0, spent(103).1),
+        ]
+    );
     Ok(())
 }
 
@@ -494,9 +549,19 @@ async fn claimed_installment_is_spent() -> anyhow::Result<()> {
     let mut processor = block_processor(&pool).await?;
     let c = creation();
     let accept = acceptance_tx(&c);
-    let first = installment_tx(&c, outpoint(&c.tx, 0), outpoint(&accept, 0));
+    let first = installment_tx(
+        &c,
+        outpoint(&c.tx, 0),
+        outpoint(&accept, 0),
+        &[outpoint(&c.tx, 4)],
+    );
     let claim = installment_claim_tx(&c, outpoint(&accept, 2), &[outpoint(&first, 2)]);
-    let second = installment_tx(&c, outpoint(&first, 0), outpoint(&first, 1));
+    let second = installment_tx(
+        &c,
+        outpoint(&first, 0),
+        outpoint(&first, 1),
+        &[outpoint(&first, 3), outpoint(&first, 4)],
+    );
     index_block(&mut processor, 100, std::slice::from_ref(&c.tx)).await?;
     index_block(&mut processor, 101, std::slice::from_ref(&accept)).await?;
     index_block(&mut processor, 102, std::slice::from_ref(&first)).await?;
@@ -520,6 +585,11 @@ async fn claimed_installment_is_spent() -> anyhow::Result<()> {
                 spent_by(&accept, 101),
             ),
             (
+                PrivateUtxoType::Carry,
+                outpoint(&c.tx, 4),
+                spent_by(&first, 102),
+            ),
+            (
                 PrivateUtxoType::ActiveOffer,
                 outpoint(&accept, 0),
                 spent_by(&first, 102),
@@ -535,8 +605,20 @@ async fn claimed_installment_is_spent() -> anyhow::Result<()> {
                 outpoint(&first, 2),
                 spent_by(&claim, 103),
             ),
+            (
+                PrivateUtxoType::Carry,
+                outpoint(&first, 3),
+                spent_by(&second, 104),
+            ),
+            (
+                PrivateUtxoType::Carry,
+                outpoint(&first, 4),
+                spent_by(&second, 104),
+            ),
             (PrivateUtxoType::ActiveOffer, outpoint(&second, 1), None),
             (PrivateUtxoType::Installment, outpoint(&second, 2), None),
+            (PrivateUtxoType::Carry, outpoint(&second, 3), None),
+            (PrivateUtxoType::Carry, outpoint(&second, 4), None),
         ],
     )
     .await;
@@ -550,7 +632,12 @@ async fn liquidation_after_an_installment_sweeps_it() -> anyhow::Result<()> {
     let mut processor = block_processor(&pool).await?;
     let c = creation();
     let accept = acceptance_tx(&c);
-    let installment = installment_tx(&c, outpoint(&c.tx, 0), outpoint(&accept, 0));
+    let installment = installment_tx(
+        &c,
+        outpoint(&c.tx, 0),
+        outpoint(&accept, 0),
+        &[outpoint(&c.tx, 4)],
+    );
     let terms = &c.offer.signed_terms.terms;
     let liquidate = tx_with_inputs(
         vec![
@@ -584,6 +671,11 @@ async fn liquidation_after_an_installment_sweeps_it() -> anyhow::Result<()> {
                 spent_by(&accept, 101),
             ),
             (
+                PrivateUtxoType::Carry,
+                outpoint(&c.tx, 4),
+                spent_by(&installment, 102),
+            ),
+            (
                 PrivateUtxoType::ActiveOffer,
                 outpoint(&accept, 0),
                 spent_by(&installment, 102),
@@ -599,6 +691,9 @@ async fn liquidation_after_an_installment_sweeps_it() -> anyhow::Result<()> {
                 outpoint(&installment, 2),
                 spent_by(&liquidate, 103),
             ),
+            // The liquidation does not spend the carries.
+            (PrivateUtxoType::Carry, outpoint(&installment, 3), None),
+            (PrivateUtxoType::Carry, outpoint(&installment, 4), None),
         ],
     )
     .await;
@@ -636,6 +731,7 @@ async fn active_spend_that_matches_no_layout_is_refused() -> anyhow::Result<()> 
                 outpoint(&c.tx, 3),
                 spent_by(&accept, 101),
             ),
+            (PrivateUtxoType::Carry, outpoint(&c.tx, 4), None),
             (
                 PrivateUtxoType::ActiveOffer,
                 outpoint(&accept, 0),
@@ -659,7 +755,7 @@ async fn offer_created_and_accepted_in_one_block_is_active() -> anyhow::Result<(
 
     let row = private_offer_row(&pool, c.tx.txid()).await?.expect("row");
     assert_eq!(row.current_status, PrivateOfferStatus::Active);
-    assert_eq!(private_utxo_rows(&pool, row.id).await?.len(), 3);
+    assert_eq!(private_utxo_rows(&pool, row.id).await?.len(), 4);
     Ok(())
 }
 
@@ -669,7 +765,7 @@ async fn tracking_survives_restarts() -> anyhow::Result<()> {
     let pool = test_pool().await?;
     let c = creation();
     let accept = acceptance_tx(&c);
-    let repay = repayment_tx(&c, outpoint(&accept, 0));
+    let repay = repayment_tx(&c, outpoint(&accept, 0), &[outpoint(&c.tx, 4)]);
 
     let mut processor = block_processor(&pool).await?;
     index_block(&mut processor, 100, std::slice::from_ref(&c.tx)).await?;
@@ -825,6 +921,7 @@ async fn a_transition_does_not_record_outputs_the_transaction_lacks() -> anyhow:
         kinds,
         vec![
             (PrivateUtxoType::PendingOffer, 3),
+            (PrivateUtxoType::Carry, 4),
             (PrivateUtxoType::ActiveOffer, 0)
         ]
     );

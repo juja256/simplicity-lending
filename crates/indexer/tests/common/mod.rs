@@ -163,6 +163,7 @@ pub fn private_creation(
             nft_output(lender_nft),
             marker_output,
             collateral_output,
+            explicit_output(carry_asset(), CARRY_SUPPLY),
         ],
     );
 
@@ -186,6 +187,27 @@ pub fn explicit_output(asset: AssetId, amount: u64) -> TxOut {
         script_pubkey: non_op_return_script(),
         ..Default::default()
     }
+}
+
+/// The carry token's asset: the indexer does not read it, so any asset stands for it.
+fn carry_asset() -> AssetId {
+    asset(0xca)
+}
+
+/// The carry supply `S = 2^50`, held by creation's output 4.
+pub const CARRY_SUPPLY: u64 = 1 << 50;
+
+/// The `OP_RETURN` that burns `amount` carry units.
+fn carry_burn(amount: u64) -> TxOut {
+    TxOut {
+        value: confidential::Value::Explicit(amount),
+        ..burn_output(carry_asset())
+    }
+}
+
+/// An output holding a carry: the indexer reads the layout, not the amount.
+fn carry_output() -> TxOut {
+    explicit_output(carry_asset(), 1)
 }
 
 fn creation_outpoint(c: &PrivateCreation, vout: u32) -> OutPoint {
@@ -212,7 +234,7 @@ pub fn acceptance_tx(c: &PrivateCreation) -> Transaction {
     )
 }
 
-/// Cancellation: burns both NFTs and returns the collateral.
+/// Cancellation: burns both NFTs and the carry supply, and returns the collateral.
 pub fn cancellation_tx(c: &PrivateCreation) -> Transaction {
     let terms = &c.offer.signed_terms.terms;
     tx_with_inputs(
@@ -220,56 +242,57 @@ pub fn cancellation_tx(c: &PrivateCreation) -> Transaction {
             creation_outpoint(c, 3),
             creation_outpoint(c, 1),
             creation_outpoint(c, 0),
+            creation_outpoint(c, 4),
         ],
         vec![
             burn_output(terms.lender_nft),
             burn_output(terms.borrower_nft),
             explicit_output(asset(9), 5_000),
+            carry_burn(CARRY_SUPPLY),
         ],
     )
 }
 
-/// Full repayment: burns the borrower NFT, pays the lender and returns the collateral.
-pub fn repayment_tx(c: &PrivateCreation, active: OutPoint) -> Transaction {
+/// Full repayment: burns the borrower NFT and the `carries` it spends, pays the lender and
+/// returns the collateral.
+pub fn repayment_tx(c: &PrivateCreation, active: OutPoint, carries: &[OutPoint]) -> Transaction {
     let terms = &c.offer.signed_terms.terms;
     tx_with_inputs(
-        vec![creation_outpoint(c, 0), active],
+        [creation_outpoint(c, 0), active]
+            .into_iter()
+            .chain(carries.iter().copied())
+            .collect(),
         vec![
             burn_output(terms.borrower_nft),
             explicit_output(terms.principal_asset, terms.repayment_amount),
             explicit_output(asset(9), 5_000),
+            carry_burn(1),
         ],
     )
 }
 
-/// Installment: spends the borrower NFT at `nft` and the loan at `active`, and returns the NFT
-/// unburned at output 0, with the successor loan at output 1 and the installment at output 2.
-pub fn installment_tx(c: &PrivateCreation, nft: OutPoint, active: OutPoint) -> Transaction {
+/// Installment: spends the borrower NFT at `nft`, the loan at `active` and the `carries`, and
+/// returns the NFT unburned at output 0, with the successor loan at output 1, the installment at
+/// output 2 and the new carries at outputs 3 and 4.
+pub fn installment_tx(
+    c: &PrivateCreation,
+    nft: OutPoint,
+    active: OutPoint,
+    carries: &[OutPoint],
+) -> Transaction {
     let terms = &c.offer.signed_terms.terms;
     tx_with_inputs(
-        vec![nft, active, outpoint_with_txid_byte(0x43, 0)],
+        [nft, active, outpoint_with_txid_byte(0x43, 0)]
+            .into_iter()
+            .chain(carries.iter().copied())
+            .collect(),
         vec![
             explicit_output(terms.borrower_nft, 1),
             explicit_output(asset(9), 5_000),
             explicit_output(terms.principal_asset, 1_000),
+            carry_output(),
+            carry_output(),
             explicit_output(terms.principal_asset, 500),
-        ],
-    )
-}
-
-/// Zero-debt close: burns the borrower NFT, reveals the debt's blinder in an `OP_RETURN` at output
-/// 1 and returns the collateral.
-pub fn zero_debt_close_tx(c: &PrivateCreation, nft: OutPoint, active: OutPoint) -> Transaction {
-    let terms = &c.offer.signed_terms.terms;
-    tx_with_inputs(
-        vec![nft, active],
-        vec![
-            burn_output(terms.borrower_nft),
-            TxOut {
-                script_pubkey: Script::new_op_return(&[7; 32]),
-                ..Default::default()
-            },
-            explicit_output(asset(9), 5_000),
         ],
     )
 }
