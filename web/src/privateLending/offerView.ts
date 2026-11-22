@@ -368,8 +368,8 @@ export const LENDER_ACTION_LABELS: Record<LenderAction, string> = {
  * - liquidate an active loan once the tip is past its expiry, which also sweeps the installments
  *   that open;
  * - before that, claim the installments listed unspent that open (`claimableInstallments`);
- * - once the loan closed, by the full repayment or the zero-debt close, claim the repayment: the
- *   final claim, which sweeps every unclaimed installment, until nothing is left (`claimed`).
+ * - once the loan closed by the full repayment, claim the repayment: the final claim, which sweeps
+ *   every unclaimed installment, until nothing is left (`claimed`).
  */
 export function lenderView(
   item: OpenedOfferItem,

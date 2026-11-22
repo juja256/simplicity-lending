@@ -4,6 +4,7 @@ import { FINALIZED_THRESHOLD, type PrivateTxRecord } from '@/providers/pendingTr
 import { lwk } from '@/test/lwk'
 
 import {
+  checkSameLoan,
   INSTALLMENT_AFTER_TERM_NOTE,
   INSTALLMENT_LIMIT_NOTE,
   INSTALLMENT_UNSENT_AFTER_TERM_NOTE,
@@ -11,6 +12,7 @@ import {
   installmentTraceInputs,
   installmentTraces,
   keepsDiscardTrace,
+  LOAN_CHANGED_NOTE,
   repayBroadcast,
   repayPlan,
   staleInstallmentRecords,
@@ -90,6 +92,18 @@ describe('repayPlan', () => {
 
 // Review focus 4, for a saved installment: the form's plan for its amount turns `refused` at the
 // expiry, so the saved record's kind must keep its check and block it.
+// The form shows what the loan owes and the collateral it releases for the loan output it read;
+// a build on a newer one would pay on figures the borrower did not see.
+describe('the loan a payment builds on', () => {
+  it("is the form's loan output, or the payment is refused", () => {
+    expect(() => checkSameLoan(`${'aa'.repeat(32)}:1`, `${'aa'.repeat(32)}:1`)).not.toThrow()
+    expect(() => checkSameLoan(`${'aa'.repeat(32)}:1`, `${'bb'.repeat(32)}:1`)).toThrow(
+      LOAN_CHANGED_NOTE,
+    )
+    expect(() => checkSameLoan(undefined, `${'bb'.repeat(32)}:1`)).toThrow(LOAN_CHANGED_NOTE)
+  })
+})
+
 describe('the broadcast of the repay form', () => {
   const installment = { kind: 'private_installment' } as const
   const repayment = { kind: 'private_repay_offer' } as const

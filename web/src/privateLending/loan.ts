@@ -77,16 +77,23 @@ function spentAt(tx: Transaction, input: number): string | undefined {
 }
 
 /**
+ * Whether `output` holds exactly one explicit unit of the borrower NFT, at any script: what the
+ * contract checks of an installment's output 0.
+ */
+function carriesBorrowerNft(offer: VerifiedOffer, output: TxOut | undefined): boolean {
+  return (
+    output !== undefined &&
+    output.asset()?.toString() === offer.opened.borrowerNft() &&
+    output.value() === NFT_AMOUNT
+  )
+}
+
+/**
  * Whether `output` holds exactly one explicit unit of the borrower NFT, unburned: not at an
  * `OP_RETURN`, where the full repayment and the cancellation burn it.
  */
 function holdsBorrowerNft(offer: VerifiedOffer, output: TxOut | undefined): boolean {
-  return (
-    output !== undefined &&
-    output.asset()?.toString() === offer.opened.borrowerNft() &&
-    output.value() === NFT_AMOUNT &&
-    !output.scriptPubkey().isProvablyUnspendable()
-  )
+  return carriesBorrowerNft(offer, output) && !output?.scriptPubkey().isProvablyUnspendable()
 }
 
 /** Whether `tx` spends the offer's pending offer at input 0: the acceptance or the cancellation. */
@@ -96,13 +103,16 @@ function spendsPendingOffer(offer: VerifiedOffer, tx: Transaction): boolean {
 }
 
 /**
- * Whether `tx` has an installment's outputs for this offer: the borrower NFT at output 0, unburned,
- * and output 2 at the installment lock. Only the borrower can move the NFT.
+ * Whether `tx` has an installment's outputs for this offer: the borrower NFT at output 0 and
+ * output 2 at the installment lock. Only the borrower can move the NFT. The contract does not
+ * check output 0's script, so an installment may burn the NFT there: it is still an installment,
+ * whose successor holds the loan (the indexer records it as one). `principalClaimedBefore`, which
+ * follows the NFT, requires it unburned.
  */
 function isInstallment(offer: VerifiedOffer, tx: Transaction): boolean {
   const lock = tx.outputs[INSTALLMENT_OUTPUT.installment]
   return (
-    holdsBorrowerNft(offer, tx.outputs[INSTALLMENT_OUTPUT.borrowerNft]) &&
+    carriesBorrowerNft(offer, tx.outputs[INSTALLMENT_OUTPUT.borrowerNft]) &&
     lock?.scriptPubkey().jet_sha256_hex() === offer.scripts.installmentOutputScriptHash
   )
 }
@@ -419,12 +429,14 @@ export interface LoanCarry {
 
 /**
  * The carries the borrower's next installment or full repayment spends, verified on chain (review
- * focus 4). The indexer, untrusted, names them (`indexerCarries`, `"<txid>:<vout>"`): they must be
- * exactly the carries `loan.state.carries()` opens from the loan's own transactions, which
- * `loadLoan` walked on chain: the creation's output 4 before the first installment (checked by
- * `creationCarrySupply`), then the last installment's outputs 3 and 4. Each must be locked to the
- * offer's principal asset_auth, which the borrower NFT unlocks. Throws otherwise, naming the carry
- * the indexer got wrong. The caller frees each `carry`.
+ * focus 4). They are the carries `loan.state.carries()` opens from the loan's own transactions,
+ * which `loadLoan` walked on chain: the creation's output 4 before the first installment (checked
+ * by `creationCarrySupply`), then the last installment's outputs 3 and 4. Each must be locked to
+ * the offer's principal asset_auth, which the borrower NFT unlocks. The indexer, untrusted, names
+ * the carries it lists unspent (`indexerCarries`, `"<txid>:<vout>"`): one the chain does not give
+ * is refused, naming it, while one it leaves out is spent all the same, since the chain decides.
+ * An omission refused would add no safety and could block the borrower's only exit after the
+ * expiry, the full repayment. Throws otherwise. The caller frees each `carry`.
  */
 export async function verifiedLoanCarries(
   deps: PrivateFlowDeps,
@@ -447,11 +459,6 @@ export async function verifiedLoanCarries(
           `The indexer names ${outpoint} as a carry of this loan, but the loan's carries on chain ` +
             `are ${outpoints.join(' and ')}`,
         )
-      }
-    }
-    for (const outpoint of outpoints) {
-      if (!named.has(outpoint)) {
-        throw new Error(`The indexer does not list the loan's carry ${outpoint} as unspent`)
       }
     }
     const step = loan.state.installmentCount

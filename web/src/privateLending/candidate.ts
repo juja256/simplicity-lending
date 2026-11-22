@@ -20,8 +20,8 @@ export function unspentUtxo(
 /**
  * The loan's carries the indexer lists unspent, `"<txid>:<vout>"`: the creation's carry supply
  * before the first installment, then the last installment's outputs 3 and 4. Untrusted: the
- * installment and the full repayment take them only when they are exactly the carries the loan
- * opens on chain (`verifiedLoanCarries`).
+ * installment and the full repayment spend the carries the loan opens on chain, and refuse a list
+ * that names any other (`verifiedLoanCarries`).
  */
 export function unspentCarries(candidate: PrivateCandidateDetails): string[] {
   return candidate.utxos

@@ -55,6 +55,7 @@ import {
   prevoutsOf,
   requireOutput,
   type SpendLayout,
+  takePinned,
   walletCoinInput,
   wasmStep,
 } from './shared'
@@ -75,8 +76,8 @@ export interface RepaymentParams {
   feeCoins: WalletTxOut[]
   /**
    * The loan's carries as the indexer lists them unspent (`unspentCarries`), `"<txid>:<vout>"`:
-   * the builder requires exactly the carries the loan opens on chain (`verifiedLoanCarries`), and
-   * burns them.
+   * the builder spends and burns the carries the loan opens on chain, and refuses a list that
+   * names any other (`verifiedLoanCarries`).
    */
   carryOutpoints: readonly string[]
   /** A confidential address: receives the collateral, blinded to it. */
@@ -139,8 +140,9 @@ export async function buildPrivateRepayment(
   // Read now: `finalize` may run after the loan's state is freed.
   const debtHash = state.debtHash
   const debtCommitment = state.debtCommitment
-  const collateral = state.collateral()
-  if (collateral === undefined) throw new Error('The collateral the loan holds is unknown')
+  const heldInfo = state.collateral()
+  if (heldInfo === undefined) throw new Error('The collateral the loan holds is unknown')
+  const collateral = takePinned(heldInfo)
 
   // 1. The wallet coins.
   const nftRef = parseOutpoint(params.borrowerNftOutpoint)
@@ -153,7 +155,7 @@ export async function buildPrivateRepayment(
   const feeInputs = params.feeCoins.map(outpointOf)
   // `A`, which the repayment carries: the pinned repayment's asset commitment. The collateral is
   // what the installments left of the offer's.
-  const repaymentAsset = opened.pinned(wasm.PinnedRole.Repayment)
+  const repaymentAsset = takePinned(opened.pinned(wasm.PinnedRole.Repayment))
   if (
     repaymentAsset.asset !== principalAsset ||
     collateral.asset !== opened.collateralAsset() ||

@@ -337,7 +337,6 @@ describe("the borrower's loans", () => {
 })
 
 const INSTALLMENT_TXID = '56'.repeat(32)
-const SECOND_INSTALLMENT_TXID = '78'.repeat(32)
 const INSTALLMENT_CLAIM_TXID = '9a'.repeat(32)
 const CLOSE_TXID = 'bc'.repeat(32)
 const FINAL_CLAIM_TXID = 'de'.repeat(32)
@@ -518,8 +517,7 @@ describe("the lender's installments and claims", () => {
     })
   })
 
-  // Decision 2: the sweep after a full repayment and after a zero-debt close, and `claimed` once
-  // it ran.
+  // Decision 2: the sweep after a full repayment, and `claimed` once it ran.
   it('claims the repayment after a full repayment, then shows the loan claimed', () => {
     const closed = [
       ...PAID_ONCE.slice(0, 3),
@@ -541,32 +539,6 @@ describe("the lender's installments and claims", () => {
     const claimed = lent('repaid', swept)
     expect(displayStatus(claimed.candidate)).toBe('claimed')
     expect(bookState(claimed, EXPIRY + 1).button).toBeNull()
-  })
-
-  it('claims the installments after a zero-debt close, then shows the loan claimed', () => {
-    // two installments paid the debt; the lender claimed the first; the close left no repayment
-    const closed = [
-      ...PAID_ONCE.slice(0, 3),
-      utxo('active_offer', INSTALLMENT_TXID, 1, SECOND_INSTALLMENT_TXID),
-      utxo('installment', INSTALLMENT_TXID, 2, INSTALLMENT_CLAIM_TXID),
-      utxo('active_offer', SECOND_INSTALLMENT_TXID, 1, CLOSE_TXID),
-      utxo('installment', SECOND_INSTALLMENT_TXID, 2),
-    ]
-    const repaid = lent('repaid', closed)
-    expect(displayStatus(repaid.candidate)).toBe('repaid')
-    expect(bookState(repaid, EXPIRY - 1).button).toMatchObject({
-      action: 'claimRepayment',
-      label: 'Claim repayment',
-    })
-    const swept = closed.map(entry =>
-      entry.utxo_type === 'installment' && entry.spent_txid === null
-        ? utxo('installment', entry.txid, entry.vout, FINAL_CLAIM_TXID)
-        : entry,
-    )
-    const claimed = lent('repaid', swept)
-    expect(displayStatus(claimed.candidate)).toBe('claimed')
-    expect(bookState(claimed, EXPIRY - 1).button).toBeNull()
-    expect(borrowerStatus(own('repaid', swept), EXPIRY - 1)).toEqual({ kind: 'repaid' })
   })
 
   it('broadcasts an unsent installment claim again', () => {

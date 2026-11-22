@@ -90,7 +90,9 @@ describe('bookSummary', () => {
       waiting: 2,
       active: 4,
       lent: 1_500n,
+      // no loan was read: each counts at its offer's collateral, the most it can hold
       collateralHeld: 15n,
+      collateralHeldExact: false,
       // Due in 3 days and in exactly 7 days; not in 8 days, not the overdue one.
       dueWithin7Days: 2,
       overdue: 1,
@@ -103,9 +105,48 @@ describe('bookSummary', () => {
   it("counts the collateral an active loan holds after its releases, not the offer's", () => {
     const loan = item('active', 3 * BLOCKS_PER_DAY, amounts(100n, 10n))
     const figures: LoanFigures = { ...NO_LOAN, collateral: 4n }
-    expect(bookSummary([loan], TIP, new Map([[loan.txid, figures]])).collateralHeld).toBe(4n)
+    expect(bookSummary([loan], TIP, new Map([[loan.txid, figures]]))).toMatchObject({
+      collateralHeld: 4n,
+      collateralHeldExact: true,
+    })
     // a loan whose collateral is not known (a search not run) is counted at its most, the offer's
-    expect(bookSummary([loan], TIP, new Map([[loan.txid, NO_LOAN]])).collateralHeld).toBe(10n)
+    expect(bookSummary([loan], TIP, new Map([[loan.txid, NO_LOAN]]))).toMatchObject({
+      collateralHeld: 10n,
+      collateralHeldExact: false,
+    })
+  })
+
+  it("counts the collateral the lender's search found, and at most the offer's until then", () => {
+    const [first, second] = [3, 4].map(days =>
+      item('active', days * BLOCKS_PER_DAY, amounts(100n, 10n)),
+    )
+    const read = new Map([
+      [first.txid, NO_LOAN],
+      [second.txid, NO_LOAN],
+    ])
+    // the first loan's search answered, the second's still runs
+    expect(bookSummary([first, second], TIP, read, new Map([[first.txid, 6n]]))).toMatchObject({
+      collateralHeld: 16n,
+      collateralHeldExact: false,
+    })
+    expect(
+      bookSummary(
+        [first, second],
+        TIP,
+        read,
+        new Map([
+          [first.txid, 6n],
+          [second.txid, 7n],
+        ]),
+      ),
+    ).toMatchObject({ collateralHeld: 13n, collateralHeldExact: true })
+    // a figure outside [1, C] cannot be the loan's
+    for (const wrong of [0n, 11n]) {
+      expect(bookSummary([first], TIP, read, new Map([[first.txid, wrong]]))).toMatchObject({
+        collateralHeld: 10n,
+        collateralHeldExact: false,
+      })
+    }
   })
 
   it('no longer counts a proposal waiting at its expiry block', () => {
@@ -128,6 +169,7 @@ describe('bookSummary', () => {
       active: 4,
       lent: 1_500n,
       collateralHeld: 15n,
+      collateralHeldExact: false,
       dueWithin7Days: 0,
       overdue: 0,
       repaid: 0n,
@@ -141,6 +183,7 @@ describe('bookSummary', () => {
       active: 0,
       lent: 0n,
       collateralHeld: 0n,
+      collateralHeldExact: true,
       dueWithin7Days: 0,
       overdue: 0,
       repaid: 0n,

@@ -10,7 +10,6 @@ export type PrivateTxKind =
   | 'private_claim_principal'
   | 'private_installment'
   | 'private_repay_offer'
-  | 'private_zero_debt_close'
   | 'private_claim_installments'
   | 'private_claim_repayment'
   | 'private_liquidate_offer'

@@ -1,6 +1,8 @@
 // What the borrower's payments weigh, for the fee reserve their form asks the wallet's coins for
-// (`selectFeeCoins`). The weight is the covenant inputs' and the confidential outputs' beyond what
-// `estimateFeeBudgetSats` adds for the wallet's own input, change output and the base transaction.
+// (`selectFeeCoins`). The full repayment's is the covenant inputs' and the confidential outputs'
+// beyond what `estimateFeeBudgetSats` adds for the wallet's own input, change output and the base
+// transaction. The installment's is the whole transaction as measured, overhead included, so the
+// overhead `estimateFeeBudgetSats` adds on top is a margin.
 import { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from '@/lwk/weights'
 import { ASSET_AUTH_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/asset-auth/witness'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'

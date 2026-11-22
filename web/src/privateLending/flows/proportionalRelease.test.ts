@@ -168,10 +168,13 @@ function amountsByRelease(state: LoanState): { none: bigint; some: bigint } {
 }
 
 /**
- * The range proofs of `tx`'s outputs, from its consensus encoding (LWK does not expose them):
- * empty for an explicit output.
+ * The surjection and range proofs of `tx`'s outputs, from its consensus encoding (LWK does not
+ * expose them): empty for an explicit output.
  */
-function outputRangeProofs(tx: { toBytes(): Uint8Array; outputs: unknown[] }): Uint8Array[] {
+function outputProofs(tx: {
+  toBytes(): Uint8Array
+  outputs: unknown[]
+}): { surjection: Uint8Array; range: Uint8Array }[] {
   const bytes = tx.toBytes()
   let at = 0
   const take = (n: number) => bytes.subarray(at, (at += n))
@@ -208,7 +211,12 @@ function outputRangeProofs(tx: { toBytes(): Uint8Array; outputs: unknown[] }): U
     take(varInt())
   }
   take(4)
-  if (!hasWitness) return Array.from({ length: outputs }, () => new Uint8Array())
+  if (!hasWitness) {
+    return Array.from({ length: outputs }, () => ({
+      surjection: new Uint8Array(),
+      range: new Uint8Array(),
+    }))
+  }
   for (let i = 0; i < inputs; i += 1) {
     take(varInt())
     take(varInt())
@@ -218,9 +226,14 @@ function outputRangeProofs(tx: { toBytes(): Uint8Array; outputs: unknown[] }): U
     }
   }
   return Array.from({ length: outputs }, () => {
-    take(varInt()) // surjection proof
-    return take(varInt()).slice()
+    const surjection = take(varInt()).slice()
+    return { surjection, range: take(varInt()).slice() }
   })
+}
+
+/** The range proofs of `tx`'s outputs (`outputProofs`). */
+function outputRangeProofs(tx: { toBytes(): Uint8Array; outputs: unknown[] }): Uint8Array[] {
+  return outputProofs(tx).map(proof => proof.range)
 }
 
 /** The serialized script witness of input `index` of `hex`: what it weighs. */
@@ -508,6 +521,19 @@ describe('the installments of proportional release', () => {
     expect(() => nothing.built.finalize(nothing.built.pset)).toThrow(
       'The installment: input 0 is not finalized',
     )
+    // R2's output weighs what the release weighs: the same fee, and output 5's proofs of the same
+    // lengths, so that the transaction does not tell whether it released collateral
+    const fee = (outputs: typeof releasingOutputs) =>
+      outputs.find(output => output.script === '')?.amount
+    expect(fee(nothingOutputs)).toBeDefined()
+    expect(fee(nothingOutputs)).toBe(fee(releasingOutputs))
+    const [releasingProofs, nothingProofs] = [releasing, nothing].map(
+      build => outputProofs(build.tx)[INSTALLMENT_OUTPUT.release],
+    )
+    expect(nothingProofs.range.length).toBeGreaterThan(0)
+    expect(nothingProofs.surjection.length).toBeGreaterThan(0)
+    expect(nothingProofs.range.length).toBe(releasingProofs.range.length)
+    expect(nothingProofs.surjection.length).toBe(releasingProofs.surjection.length)
   })
 
   // Proofs, O10: the burns carry the range proof of every other confidential output.
@@ -554,15 +580,12 @@ describe('the installments of proportional release', () => {
     ).rejects.toThrow('Installment PSET after blinding: output 3 is not blinded to its pinned')
   })
 
-  // Review focus 4: the indexer names the carries, and the chain decides.
+  // Review focus 4: the indexer names the carries, and the chain decides. A carry it names that
+  // the chain does not give is refused; one it leaves out is spent all the same.
   it('spends only the carries the loan opens on chain, whatever the indexer names', async () => {
     const { offer, claim, loan } = await atAcceptance()
     const supply = `${creationTxid}:${CREATION_OUTPUT.carrySupply}`
-    for (const [named, refused] of [
-      [[`${creationTxid}:3`], 'The indexer names'],
-      [[supply, `${installmentTxid}:3`], 'The indexer names'],
-      [[], "does not list the loan's carry"],
-    ] as const) {
+    for (const named of [[`${creationTxid}:3`], [supply, `${installmentTxid}:3`]]) {
       await expect(
         buildInstallment({
           offer,
@@ -570,10 +593,19 @@ describe('the installments of proportional release', () => {
           claim,
           chain: [],
           amount: 100n,
-          carryOutpoints: [...named],
+          carryOutpoints: named,
         }),
-      ).rejects.toThrow(refused)
+      ).rejects.toThrow('The indexer names')
     }
+    const omitted = await buildInstallment({
+      offer,
+      loan,
+      claim,
+      chain: [],
+      amount: 100n,
+      carryOutpoints: [],
+    })
+    expect(inspect(omitted.built.pset).inputs.map(input => input.prevout)).toContain(supply)
   })
 
   it('spends the two carries of the last installment, after the principal coins', async () => {
@@ -666,6 +698,16 @@ describe('the installments of proportional release', () => {
     expect(inspect(rebuilt.built.pset).outputs[INSTALLMENT_OUTPUT.loan].amountCommitment).toBe(
       inspect(first.built.pset).outputs[INSTALLMENT_OUTPUT.loan].amountCommitment,
     )
+    // the carries are blinded afresh in each build: their commitments and their nonces differ, so
+    // they do not link the two builds either (proofs, L1)
+    for (const vout of [INSTALLMENT_OUTPUT.carry, INSTALLMENT_OUTPUT.secondCarry]) {
+      const [before, after] = [first, rebuilt].map(build => inspect(build.built.pset).outputs[vout])
+      expect(after.amountCommitment).not.toBeNull()
+      expect(after.amountCommitment).not.toBe(before.amountCommitment)
+      expect(after.assetCommitment).not.toBe(before.assetCommitment)
+      expect(after.ecdhPubkey).not.toBeNull()
+      expect(after.ecdhPubkey).not.toBe(before.ecdhPubkey)
+    }
     for (const build of [first, rebuilt]) {
       const { inputs } = inspect(build.built.pset)
       expect(inputs[2].prevout).toBe(outpointOf(build.principal.coin))
@@ -733,7 +775,13 @@ describe('the installments of proportional release', () => {
 })
 
 describe('the full repayment of proportional release', () => {
-  async function repay(offer: VerifiedOffer, loan: Loan, claim: string, chain: string[]) {
+  async function repay(
+    offer: VerifiedOffer,
+    loan: Loan,
+    claim: string,
+    chain: string[],
+    carryOutpoints: readonly string[] = chainCarries(loan),
+  ) {
     const owed = loan.state.remaining ?? 0n
     const principal = walletCoin(offer.opened.principalAsset(), owed + 500n)
     const fee = walletCoin(OTHER_ASSET, 100_000n)
@@ -742,7 +790,7 @@ describe('the full repayment of proportional release', () => {
       borrowerNftOutpoint: `${txidOf(claim)}:0`,
       principalCoins: [principal.coin],
       feeCoins: [fee.coin],
-      carryOutpoints: chainCarries(loan),
+      carryOutpoints,
       collateralReceiver: unsigningWollet.address(3).address(),
       lendingKey: keys.borrower,
     })
@@ -802,6 +850,39 @@ describe('the full repayment of proportional release', () => {
     // the burn's range proof is the other outputs' too (O10)
     const proofs = outputRangeProofs(late.built.pset.extractTx()).filter(proof => proof.length > 0)
     expect(new Set(proofs.map(proof => proof.length)).size).toBe(1)
+  })
+
+  // Review focus 4: the carries come from the chain. An indexer that leaves one out cannot block
+  // the borrower's only exit after the expiry, while one that names a foreign carry is refused.
+  it('spends the carries the chain gives, whatever the indexer leaves out', async () => {
+    const offer = await openOffer('borrower')
+    const claim = principalClaim(offer)
+    const atAcceptance = await borrowerLoan(offer, `${acceptanceTxid}:0`)
+    const first = await buildInstallment({
+      offer,
+      loan: atAcceptance,
+      claim,
+      chain: [],
+      amount: 2_000n,
+    })
+    const after = await borrowerLoan(offer, `${first.txid}:1`, [first.hex])
+    const carries = [`${first.txid}:3`, `${first.txid}:4`]
+    for (const listed of [[], [carries[1]]]) {
+      const { built } = await repay(offer, after, claim, [first.hex], listed)
+      expect(
+        inspect(built.pset)
+          .inputs.slice(3, 5)
+          .map(input => input.prevout),
+      ).toEqual(carries)
+    }
+    for (const listed of [
+      [`${installmentTxid}:3`],
+      [...carries, `${creationTxid}:${CREATION_OUTPUT.carrySupply}`],
+    ]) {
+      await expect(repay(offer, after, claim, [first.hex], listed)).rejects.toThrow(
+        'The indexer names',
+      )
+    }
   })
 })
 

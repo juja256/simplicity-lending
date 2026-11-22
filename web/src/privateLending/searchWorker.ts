@@ -1,5 +1,6 @@
 // The lender's search for a loan's collateral, in a Web Worker: at `C = 2^44` the wasm's
-// `findCollateral` takes about a second and 32 MiB, which would block the page. The worker loads
+// `findCollateral` takes about a second and 37–45 MiB (phase 7 task 4 measured 45 MiB of wasm
+// linear memory, the 32 MiB table included), which would block the page. The worker loads
 // its own copy of the private lending wasm and answers one search per message
 // (`findCollateralInWorker` in `collateralSearch.ts` posts them). The step's blinder `x_k` is a
 // secret of the offer: it reaches the worker by `postMessage`, never leaves the device, and is not

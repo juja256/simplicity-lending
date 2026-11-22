@@ -1,6 +1,6 @@
-// The lender's final claim of a loan, after its full repayment or its zero-debt close: the claim
-// of `claimInstallments.ts` that sweeps every installment the lender has not claimed, then the
-// full repayment's output 1 if the close is one, and burns the lender NFT (OP_RETURN, explicit):
+// The lender's final claim of a loan, after its full repayment: the claim of
+// `claimInstallments.ts` that sweeps every installment the lender has not claimed, then the full
+// repayment's output 1, and burns the lender NFT (OP_RETURN, explicit):
 //   inputs   0 the lender NFT, explicit; 1… the unclaimed installments in chain order, each at
 //            asset_auth(lender NFT, 1, no burn), then the repayment at asset_auth(lender NFT, 1,
 //            burn); then the lender's fee coins;
@@ -10,10 +10,10 @@
 // rewind, and a claim that left them out would strand them once the NFT burns. So the claim spends
 // them all with the combined opening: every repayment output of the loan adds up to the starting
 // debt `D₀`, whose opening `(R, r₀)` the lender knows, so the unclaimed ones and the repayment add
-// up to `R` and `r₀` less the claimed installments (and less the debt's blinder `k'` after a
-// zero-debt close, which reveals it). The first swept input takes that opening and the others an
-// amount and value blinder of zero, all under `A`'s asset and asset blinder (`LoanState.sweep`):
-// only their sum enters the balance. The lender receives `R` in total over the loan.
+// up to `R` and `r₀` less the claimed installments. The first swept input takes that opening and
+// the others an amount and value blinder of zero, all under `A`'s asset and asset blinder
+// (`LoanState.sweep`): only their sum enters the balance. The lender receives `R` in total over
+// the loan.
 // Which installments are unclaimed comes from the caller (the indexer), and an unspent one it left
 // out would count as claimed: the claim would balance without it, burn the NFT and strand it. So
 // the builder walks the lender NFT back through the lender's claims (`lenderNftClaims`) and
@@ -54,8 +54,8 @@ export class NothingToClaimError extends Error {
 
 export interface FinalClaimParams {
   /**
-   * The close: the full repayment or the zero-debt close of `loan`, which spends its loan output
-   * at input 1 (`closedLoanOutpoint` gives that output, from which the caller loads `loan`).
+   * The close: the full repayment of `loan`, which spends its loan output at input 1
+   * (`closedLoanOutpoint` gives that output, from which the caller loads `loan`).
    */
   closeTxid: string
   /**

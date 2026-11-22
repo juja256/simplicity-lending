@@ -17,7 +17,7 @@ function hasJargon(text: string): boolean {
 
 describe('borrowerErrorText', () => {
   it('asks for the loan to be received first when the principal is not claimed', () => {
-    for (const action of ['installment', 'repayment', 'zero-debt close']) {
+    for (const action of ['installment', 'repayment']) {
       const text = borrowerErrorText(new PrincipalNotClaimedError(NFT, action))
       expect(text).toMatch(/^Receive the loan first: /)
       expect(hasJargon(text)).toBe(false)

@@ -44,9 +44,8 @@ const REPAYMENT_RETRY_MS = 30_000
 /**
  * The full repayment `repaymentTxid`, if it closes the loan output `loanOutpoint` (spends it at
  * input 1), with its message read for the lender, which also requires output 1 at the repayment
- * lock (a zero-debt close's is not). The borrower cannot read its own (its nonce is random), so
- * for the borrower it is only the txid its record is matched by: the zero-debt close records no
- * message. Undefined for a transaction that does not close this loan.
+ * lock. The borrower cannot read its own (its nonce is random), so for the borrower it is only the
+ * txid its record is matched by. Undefined for a transaction that does not close this loan.
  */
 async function readRepayment(
   deps: PrivateFlowDeps,

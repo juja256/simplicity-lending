@@ -335,6 +335,33 @@ describe('loadLoan', () => {
     expect(() => principal(sign('borrower', Acceptance))).toThrow(/bad-input/)
   })
 
+  // The contract checks only the borrower NFT's asset and amount at an installment's output 0, so
+  // an installment may burn the NFT there. It is still an installment: the lender reads the loan
+  // through it (and can liquidate it), while the burned NFT proves no principal claim.
+  it('reads through an installment that burns the borrower NFT, for either party', async () => {
+    // output 0: one explicit unit of the borrower NFT, no nonce, then its script
+    const nft = (await openOffer('borrower')).opened.borrowerNft()
+    const nftScript = lwk.Transaction.fromString(installmentHex)
+      .outputs[0].scriptPubkey()
+      .toString()
+    const nftOutput = `01${reversed(nft)}01${u64be(1n)}00`
+    const burned = replaceOnce(
+      installmentHex,
+      nftOutput + pushLength(nftScript) + nftScript,
+      nftOutput + pushLength(BURN_SCRIPT) + BURN_SCRIPT,
+    )
+    const { deps } = fakeChain(burned)
+    for (const role of ['borrower', 'lender'] as const) {
+      const offer = await openOffer(role)
+      const loan = await loadLoan(deps, offer, keys[role], `${txidOf(burned)}:1`)
+      expect(loan.installmentTxids).toEqual([txidOf(burned)])
+      expect(loan.state.loanOutpoint).toBe(`${txidOf(burned)}:1`)
+      expect(loan.state.debtHash).toBe(fixture.loan.debt_hashes[1])
+      loan.state.free()
+      await expect(principalClaimedBefore(deps, offer, `${txidOf(burned)}:0`)).resolves.toBe(false)
+    }
+  })
+
   it('reads a loan at its acceptance', async () => {
     const offer = await openOffer('borrower')
     const loan = await loadLoan(fakeChain().deps, offer, keys.borrower, `${acceptanceTxid}:0`)

@@ -52,7 +52,7 @@ import {
   PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY,
 } from '@/simplicity/private-lending/witness'
 import { normalizeHex } from '@/utils/hex'
-import type { LendingKey, PinnedOutputInfo } from '@/wasm/private-lending/private_lending_wasm'
+import type { LendingKey } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from '../deps'
 import { finalizeAssetAuthInput, finalizePrivateOfferInput, pinnedAuthCovenant } from '../finalize'
@@ -77,10 +77,12 @@ import {
   fetchPrevoutTxs,
   outpointOf,
   parseOutpoint,
+  type PinnedFigures,
   pinnedTxOutSecrets,
   prevoutsOf,
   requireOutput,
   type SpendLayout,
+  takePinned,
   walletCoinInput,
   wasmStep,
 } from './shared'
@@ -89,7 +91,9 @@ import {
  * The policy asset the installment gives the borrower's wallet at output 5 when it releases no
  * collateral: one more confidential output in the release's place, so that the number of outputs
  * does not tell whether the installment released anything (proofs, R2). The contracts' tests give
- * the same amount.
+ * the same amount. R2 relies on the collateral being the policy asset, which the app's creation
+ * enforces (`selectCreationCoins`): the output in the release's place then holds the asset a
+ * release would, so nothing tells the two apart.
  */
 export const R2_EXTRA_OUTPUT_AMOUNT = 1_000n
 
@@ -128,7 +132,8 @@ export interface InstallmentParams {
   feeCoins: WalletTxOut[]
   /**
    * The loan's carries as the indexer lists them unspent (`unspentCarries`), `"<txid>:<vout>"`:
-   * the builder requires exactly the carries the loan opens on chain (`verifiedLoanCarries`).
+   * the builder spends the carries the loan opens on chain, and refuses a list that names any
+   * other (`verifiedLoanCarries`).
    */
   carryOutpoints: readonly string[]
   /**
@@ -218,7 +223,8 @@ export async function buildPrivateInstallment(
   }
   // Read now: `finalize` may run after the loan's state is freed.
   const debtHash = state.debtHash
-  const collateral = state.collateral()
+  const heldInfo = state.collateral()
+  const collateral = heldInfo === undefined ? undefined : takePinned(heldInfo)
   if (collateral === undefined || collateral.asset !== opened.collateralAsset()) {
     throw new Error('The loan does not hold the offer collateral')
   }
@@ -323,15 +329,16 @@ export async function buildPrivateInstallment(
       }
       const successorDebtHash = plan.successorDebtHash
       const ephemeralPublicKey = plan.ephemeralPublicKey
-      const installment = plan.installment
-      const successor = plan.successor
-      const planCarries = [plan.carry(0), plan.carry(1)]
+      const installment = takePinned(plan.installment)
+      const successor = takePinned(plan.successor)
+      const planCarries = [takePinned(plan.carry(0)), takePinned(plan.carry(1))]
       const release = plan.release
       const leftover = plan.leftover
-      const leftoverBurn = plan.leftoverBurn
+      const leftoverInfo = plan.leftoverBurn
+      const leftoverBurn = leftoverInfo === undefined ? undefined : takePinned(leftoverInfo)
       // `A`, and the collateral of the next step: the covenant's checks, checked here too. The
       // release is the collateral the step lets go, as the repay form previews it.
-      const repaymentAsset = opened.pinned(wasm.PinnedRole.Repayment)
+      const repaymentAsset = takePinned(opened.pinned(wasm.PinnedRole.Repayment))
       const carried = carries.reduce((sum, carry) => sum + carry.amount, 0n)
       const repayment = opened.repaymentAmount()
       if (
@@ -398,7 +405,7 @@ export async function buildPrivateInstallment(
       const pinnedOutput = (
         script: string,
         key: string,
-        pinned: PinnedOutputInfo,
+        pinned: PinnedFigures,
       ): ExpectedOutput => ({
         script,
         asset: pinned.asset,

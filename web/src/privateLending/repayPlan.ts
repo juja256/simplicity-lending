@@ -115,6 +115,20 @@ export function repayPlan(input: RepayPlanInput): RepayPlan {
   return { kind: 'installment', amount }
 }
 
+/** Why a payment is refused when the loan moved on since the form read it. */
+export const LOAN_CHANGED_NOTE =
+  'The loan changed since the form was filled: check the amount again'
+
+/**
+ * Refuses a build on another loan state than the form's: `formLoan` is the loan output the form
+ * read its figures from (what the loan owes, the collateral released and left), `freshLoan` the one
+ * the build read again. Another installment confirmed in between moves the loan to a new output,
+ * and the form's figures would not be those of the payment built.
+ */
+export function checkSameLoan(formLoan: string | undefined, freshLoan: string): void {
+  if (formLoan !== freshLoan) throw new Error(LOAN_CHANGED_NOTE)
+}
+
 /** Why a saved installment is no longer broadcast once the term ended: only Discard is offered. */
 export const INSTALLMENT_UNSENT_AFTER_TERM_NOTE =
   'The term has ended: the lender can take the collateral at any time, and keep an installment ' +

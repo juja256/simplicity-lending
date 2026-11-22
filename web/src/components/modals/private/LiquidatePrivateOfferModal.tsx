@@ -7,9 +7,12 @@ import Notice from '@/components/Notice'
 import { useFormatAmount } from '@/hooks/useFormatAmount'
 import { liquidationWeightUnits } from '@/privateLending/actionWeights'
 import { utxoOutpoint } from '@/privateLending/candidate'
+import { liquidationCollateralText } from '@/privateLending/collateralFigures'
 import { findCollateralInWorker } from '@/privateLending/collateralSearch'
 import { findLenderNft } from '@/privateLending/flows/claimInstallments'
 import { buildPrivateLiquidation } from '@/privateLending/flows/liquidation'
+import { useCollateralLeft } from '@/privateLending/hooks/useCollateralLeft'
+import { useLoan } from '@/privateLending/hooks/useLoan'
 import { esploraSpentBy } from '@/privateLending/hooks/usePrivateFlowDeps'
 import { loadLoan } from '@/privateLending/loan'
 import { isPastExpiry } from '@/privateLending/offerView'
@@ -30,6 +33,14 @@ export default function LiquidatePrivateOfferModal(props: PrivateOfferActionModa
   const { getLendingKey } = useWallet()
   const { data: tipHeight } = useBlockHeight()
   const { formatCollateralDisplay } = useFormatAmount()
+  // What the liquidation pays: the collateral the loan holds now, `c_k`, read with the loan or
+  // found by the lender's search, not the offer's.
+  const loan = useLoan(props.item)
+  const found = useCollateralLeft(terms.collateralAmount, loan.data, true)
+  const collateralText = liquidationCollateralText(
+    loan.isError ? { kind: 'unknown' } : found,
+    formatCollateralDisplay,
+  )
   const isExpired = isPastExpiry(terms, tipHeight)
   const notYet =
     `The loan expires at block #${terms.loanExpirationTime}. It can be liquidated once the ` +
@@ -67,10 +78,10 @@ export default function LiquidatePrivateOfferModal(props: PrivateOfferActionModa
 
   const summary = useMemo(
     () => [
-      { label: 'Collateral', value: formatCollateralDisplay(terms.collateralAmount) },
+      { label: 'Collateral', value: collateralText },
       { label: 'Expiration block', value: `#${terms.loanExpirationTime}` },
     ],
-    [terms, formatCollateralDisplay],
+    [terms, collateralText],
   )
 
   return (

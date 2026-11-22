@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { collateralLeft, releaseForPayment } from './collateralFigures'
+import { collateralLeft, liquidationCollateralText, releaseForPayment } from './collateralFigures'
 
 const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b
 
@@ -96,5 +96,35 @@ describe('collateralLeft', () => {
       kind: 'unknown',
     })
     expect(collateralLeft(100n, { collateral: 0n }, idle)).toEqual({ kind: 'unknown' })
+  })
+})
+
+describe('liquidationCollateralText', () => {
+  const format = (amount: bigint) => `${amount} L-BTC`
+  const idle = { status: 'idle' } as const
+
+  // The liquidation pays c_k: the confirmation never shows the offer's C once a release ran.
+  it("shows the collateral the loan holds, not the offer's", () => {
+    const read = collateralLeft(1_000n, { collateral: 667n }, idle)
+    expect(liquidationCollateralText(read, format)).toBe('667 L-BTC')
+    const found = collateralLeft(1_000n, {}, { status: 'success', amount: 400n })
+    expect(liquidationCollateralText(found, format)).toBe('400 L-BTC')
+  })
+
+  it('says computing while the search runs, and names the figure without one', () => {
+    const searching = collateralLeft(1_000n, {}, { status: 'pending' })
+    expect(liquidationCollateralText(searching, format)).toBe('computing…')
+    for (const search of [
+      { status: 'success', amount: undefined },
+      { status: 'error' },
+      idle,
+    ] as const) {
+      expect(liquidationCollateralText(collateralLeft(1_000n, {}, search), format)).toBe(
+        'What the loan still holds',
+      )
+    }
+    expect(liquidationCollateralText(collateralLeft(1_000n, undefined, idle), format)).toBe(
+      'reading the loan…',
+    )
   })
 })

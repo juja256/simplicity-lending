@@ -29,8 +29,10 @@ import { messageError, messageToSend } from '@/privateLending/messages'
 import { borrowerActions, borrowerTermEnded, offerTxState } from '@/privateLending/offerView'
 import {
   checkInstallmentTerm,
+  checkSameLoan,
   installmentTraceInputs,
   installmentTraces,
+  LOAN_CHANGED_NOTE,
   repayBroadcast,
   type RepayPlan,
   repayPlan,
@@ -107,8 +109,9 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
   )
   const pays = plan?.kind === 'refused' ? undefined : plan?.amount
   // The collateral the loan holds now, and what this payment releases of it: the whole for the
-  // full repayment, `c_k − ceil((d_k − p)·C/R)` for an installment (it can be 0). The build
-  // checks the same figure against the wasm's `releasePreview`.
+  // full repayment, `c_k − ceil((d_k − p)·C/R)` for an installment (it can be 0). The figures are
+  // the form's: the build refuses a loan that moved to another output since the form read it, so
+  // they are those of the state it builds on.
   const held = loan?.collateral
   const release =
     held === undefined || owed === undefined || pays === undefined
@@ -143,6 +146,12 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
     const lendingKey = await getLendingKey()
     const message = messageToSend(messageText)
     const fresh = await loadLoan(deps, offer, lendingKey, utxoOutpoint(utxo))
+    try {
+      checkSameLoan(loan?.loanOutpoint, fresh.state.loanOutpoint)
+    } catch (error) {
+      fresh.state.free()
+      throw error
+    }
     const freshOwed = fresh.state.remaining
     if (freshOwed === undefined) {
       throw new Error(
@@ -163,7 +172,7 @@ export default function RepayPrivateOfferModal(props: PrivateOfferActionModalPro
     })
     if (freshPlan.kind === 'refused') throw new Error(freshPlan.message)
     if (freshPlan.kind !== plan.kind || freshPlan.amount !== plan.amount) {
-      throw new Error('The loan changed since the form was filled: check the amount again')
+      throw new Error(LOAN_CHANGED_NOTE)
     }
     // The repayment burns the borrower NFT, the only key to an unclaimed principal: it needs the
     // indexer's evidence of the claim, and never falls back to the NFT where the creation put it.

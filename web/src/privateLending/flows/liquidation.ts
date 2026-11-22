@@ -41,7 +41,7 @@ import {
   NFT_AMOUNT,
 } from '@/simplicity/private-lending/layout'
 import { PRIVATE_LENDING_MAX_WEIGHT_TO_SATISFY } from '@/simplicity/private-lending/witness'
-import type { LoanState, PinnedOutputInfo } from '@/wasm/private-lending/private_lending_wasm'
+import type { LoanState } from '@/wasm/private-lending/private_lending_wasm'
 
 import type { PrivateFlowDeps } from '../deps'
 import { finalizePrivateOfferInput, pinnedAuthCovenant } from '../finalize'
@@ -66,10 +66,12 @@ import {
   fetchPrevoutTxs,
   outpointOf,
   parseOutpoint,
+  type PinnedFigures,
   pinnedTxOutSecrets,
   prevoutsOf,
   requireOutput,
   type SpendLayout,
+  takePinned,
   walletCoinInput,
   wasmStep,
 } from './shared'
@@ -115,14 +117,15 @@ export type CollateralFinder = (search: CollateralSearchInput) => Promise<bigint
 /**
  * The collateral the loan of `state` holds: computed when the lender read every installment, and
  * otherwise found by `findCollateral` and set on `state` (`setCollateral`, which checks that it
- * opens the loan output). Throws when it cannot be found.
+ * opens the loan output). Copied out, and the wasm's object freed (`takePinned`). Throws when it
+ * cannot be found.
  */
 export async function loanCollateral(
   state: LoanState,
   findCollateral: CollateralFinder | undefined,
-): Promise<PinnedOutputInfo> {
+): Promise<PinnedFigures> {
   const known = state.collateral()
-  if (known !== undefined) return known
+  if (known !== undefined) return takePinned(known)
   if (findCollateral === undefined) {
     throw new Error('An installment does not open for the lender, and no search was given')
   }
@@ -141,7 +144,7 @@ export async function loanCollateral(
   wasmStep('Setting the collateral found', () => state.setCollateral(found))
   const collateral = state.collateral()
   if (collateral === undefined) throw new Error('The collateral found was not kept')
-  return collateral
+  return takePinned(collateral)
 }
 
 export interface LiquidationParams {

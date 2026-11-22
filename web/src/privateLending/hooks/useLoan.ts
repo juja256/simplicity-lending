@@ -63,7 +63,10 @@ export function loanFigures(loan: Loan): LoanFigures {
     installments.push({ outpoint: installment.outpoint, amount: installment.amount })
     installment.free()
   }
-  const collateral = state.collateral()?.amount
+  // the wasm's object holds the collateral's blinders: freed once read
+  const held = state.collateral()
+  const collateral = held?.amount
+  held?.free()
   return {
     loanOutpoint: state.loanOutpoint,
     installments,

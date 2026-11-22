@@ -78,3 +78,24 @@ export function collateralLeft(
       return { kind: 'unknown' }
   }
 }
+
+/**
+ * What the liquidation's confirmation shows the lender takes: `c_k`, the collateral the loan
+ * output holds, which the liquidation pays, and never the offer's collateral once an installment
+ * released some. "computing…" while the lender's search runs; without a figure, what it is.
+ */
+export function liquidationCollateralText(
+  state: CollateralLeft,
+  format: (amount: bigint) => string,
+): string {
+  switch (state.kind) {
+    case 'known':
+      return format(state.left)
+    case 'computing':
+      return 'computing…'
+    case 'unread':
+      return 'reading the loan…'
+    case 'unknown':
+      return 'What the loan still holds'
+  }
+}

@@ -19,16 +19,15 @@ import PrivateOfferActionShell, {
   type RequiredUtxo,
 } from './PrivateOfferActionShell'
 
-/** The closed loan output: the full repayment and the zero-debt close both spend it. */
+/** The closed loan output: the full repayment spends it. */
 const CLOSED_LOAN: RequiredUtxo = {
   find: closedLoanUtxo,
   missing: 'The indexer lists no close of this loan: it may have changed since the page loaded.',
 }
 
 /**
- * The lender's final claim of a loan the borrower closed, by the full repayment or the zero-debt
- * close: it sweeps the repayment, if any, with every installment the lender has not claimed, and
- * burns the lender NFT.
+ * The lender's final claim of a loan the borrower closed by the full repayment: it sweeps the
+ * repayment with every installment the lender has not claimed, and burns the lender NFT.
  */
 export default function ClaimRepaymentModal(props: PrivateOfferActionModalProps) {
   const { item } = props

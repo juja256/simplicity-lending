@@ -15,11 +15,15 @@ export interface BookSummary {
   /** The principal of the active loans, in base units. */
   lent: bigint
   /**
-   * The collateral the active loans hold, in base units: `c_k` where the loan was read with it,
-   * else the offer's collateral, which is the most it can hold (a lender that cannot read an
-   * installment learns `c_k` only by the search, which the book's rows run).
+   * The collateral the active loans hold, in base units: `c_k` where the loan was read with it or
+   * the lender's search found it, else the offer's collateral, which is the most it can hold.
    */
   collateralHeld: bigint
+  /**
+   * Whether `collateralHeld` is exact: every active loan's `c_k` is known. Otherwise it is at most
+   * that, while a loan is unread or its search runs.
+   */
+  collateralHeldExact: boolean
   /** Active loans whose expiry is at most seven days after the tip, and after it. */
   dueWithin7Days: number
   /** Active loans past their expiry. */
@@ -104,19 +108,22 @@ export function loanBookFigures(
 
 /**
  * The figures of the lender's opened offers at `tipHeight`, with `loans`, the figures of the loans
- * read so far by creation txid: `repaid` and `claimable` count only those. While the tip is
- * unknown (0), every pending proposal waits, and no loan is due or overdue.
+ * read so far by creation txid: `repaid` and `claimable` count only those. `found` holds, by
+ * creation txid, the collateral the lender's search found for a loan whose figures lack it. While
+ * the tip is unknown (0), every pending proposal waits, and no loan is due or overdue.
  */
 export function bookSummary(
   items: OpenedOfferItem[],
   tipHeight: number,
   loans: ReadonlyMap<string, LoanFigures> = new Map(),
+  found: ReadonlyMap<string, bigint> = new Map(),
 ): BookSummary {
   const summary: BookSummary = {
     waiting: 0,
     active: 0,
     lent: 0n,
     collateralHeld: 0n,
+    collateralHeldExact: true,
     dueWithin7Days: 0,
     overdue: 0,
     repaid: 0n,
@@ -132,7 +139,14 @@ export function bookSummary(
     } else if (candidate.status === 'active') {
       summary.active++
       summary.lent += terms.principalAmount
-      summary.collateralHeld += loans.get(item.txid)?.collateral ?? terms.collateralAmount
+      // `c_k` is in `[1, C]`: anything else is a figure that cannot be this loan's.
+      const held = loans.get(item.txid)?.collateral ?? found.get(item.txid)
+      if (held !== undefined && held >= 1n && held <= terms.collateralAmount) {
+        summary.collateralHeld += held
+      } else {
+        summary.collateralHeld += terms.collateralAmount
+        summary.collateralHeldExact = false
+      }
       // Overdue: the tip known and past the expiry, as `isPastExpiry` reads it.
       if (known && blocksLeft < 0) summary.overdue++
       else if (known && blocksLeft > 0 && blocksLeft <= DUE_SOON_BLOCKS) summary.dueWithin7Days++

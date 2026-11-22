@@ -49,8 +49,33 @@ export function burnScript(deps: PrivateFlowDeps): Script {
   return deps.lwk.Script.newOpReturn(new TextEncoder().encode('burn'))
 }
 
+/** A pinned output's figures and blinders, copied out of the wasm's `PinnedOutputInfo`. */
+export type PinnedFigures = Pick<
+  PinnedOutputInfo,
+  'asset' | 'amount' | 'assetBlinder' | 'valueBlinder' | 'assetCommitment' | 'valueCommitment'
+>
+
+/**
+ * Copies `info` out and frees it: the wasm object holds the output's blinders, so it is freed as
+ * soon as it is read, rather than left to the garbage collector.
+ */
+export function takePinned(info: PinnedOutputInfo): PinnedFigures {
+  try {
+    return {
+      asset: info.asset,
+      amount: info.amount,
+      assetBlinder: info.assetBlinder,
+      valueBlinder: info.valueBlinder,
+      assetCommitment: info.assetCommitment,
+      valueCommitment: info.valueCommitment,
+    }
+  } finally {
+    info.free()
+  }
+}
+
 /** The LWK secrets of a pinned output, for the PSET input that spends it. */
-export function pinnedTxOutSecrets(deps: PrivateFlowDeps, info: PinnedOutputInfo): TxOutSecrets {
+export function pinnedTxOutSecrets(deps: PrivateFlowDeps, info: PinnedFigures): TxOutSecrets {
   const { lwk } = deps
   return new lwk.TxOutSecrets(
     lwk.AssetId.fromString(info.asset),
