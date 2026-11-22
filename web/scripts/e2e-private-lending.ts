@@ -2952,6 +2952,46 @@ function stopAtBuild(deps: PrivateFlowDeps): PrivateFlowDeps {
 }
 
 /**
+ * The `create` offer's candidate on the local testnet indexer once it has indexed the repayment's
+ * block: its principal spent by the claim `claimTxid`, and its loan and its carries spent by the
+ * repayment `repayTxid`. Polls for up to 5 minutes, as the other stages do.
+ */
+async function indexedRepayment(
+  ctx: Context,
+  creationTxid: string,
+  claimTxid: string,
+  repayTxid: string,
+): Promise<PrivateCandidateDetails> {
+  let seen = 'nothing'
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 10_000))
+    let candidate: PrivateCandidateDetails
+    try {
+      candidate = await fetchPrivateCandidate(creationTxid, ctx.apiUrl)
+    } catch (error) {
+      seen = indexerErrorMessage(error) ?? (error instanceof Error ? error.message : String(error))
+      continue
+    }
+    const spentBy = (type: string) =>
+      candidate.utxos.filter(utxo => utxo.utxo_type === type).map(utxo => utxo.spent_txid)
+    const principal = spentBy('principal')
+    const repaid = spentBy('active_offer').includes(repayTxid)
+    const carries = spentBy('carry').filter(txid => txid === repayTxid).length
+    seen =
+      `the principal spent by [${principal.join(', ')}], the loan ${repaid ? '' : 'not '}spent ` +
+      `by the repayment, ${carries} carries spent by it`
+    if (isDeepStrictEqual(principal, [claimTxid]) && repaid && carries > 0) {
+      out(`indexer ${ctx.apiUrl}: ${seen}`)
+      return candidate
+    }
+  }
+  throw new Error(
+    `the indexer at ${ctx.apiUrl} lists ${seen}, not ${creationTxid}'s principal spent by the ` +
+      `claim ${claimTxid} and its loan and carries by the repayment ${repayTxid}: let it catch up`,
+  )
+}
+
+/**
  * A hostile indexer cannot steer the borrower into repaying while the principal may be unclaimed:
  * the repayment burns the borrower NFT, the only key to an unclaimed principal. The `create` offer
  * (claimed, then repaid, on chain) is served from candidates wrapped in memory from the honest one,
@@ -2987,15 +3027,9 @@ async function repayHostileDryStage(ctx: Context): Promise<void> {
   )
   const owed = loan.state.remaining
   if (owed === undefined) throw new Error('the borrower cannot read what the loan owed')
-  const honest = await fetchPrivateCandidate(creationTxid, ctx.apiUrl)
+  const honest = await indexedRepayment(ctx, creationTxid, claimTxid, repayTxid)
   const principal = honest.utxos.find(utxo => utxo.utxo_type === 'principal')
-  if (principal?.spent_txid !== claimTxid) {
-    throw new Error(
-      `the indexer at ${ctx.apiUrl} does not list ${creationTxid}'s principal as spent by the ` +
-        `claim ${claimTxid}: ${JSON.stringify(principal)}`,
-    )
-  }
-  out(`indexer ${ctx.apiUrl}: ${creationTxid}'s principal spent by the claim ${claimTxid}`)
+  if (principal === undefined) throw new Error(`the indexer lists no principal of ${creationTxid}`)
 
   /**
    * The candidate as an active loan, its active offer and the carries the repayment swept
