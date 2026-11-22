@@ -1021,8 +1021,11 @@ The lender opens no installment. It needs only `D_k` as a point, for `h(A, D_k)`
 - Step 0's opening is `(C, a_c, ρ)`.
 - When the lender can read every installment, it computes `c_k = ⌈d_k·C/R⌉` directly. The theorem
   says the two methods agree.
-- Baby-step giant-step costs about `2·√C` group operations and `√C` memory: `2^23` operations at
-  `C = 2^44`, measured at 38 s in wasm by the spike.
+- Baby-step giant-step costs `O(√C)` group operations and memory. The search keys its table so that
+  a point and its negation share an entry, which makes it about `√2·√C` additions and `√(C/2)`
+  table entries: about `2^22.5` additions and a table of `2^22` slots (32 MiB) at `C = 2^44`.
+  Batched in affine coordinates, it measured about 0.7 s natively and about 1 s in wasm at
+  `C = 2^44`, using 37–45 MiB.
 - An output that someone sends to the loan's address is not on the real chain, and the lender
   ignores it, as in phase 5.
 - This covers the liveness test "the liquidation after the term succeeds, by a lender who reads no

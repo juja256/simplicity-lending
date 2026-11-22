@@ -5,7 +5,13 @@ import type { WalletCoin } from '@/lib/wallet-core/types'
 import { formatFeeReserve } from '@/utils/format'
 import { selectByLargestFirst } from '@/utils/utxo'
 
-export { EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY } from './weights'
+import { FEE_WALLET_INPUT_WEIGHT_UNITS, weightUnitsToSats } from './weights'
+
+export {
+  estimateFeeBudgetSats,
+  EXPLICIT_SIGNATURE_MAX_WEIGHT_TO_SATISFY,
+  WALLET_OVERHEAD_WEIGHT_UNITS,
+} from './weights'
 
 // BIP-125 opt-in RBF sequence for wallet-controlled inputs, so a stuck broadcast can be
 // fee-bumped instead of rejected with txn-mempool-conflict. Hard-coded (not
@@ -76,31 +82,6 @@ export function selectAssetUtxos(
 
 export function isPolicyAssetUtxo(utxo: WalletCoin, policyAsset: AssetId | string): boolean {
   return utxo.unblinded().asset().toString() === policyAsset.toString()
-}
-
-// Base overhead (WU) covering the wallet's first confidential input + change output + base tx.
-export const WALLET_OVERHEAD_WEIGHT_UNITS = 6000
-// Additional wallet P2WPKH input delta measured from Liquid testnet create-offer txs:
-// 1650 WU / 6 extra wallet inputs ≈ 275 WU, rounded up for margin.
-const FEE_WALLET_INPUT_WEIGHT_UNITS = 400
-const FEE_SAFETY_MARGIN_PERCENT = 15n
-
-function weightUnitsToSats(weightUnits: number, feeRateSatPerKvb: number): bigint {
-  const vsize = Math.ceil(weightUnits / 4)
-  return BigInt(Math.ceil((vsize * feeRateSatPerKvb) / 1000))
-}
-
-// Sat ceiling for fee-UTXO selection, scaled by feeRate and expected wallet input count.
-export function estimateFeeBudgetSats(
-  externalWeightUnits: number,
-  feeRateSatPerKvb: number,
-  walletInputsCount = 1,
-): bigint {
-  const extraInputs = Math.max(walletInputsCount - 1, 0)
-  const weightUnits =
-    externalWeightUnits + WALLET_OVERHEAD_WEIGHT_UNITS + FEE_WALLET_INPUT_WEIGHT_UNITS * extraInputs
-  const base = weightUnitsToSats(weightUnits, feeRateSatPerKvb)
-  return base + (base * FEE_SAFETY_MARGIN_PERCENT) / 100n
 }
 
 export function selectFeeUtxos(

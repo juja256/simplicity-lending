@@ -724,6 +724,10 @@ What follows from them:
   over the integers.
 - Therefore `c' = ceil(d'C/R)`. An installment with `d' ≤ 0` is impossible, because it would need
   `c' ≤ 0`.
+- The program alone would accept a zero successor, `c' = 0` (with `e = 0`), when a payment covers
+  the whole debt (`d' = 0`): E1–E7 hold there. Consensus refuses it, because the range proof of a
+  spendable confidential output has a minimum of 1, and output 1 is spendable. So the whole debt
+  goes through the full repayment.
 
 The argument needs the discrete logarithms of `A`, `A_c`, `A_w1`, `A_w2` and `J` to base `G` to be
 unknown. Surjection proofs give that for the asset commitments, and the NUMS derivation gives it for
@@ -920,8 +924,10 @@ index.
 - **Liquidation:** unchanged. It reads neither the debt's opening nor the collateral.
 - **Acceptance and cancellation:** unchanged programs. Their transactions change (below).
 
-**Cost.** The spike measured the installment at about 3.84 M mWU against a budget of 7.42 M, paid
-for by its own witness. The program was about 6.0 kB and the witness 1.2 kB.
+**Cost.** The contract (task 5, regtest, no annex) measured the installment at 4.14–4.19 M mWU
+(4,139,272 at the first installment, 4,186,312 in the steady state) against a budget of about 8.5 M
+(8,513,000 and 8,587,000), paid for by its own witness. The program is about 7.1–7.2 kB (7,105 and
+7,179 bytes pruned) and the witness 1.2 kB.
 
 - Liquid does not relay annex padding, so a build must pay for its cost with its own bytes.
 - The contract test asserts `is_budget_valid` on the stack with no annex.
@@ -974,8 +980,8 @@ for by its own witness. The program was about 6.0 kB and the witness 1.2 kB.
   `x_(k+1) − c_(k+1)·(k+1)`.
 - **The carries balance from the second installment on:** two in, two out, `R + 1` units each
   way.
-- **Weight.** The spike measured 42,479 WU without the borrower NFT's input and output, so about
-  43,000 WU in all (estimate).
+- **Weight.** The contract measured 49,319 WU for the first installment (5 inputs, 10 outputs)
+  and 45,535 WU in the steady state (6 inputs, 9 outputs).
 
 **Full repayment.** The phase 5 layout, plus the carries:
 
@@ -1056,8 +1062,8 @@ The borrower's app refuses to create an offer outside these bounds.
 
 - the step count and `D_k` from the chain;
 - `c_k` from the installments it can read, or by the search when one is unreadable.
-- The search runs in a Web Worker. The spike measured 38 s worst-case in wasm at `C ≤ 2^44` on an
-  Apple M4 Pro. Its result is cached per loan state.
+- The search runs in a Web Worker. Task 4's batched search measured about 0.7 s natively and about
+  1 s in wasm at `C = 2^44`, using 37–45 MiB. Its result is cached per loan state.
 
 **What the apps show:**
 
@@ -1120,7 +1126,8 @@ The contract is written to the statements that were proved.
   - a successor asset other than input + `G`;
   - phase 5's installment failures;
   - an overpayment;
-  - a payment of exactly the debt.
+  - a payment of exactly the debt, with the least successor consensus admits, `c' = 1` (the
+    program alone would accept `c' = 0`, which consensus refuses: see the integer argument).
 - **The liveness test** runs random installment sequences with releases. After each one:
   - the full repayment succeeds;
   - the liquidation after the term succeeds, by a lender who reads no installment and opens the

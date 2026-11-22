@@ -35,6 +35,8 @@ export interface Chain {
   /** Each input's script witness, as esplora reports it: one hex string per stack item. */
   fetchWitnesses(txid: string): Promise<string[][]>
   fetchTimelock(txid: string): Promise<TxTimelock>
+  /** The transaction's weight, as esplora reports it. */
+  fetchWeight(txid: string): Promise<number>
   broadcast(hex: string): Promise<string>
   tipHeight(): Promise<number>
   waitForConfirmation(txid: string): Promise<void>
@@ -75,6 +77,10 @@ export function createChain(esploraApi: string): Chain {
             ? tx.status.block_height
             : null,
       }
+    },
+    async fetchWeight(txid) {
+      const tx = (await (await get(esploraApi, `/tx/${txid}`)).json()) as { weight: number }
+      return tx.weight
     },
     async broadcast(hex) {
       const response = await fetch(`${esploraApi}/tx`, { method: 'POST', body: hex })

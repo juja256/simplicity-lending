@@ -1,7 +1,8 @@
 // The scripted testnet demo of both areas (`pnpm demo:testnet`, see `web/README.md`): the lender
 // console and the borrower app, each in its own browser context with one of the e2e's seed
 // wallets, through a whole loan on Liquid testnet, with a private message each way, repaid in an
-// installment and the rest, and a short one that the lender liquidates. It broadcasts real testnet
+// installment that releases part of the collateral and the rest, and a short one that the lender
+// liquidates. It broadcasts real testnet
 // transactions and waits for their blocks, so one run takes about 20 minutes. Screenshots of every
 // page of both areas go to `.demo-output/` (git-ignored).
 /// <reference lib="dom" />
@@ -12,6 +13,7 @@ import path from 'node:path'
 import { expect, type Locator, type Page, test } from '@playwright/test'
 
 import { amountText } from '@/areas/borrow/proposalForm'
+import { releaseForPayment } from '@/privateLending/collateralFigures'
 import { PERCENT_DECIMALS, unitsFromDecimal, unitsToDecimal } from '@/privateLending/lenderTerms'
 import { MESSAGE_LIMITS, MESSAGE_NOTE, messageBytes } from '@/privateLending/messages'
 
@@ -109,6 +111,14 @@ async function shot(page: Page, name: string): Promise<void> {
  */
 function principalText(units: bigint, minFraction = 0): string {
   return `${amountText(units, PRINCIPAL.decimals, minFraction)} ${PRINCIPAL.symbol}`
+}
+
+/**
+ * A collateral amount as the app writes it, in the whole coin (the app's default denomination),
+ * grouped and without trailing zeros: `"0.00000495 tL-BTC"`.
+ */
+function collateralText(units: bigint): string {
+  return `${amountText(units, COLLATERAL.decimals)} ${COLLATERAL.symbol}`
 }
 
 /** The base units of a principal amount as the app writes it, such as `"1,100.5"`. */
@@ -272,6 +282,8 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
   let walletAddress = ''
   // The borrower's loan, once the lender accepted it: picked by its collateral, set below.
   let ownLoan: Locator = loanRow
+  // That collateral, in base units: the least the lender takes for the principal, set below.
+  let collateralUnits = 0n
   const send = borrower.getByRole('button', { name: 'Lock collateral and send' })
 
   await test.step('2. the borrower proposes within the terms, and not below them', async () => {
@@ -296,6 +308,7 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     const least = /^At least (\S+) /.exec((await hint.textContent()) ?? '')?.[1] ?? ''
     await expect(field('Collateral')).toHaveValue(least)
     const leastText = `${least} ${COLLATERAL.symbol}`
+    collateralUnits = unitsFromDecimal(least, COLLATERAL.decimals)
     ownLoan = borrower
       .getByRole('main')
       .getByRole('listitem')
@@ -401,7 +414,9 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     return row.getByRole('cell').nth(index)
   }
 
-  const step4 = '4. the main loan: accepted, received, paid in two parts and claimed in two'
+  const step4 =
+    '4. the main loan: accepted, received, paid in two parts that release the collateral, and ' +
+    'claimed in two'
   await test.step(step4, async () => {
     await tableRow('Within your terms').getByRole('button', { name: 'Review' }).click()
     const dialog = lender.getByRole('dialog')
@@ -469,9 +484,18 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     await shot(borrower, 'borrow-loans-active')
 
     // The borrower pays half of it as an installment. The form opens on what the loan owes, and
-    // warns that the lender keeps an installment if it liquidates the loan.
+    // warns that the lender keeps an installment if it liquidates the loan. The installment
+    // releases the collateral it pays for, by the release rule: `C − ceil((R − half)·C/R)`.
     const half = repayment / 2n
     const rest = repayment - half
+    const release = releaseForPayment(
+      { total: collateralUnits, repayment, owed: repayment, held: collateralUnits },
+      half,
+    )
+    if (release === undefined || release <= 0n) {
+      throw new Error(`half of the loan releases ${release} of ${collateralUnits} base units`)
+    }
+    const left = collateralUnits - release
     const repayForm = borrower.getByRole('dialog')
     const amount = repayForm.getByRole('textbox', { name: 'Amount', exact: true })
     const warning = repayForm.getByText(
@@ -484,6 +508,12 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     })
     await expect(repayForm).toContainText(detailRow('Paid so far', principalText(0n)))
     await expect(repayForm).toContainText(detailRow('Still owed', principalText(repayment)))
+    await expect(repayForm).toContainText(
+      detailRow('Collateral released so far', collateralText(0n)),
+    )
+    await expect(repayForm).toContainText(
+      detailRow('Collateral left', collateralText(collateralUnits)),
+    )
     await amount.fill(unitsToDecimal(half, PRINCIPAL.decimals))
     await expect(warning).toBeVisible()
     await warning.scrollIntoViewIfNeeded()
@@ -492,11 +522,18 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
       summary: [
         ['You pay', principalText(half)],
         ['Still owed after it', principalText(rest)],
+        ['Collateral released', collateralText(release)],
+        ['Collateral left after it', collateralText(left)],
       ],
     })
-    // The row counts the installment once the indexer lists it.
+    // The row counts the installment once the indexer lists it, and shows the collateral it
+    // released and what the loan still holds.
     await expect(ownLoan).toContainText(repaidOf(half), { timeout: CHAIN_TIMEOUT })
     await expect(repay).toHaveText(`Repay ${principalText(rest, 2)}`, { timeout: CHAIN_TIMEOUT })
+    await expect(ownLoan).toContainText(detailRow('Released', collateralText(release)), {
+      timeout: 2 * MINUTE,
+    })
+    await expect(ownLoan).toContainText(detailRow('Left', collateralText(left)))
     await shot(borrower, 'borrow-loans-installment')
 
     // The lender claims the installment: the loan book counts it as repaid and claimable.
@@ -511,6 +548,11 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     await expect(await bookCell(mainLoan, 'Repaid')).toHaveText(principalText(half))
     await expect(await bookCell(mainLoan, 'Remaining')).toHaveText(principalText(rest))
     await expect(await bookCell(mainLoan, 'Claimable')).toHaveText(principalText(half))
+    // The lender reads the installment, so it computes the collateral released and left.
+    await expect(await bookCell(mainLoan, 'Released / left')).toHaveText(
+      `${collateralText(release)} / ${collateralText(left)}`,
+      { timeout: 2 * MINUTE },
+    )
     await shot(lender, 'lend-loans-installment')
     await claim.click()
     await confirmTransaction(lender, exactly('Claim installments'), {
@@ -527,11 +569,19 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     })
     await expect(repayForm).toContainText(detailRow('Paid so far', principalText(half)))
     await expect(repayForm).toContainText(detailRow('Still owed', principalText(rest)))
+    await expect(repayForm).toContainText(
+      detailRow('Collateral released so far', collateralText(release)),
+    )
+    await expect(repayForm).toContainText(detailRow('Collateral left', collateralText(left)))
     await expect(warning).toBeVisible()
     await warning.scrollIntoViewIfNeeded()
     await shot(borrower, 'borrow-repay-rest')
+    // The full repayment gives back what the installment left of the collateral.
     await confirmTransaction(borrower, exactly(`Repay ${principalText(rest, 2)}`), {
-      summary: [['You repay', principalText(rest)]],
+      summary: [
+        ['You repay', principalText(rest)],
+        ['Collateral back to you', collateralText(left)],
+      ],
     })
     await expect(ownLoan).toContainText('Repaid', { timeout: CHAIN_TIMEOUT })
     // The row waits for the repayment's second confirmation before it drops its spinner.

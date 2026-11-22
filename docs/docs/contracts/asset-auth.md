@@ -10,13 +10,15 @@ asset.
 
 ## Where it is spent
 
-A private loan uses it for three outputs, and the [private lending
+A private loan uses it for three kinds of output, and the [private lending
 contract](../private-loans/protocol.md#state-transitions-and-role-tokens) pins their scripts as
 parameters:
 
 - **The principal.** Accepting the offer pays it to an output locked to the borrower NFT, for an
   amount of one, with the burn flag off. Claiming the principal spends it: the borrower NFT is
-  presented and handed back, and the principal is released.
+  presented and handed back, and the principal is released. The loan's
+  [carries](../private-loans/protocol.md#the-carry-token) use the same lock, so the installments,
+  the full repayment and the cancellation that spend them present the borrower NFT too.
 - **An installment.** Each installment pays an output locked to the lender NFT, for an amount of
   one, with the burn flag off. Claiming it presents the lender NFT and hands it back, so the lender
   can claim the next one.

@@ -7,11 +7,10 @@ description: Private lending state transitions, local verification, role-token a
 
 Private lending uses `crates/contracts/simf/private_lending.simf`, with the helper programs
 [asset auth](../contracts/asset-auth.md) and [script auth](../contracts/script-auth.md). The
-contract takes installments of any amount, the full repayment of what is left, and a close for a
-loan that owes nothing; it charges no protocol fee. The app pays installments and the full
-repayment of what is left, and closes a loan that owes nothing; it never pays an installment of the
-whole debt itself. The UI uses the network's configured collateral/principal asset pair and
-displays explicit principal and repayment amounts.
+contract takes installments of any amount below the debt, each of which releases the collateral it
+pays for, and the full repayment of what is left, which releases the rest; it charges no protocol
+fee. The whole debt always goes through the full repayment. The UI uses the network's configured
+collateral/principal asset pair and displays explicit principal and repayment amounts.
 
 For the browser workflow, see the [user guide](./guide.md).
 
@@ -28,6 +27,8 @@ public candidates and transaction data, rather than plaintext loan terms.
 | State transitions, spends, and role-token movements | Publicly observable. |
 | Expiry height | Hidden until a liquidation: the contract holds only its salted hash, and the liquidation reveals the height in its witness and lock time. |
 | Installment amounts and the debt left | Confidential on-chain; the borrower and the lender open them. Each installment is a public transaction of the loan. |
+| Collateral released and left | Confidential on-chain: the release and the collateral the loan keeps are confidential outputs. The borrower and the lender compute them from the installments; a lender that cannot open one finds them by a search (see [Proportional collateral release](#proportional-collateral-release)). An installment that releases nothing has the same outputs as one that does. |
+| Carry token | Each loan's own asset. The creation shows its supply, `2^50` units, the same for every loan; the installments' carries and the burns are confidential. |
 | Private messages | Confidential on-chain, in range proofs that only the two parties rewind; an output's range proof has the same length with a message of any length or none. |
 | Directory lending key and display name | Public when registered. |
 | Directory terms (minimum APR, maximum principal per collateral unit, term and principal ranges) and their publication time | Public when published. |
@@ -48,14 +49,13 @@ tokens authorize later spends through the associated contracts.
 | --- | --- |
 | Create → pending | Locks collateral, gives the borrower its token, and locks the lender token under ScriptAuth. |
 | Pending → active | Acceptance supplies the pinned principal to a borrower-token-controlled output, preserves the pinned collateral, and releases the lender token. |
-| Pending → cancelled | Cancellation burns both tokens and releases collateral. It conflicts with acceptance. |
+| Pending → cancelled | Cancellation burns both tokens and the loan's carry supply, and releases collateral. It conflicts with acceptance. |
 | Claim principal | AssetAuth releases principal using the borrower token, which is returned for later repayment. The loan remains active, or remains liquidated if liquidation already occurred. |
-| Active → active | An installment pays part of the debt to an output that the lender token unlocks without burning it. The loan moves to an output whose storage holds the debt left, with the collateral re-blinded. The borrower token stays with the borrower, and no collateral is released. |
-| Active → repaid | Full repayment pays an output equal to the debt left, burns the borrower token, and releases collateral. The installments and the full repayment add up to the repayment of the terms. |
-| Active → closed | A loan that owes nothing, after an installment of the exact amount left under another blinder, closes by burning the borrower token and revealing the debt's blinder in an `OP_RETURN`. It releases collateral. |
+| Active → active | An installment pays part of the debt, less than all of it, to an output that the lender token unlocks without burning it. The loan moves to an output whose storage holds the debt left, with the collateral that debt calls for, re-blinded; the collateral above it goes to the borrower, and the installment proves the split on chain. It spends the loan's carries and makes two new ones. The borrower token stays with the borrower. |
+| Active → repaid | Full repayment pays an output equal to the debt left, burns the borrower token, and releases the collateral the loan still holds. The app burns the loan's carries in the same transaction. The installments and the full repayment add up to the repayment of the terms, and the releases to the collateral. |
 | Claim installment | The lender claims an installment through AssetAuth with its token, which returns to it. |
 | Repaid → claimed | The lender claims the repayment through AssetAuth and burns its token. “Claimed” is derived by the UI from spent repayment outputs. |
-| Active → liquidated | After the lock-height condition, liquidation burns the lender token and releases collateral. It reads neither the debt nor the collateral, so no installment can block it, and installments paid before it are not refunded. It does not consume a separate unclaimed principal output. |
+| Active → liquidated | After the lock-height condition, liquidation burns the lender token and gives the lender the collateral the loan still holds. It reads neither the debt nor the collateral, so no installment can block it, and installments paid before it are not refunded. It does not consume a separate unclaimed principal output, nor the loan's carries, which stay with the borrower. |
 
 The tokens are bearer rights, not decorative collectibles. Transferring or losing one can change
 who can exercise a loan's rights. The current app assumes its prescribed token locations and does
@@ -79,11 +79,11 @@ parties rewind.
 | Installment `j` | Output 2, the installment | Borrower → lender | 3068 bytes |
 | Full repayment | Output 1, the repayment | Borrower → lender | 3068 bytes |
 
-The zero-debt close, the claims, the cancellation and the liquidation carry none. The creation's
-and each installment's range proofs are rewound with nonces that derive from the borrower's seed,
-so their messages read again on any device. The acceptance's and the full repayment's nonces are
-random: the receiver reads them, but their sender cannot rewind them, and the app keeps a record of
-what it sent instead (see [Client state](#client-state-and-implementation-map)).
+The claims, the cancellation and the liquidation carry none. The creation's and each installment's
+range proofs are rewound with nonces that derive from the borrower's seed, so their messages read
+again on any device. The acceptance's and the full repayment's nonces are random: the receiver reads
+them, but their sender cannot rewind them, and the app keeps a record of what it sent instead (see
+[Client state](#client-state-and-implementation-map)).
 
 ### Encoding
 
@@ -140,6 +140,100 @@ clickable. Before it is shown, the C0 and C1 control characters except the newli
 bidirectional controls U+061C, U+200E, U+200F, U+202A–U+202E and U+2066–U+2069, are removed. Every
 message shows "A message is not part of the terms, and the contract does not enforce it." with its
 sender's key fingerprint, and its directory name when the entry verifies.
+
+## Proportional collateral release
+
+Each installment gives the borrower back the part of the collateral it pays for. The contract
+checks it with a proof the installment carries, so neither party can take more than its share.
+`docs/superpowers/specs/2026-11-06-private-lending-v2-design.md` ("Phase 7 design note") is the
+design, and `docs/superpowers/specs/2026-11-21-phase-7-proofs.md` proves it sound.
+
+### The release rule
+
+With collateral `C` and repayment `R`, a loan that owes `d` holds `c = ⌈d·C/R⌉` of the
+collateral, so `floor(paid·C/R)` has been released. An installment from `d` to `d'` releases
+`c − c'`, which can be 0, and the full repayment releases the `c` left. The releases add up to `C`
+exactly. The app computes every figure in 128-bit integers.
+
+### What the installment proves
+
+The successor loan output, at output 1, holds `c'`. The installment's witness carries a Sigma proof
+that `c' = ⌈d'·C/R⌉`, where `d'` is the amount of the debt the program computes as a point (the
+debt less output 2's commitment), without opening either:
+
+- the integer `e = c'·R − d'·C` is the rounding remainder, and must lie in `[0, R − 1]`;
+- two outputs, the **carries** at outputs 3 and 4, hold `e + 1` and `R − e` units of the loan's
+  carry token. Consensus requires every spendable confidential output to hold at least 1 unit, so
+  the two carries bound `e` from both sides without a range proof of the contract's own;
+- the proof ties `c'`, `d'`, `e`, the carries' commitments and the starting commitments of the
+  collateral and the debt together in one linear relation, checked with the curve jets, under a
+  Fiat–Shamir challenge over the statement.
+
+The program alone would accept a zero successor, `c' = 0`, for a payment of the whole debt.
+Consensus refuses it, as output 1's range proof must have a minimum of 1, so the whole debt goes
+through the full repayment.
+
+The successor's value blinder is fixed by the step, `x_k − c_k·k` with `x_k` derived from the
+offer's secrets, and its commitment `Y_k = x_k·G + y_k·J` is a leaf of a Merkle tree of 1,024
+leaves whose root is a parameter of the offer. The installment names its step, and the program
+checks the leaf against the root and the step against the loan output's asset commitment. So the
+lender, who derives `x_k` too, can always open the loan output, even after an installment it cannot
+read. A loan has at most 1,024 installments; after that only the full repayment is left.
+
+### The carry token
+
+The creation's input 2 issues the loan's carry token, `S = 2^50` units with no reissuance token, to
+output 4, explicit, at the principal's asset auth (the borrower NFT unlocks it, without burning).
+The first installment spends that supply, makes the two carries of `R + 1` units in all, and burns
+the leftover `S − R − 1` in a confidential `OP_RETURN`. Each later installment spends the two
+carries and makes two new ones. The carries are blinded to the borrower's lending key, which
+rewinds them from the chain. The full repayment spends the carries and burns their units in one
+confidential `OP_RETURN`, and the cancellation burns the supply, explicit. A liquidation leaves
+them with the borrower. The burns use the same range-proof parameters as the other confidential
+outputs, so they do not reveal `R`.
+
+The indexer records the carries as UTXOs of the offer, of type `carry`. The app spends them only
+when they are exactly the carries the borrower opens from the loan's own transactions on chain: the
+creation's output 4 before the first installment, then the last installment's outputs 3 and 4.
+
+### The bounds
+
+The proof is sound only for `1 ≤ C ≤ 2^44` and `1 ≤ R ≤ 2^50 − 2`: within them the relation it
+checks modulo the group order holds over the integers. `R` appears in no output, so no range proof
+of consensus bounds it. The lender checks both bounds before it accepts, along with every point the
+offer's address commits to, and the borrower's form refuses an offer outside them.
+
+### The installment's layout
+
+- **Inputs:** 0 the borrower NFT, 1 the loan, then from 2 the principal coins, then the carries,
+  then the fee coins. Input 2 is the first principal coin, from which output 2's ephemeral key
+  derives; a carry never sits there, since every build at a step spends the same carries.
+- **Outputs:** 0 the borrower NFT back to the borrower, 1 the successor loan holding `c'`, 2 the
+  installment at the lender's asset auth, 3 and 4 the carries of `e + 1` and `R − e` units, 5 the
+  release to a new wallet address (or, when nothing is released, 1,000 sats of the policy asset,
+  so that the output count does not tell), and at the first installment 6 the leftover's burn.
+  The principal change, the policy-asset change and the fee follow.
+
+An installment weighs about 49,300 weight units at the first step and 45,500 later. Its program
+costs about 4.1 to 4.2 million milli-weight units of a budget of about 8.5 million, which its own
+witness pays for.
+
+### Building an installment again
+
+Two builds at the same step share the successor's blinder, so two different amounts would let
+anyone holding both search for the difference between their collaterals. The app saves each build
+before its first broadcast and sends it again; a build that can no longer be sent is rebuilt only
+with the same amount, from a first principal coin no earlier build of the loan used. Then the two
+builds only reveal that they are linked.
+
+### The lender's search
+
+A lender that cannot open an installment, one built outside the app with another key, does not know
+`c`. It reads the loan output's value commitment `V = c·A_c + x_k·G`, with `A_c` the active
+collateral's asset commitment, and finds the `c` in `[1, C]` with `c·A_c = V − x_k·G` by
+baby-step giant-step. The search runs in a Web Worker and takes about a second in the browser at
+`C = 2^44`, in about 45 MiB; its result is kept per loan state. The loan book shows "computing…"
+while it runs, and the liquidation uses its result.
 
 ## Verification before action
 
@@ -206,12 +300,13 @@ sent from another browser does not show.
 
 | Repository path | Responsibility |
 | --- | --- |
-| `crates/private-lending-core/` | Terms, key derivation, commitments, creation verification and the message format (`message.rs`). |
+| `crates/private-lending-core/` | Terms, key derivation, commitments, creation verification and the message format (`message.rs`); the release rule (`release.rs`), its proof (`release_proof.rs`) and the lender's search (`release_search.rs`). |
 | `crates/private-lending-wasm/` | Browser-facing Rust operations and transaction inspection. |
 | `crates/contracts/simf/private_lending.simf` | Private loan state transitions and covenant checks. |
 | `crates/indexer/` | Public candidate discovery, state indexing, directory and events. |
 | `web/src/privateLending/scan.ts` | Discovery and opening/verification gates. |
-| `web/src/privateLending/flows/` | Creation, acceptance, claims, cancellation, repayment and liquidation builders. |
+| `web/src/privateLending/flows/` | Creation, acceptance, claims, cancellation, installment, repayment and liquidation builders. |
+| `web/src/privateLending/collateralFigures.ts`, `collateralSearch.ts`, `searchWorker.ts` | The collateral released and left as the apps show it, and the lender's search in a Web Worker. |
 | `web/src/privateLending/hooks/usePrivateOffers.ts` | Wallet-scoped queries, scan serialization and term caching. |
 | `web/src/privateLending/offerView.ts` | Display and action eligibility rules; not contract enforcement. |
 | `web/src/privateLending/messages.ts`, `loanMessages.ts`, `sentMessages.ts` | Message limits and display, a loan's message timeline, and the record of sent messages. |
