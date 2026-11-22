@@ -1077,9 +1077,20 @@ The borrower's app refuses to create an offer outside these bounds.
 
 ### The indexer
 
-**Reading an installment.** The indexer still knows an installment by its unburned borrower NFT,
-with the loan at output 1 and the installment at output 2.
+**Reading an installment.** The indexer knows the borrower's two spends of the loan (at input 1)
+by the scripts the program pins, which it computes from the offer's NFT ids:
 
+- The full repayment pays output 1 at the repayment lock (`asset_auth` of the lender NFT, with
+  burn).
+- An installment puts the successor at output 1, at the loan's own address, the installment at
+  output 2, at the installment lock (the lender NFT's, without burn), and the carries at outputs 3
+  and 4, at the carry lock (the borrower NFT's).
+- Output 1 decides, and is read first, since the full repayment leaves its later outputs free.
+- The program checks only the borrower NFT's asset and amount at an installment's output 0, not
+  its script, so an installment may burn the NFT there (found in the phase 7 review; the program
+  stays as it is). The indexer records it as an installment, so the loan stays active and the
+  lender can liquidate it. Before the fix, the tracker read output 0 first and took such an
+  installment for the full repayment.
 - It records outputs 3 and 4 as a new UTXO type, `carry`, of that offer.
 - It records creation's output 4 as the offer's first `carry`.
 - It marks a carry spent when an installment, the full repayment or the cancellation spends it.

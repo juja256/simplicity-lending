@@ -1,12 +1,20 @@
 use sqlx::PgPool;
 
-use lending_contracts::programs::{private_lending::PrivateLendingOffer, program::SimplexProgram};
+use lending_contracts::programs::{
+    asset_auth::{AssetAuth, AssetAuthParameters},
+    private_lending::PrivateLendingOffer,
+    program::SimplexProgram,
+};
 use private_lending_core::find_offer;
-use simplex::simplicityhl::elements::{
-    AssetId, OutPoint, Transaction, TxOut,
-    confidential::{Asset, Nonce},
-    encode::serialize,
-    hashes::Hash,
+use simplex::{
+    provider::SimplicityNetwork,
+    simplicityhl::elements::{
+        AssetId, OutPoint, Script, Transaction, TxOut,
+        confidential::{Asset, Nonce, Value},
+        encode::serialize,
+        hashes::Hash,
+        opcodes::all::OP_RETURN,
+    },
 };
 
 use crate::{
@@ -46,23 +54,81 @@ enum ActiveSpend {
 const BORROWER_LOAN_INPUT: usize = 1;
 /// The input at which the liquidation spends the loan.
 const LIQUIDATION_LOAN_INPUT: usize = 0;
+/// The output of the full repayment that pays the lender.
+const REPAYMENT_VOUT: usize = 1;
+/// The output of an installment that pays the lender.
+const INSTALLMENT_VOUT: usize = 2;
 
-/// Whether output 0 burns `nft`: an `OP_RETURN` output with that explicit asset.
+/// Whether `script` is a null-data script as the program's burn check reads it
+/// (`jet::output_null_datum`, Simplicity's `parseNullData`): `OP_RETURN` followed only by pushes
+/// (opcodes up to `OP_16`), each with all the bytes it pushes. `Script::is_op_return` tests the
+/// first byte only.
+fn is_null_data(script: &Script) -> bool {
+    let bytes = script.as_bytes();
+    if bytes.first() != Some(&OP_RETURN.into_u8()) {
+        return false;
+    }
+
+    let mut at = 1;
+    while at < bytes.len() {
+        let code = bytes[at];
+        at += 1;
+        let width = match code {
+            0x00..=0x4b => {
+                at += usize::from(code);
+                continue;
+            }
+            0x4c => 1,
+            0x4d => 2,
+            0x4e => 4,
+            0x4f..=0x60 => continue,
+            _ => return false,
+        };
+        let Some(length) = bytes.get(at..at + width) else {
+            return false;
+        };
+        at += width;
+        at += length
+            .iter()
+            .rev()
+            .fold(0_usize, |length, byte| (length << 8) | usize::from(*byte));
+    }
+
+    at == bytes.len()
+}
+
+/// Whether output 0 holds one explicit unit of `nft`, at any script: what the program checks of
+/// the NFT that passes from input 0 or 1 to output 0.
+fn nft_first(tx: &Transaction, nft: AssetId) -> bool {
+    tx.output.first().is_some_and(|out: &TxOut| {
+        out.asset == Asset::Explicit(nft) && out.value == Value::Explicit(1)
+    })
+}
+
+/// Whether output 0 burns `nft`: one explicit unit of it at a null-data script, as the program's
+/// cancellation, full repayment and liquidation require.
 fn burns_first(tx: &Transaction, nft: AssetId) -> bool {
-    tx.output.first().is_some_and(|out: &TxOut| {
-        out.script_pubkey.is_op_return() && out.asset == Asset::Explicit(nft)
-    })
+    nft_first(tx, nft) && is_null_data(&tx.output[0].script_pubkey)
 }
 
-/// Whether output 0 holds `nft` unburned: an output with that explicit asset that is not an
-/// `OP_RETURN`.
-fn holds_first(tx: &Transaction, nft: AssetId) -> bool {
-    tx.output.first().is_some_and(|out: &TxOut| {
-        !out.script_pubkey.is_op_return() && out.asset == Asset::Explicit(nft)
+/// The script of the `asset_auth` lock of `nft` that the offer's program pins: the repayment's
+/// (the lender NFT, burned), an installment's (the lender NFT, kept), or the carries' and the
+/// principal's (the borrower NFT, kept). Its parameters are the NFT ids, which the indexer reads
+/// from the creation's outputs 0 and 1 and which a verifying offer takes from its terms. A taproot
+/// output's script does not depend on the network, only its address does, so any network gives
+/// it.
+fn asset_auth_script(nft: AssetId, with_asset_burn: bool) -> Script {
+    AssetAuth::new(AssetAuthParameters {
+        asset_id: nft,
+        asset_amount: 1,
+        with_asset_burn,
+        network: SimplicityNetwork::LiquidTestnet,
     })
+    .get_script_pubkey()
 }
 
-/// A cancellation burns the lender NFT in output 0; any other spend is an acceptance.
+/// A cancellation burns the lender NFT in output 0; any other spend is an acceptance, whose output
+/// 0 is the loan, confidential.
 fn classify_pending_spend(tx: &Transaction, lender_nft: AssetId) -> PendingSpend {
     if burns_first(tx, lender_nft) {
         PendingSpend::Cancellation
@@ -71,14 +137,26 @@ fn classify_pending_spend(tx: &Transaction, lender_nft: AssetId) -> PendingSpend
     }
 }
 
-/// Reads a spend of the active offer at input `loan_input` from the layouts of the contract's
-/// branches, which the indexer sees without opening a commitment.
+/// Whether output `vout` exists and is at `script`.
+fn output_at(tx: &Transaction, vout: usize, script: &Script) -> bool {
+    tx.output
+        .get(vout)
+        .is_some_and(|out: &TxOut| out.script_pubkey == *script)
+}
+
+/// Reads a spend of the active offer at input `loan_input` from the scripts the contract's
+/// branches pin, which the indexer sees without opening a commitment.
 ///
-/// The borrower's branches spend the loan at input 1, and output 0 tells them apart. A burned
-/// borrower NFT is the full repayment. An unburned one is an installment, with the successor loan
-/// at output 1, the installment at output 2 and the new carries at outputs 3 and 4. The liquidation spends the loan
-/// at input 0 and burns the lender NFT in output 0. A spend that matches none of these layouts
-/// gives `None`: a real loan cannot make it, so the indexer does not guess.
+/// The borrower's branches spend the loan at input 1 and move the borrower NFT to output 0. The
+/// full repayment pays the lender at output 1, at the repayment lock (the lender NFT's
+/// `asset_auth` with burn), and burns the NFT. An installment puts the successor loan at output 1,
+/// at the loan's own address, which cannot be that lock, the installment at output 2, at the
+/// installment lock (the lender NFT's `asset_auth` without burn), and the new carries at outputs 3
+/// and 4, at the carry lock (the borrower NFT's). The program does not check output 0's script in
+/// an installment, so an installment may burn the NFT there: output 1 tells the two apart, and it
+/// is read first, since the full repayment leaves its other outputs free. The liquidation spends
+/// the loan at input 0 and burns the lender NFT in output 0. A spend that matches none of these
+/// layouts gives `None`: no spend the program accepts makes it, so the indexer does not guess.
 fn classify_active_spend(
     tx: &Transaction,
     loan_input: usize,
@@ -86,11 +164,17 @@ fn classify_active_spend(
     lender_nft: AssetId,
 ) -> Option<ActiveSpend> {
     match loan_input {
-        BORROWER_LOAN_INPUT if burns_first(tx, borrower_nft) => {
-            tx.output.get(1).map(|_| ActiveSpend::FullRepayment)
-        }
-        BORROWER_LOAN_INPUT if holds_first(tx, borrower_nft) && tx.output.len() > 2 => {
-            Some(ActiveSpend::Installment)
+        BORROWER_LOAN_INPUT if nft_first(tx, borrower_nft) => {
+            if output_at(tx, REPAYMENT_VOUT, &asset_auth_script(lender_nft, true)) {
+                return burns_first(tx, borrower_nft).then_some(ActiveSpend::FullRepayment);
+            }
+            let carry_lock = asset_auth_script(borrower_nft, false);
+            let installment =
+                output_at(tx, INSTALLMENT_VOUT, &asset_auth_script(lender_nft, false))
+                    && INSTALLMENT_CARRY_VOUTS
+                        .iter()
+                        .all(|vout| output_at(tx, *vout as usize, &carry_lock));
+            installment.then_some(ActiveSpend::Installment)
         }
         LIQUIDATION_LOAN_INPUT if burns_first(tx, lender_nft) => Some(ActiveSpend::Liquidation),
         _ => None,
@@ -167,7 +251,11 @@ impl PrivateOffersTracker {
     #[tracing::instrument(
         name = "Handling private offer UTXO spend",
         skip(self, sql_tx, tx, entry),
-        fields(offer_id = %entry.offer_id, utxo_type = ?entry.utxo_type, block_height = %block_height)
+        fields(
+            offer_id = %entry.offer_id,
+            utxo_type = ?entry.utxo_type,
+            block_height = %block_height
+        )
     )]
     async fn on_spend(
         &mut self,
@@ -434,10 +522,7 @@ impl PrivateOffersTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use simplex::simplicityhl::elements::{
-        LockTime, Script, TxOut,
-        confidential::{Asset, Value},
-    };
+    use simplex::simplicityhl::elements::LockTime;
 
     fn asset(byte: u8) -> AssetId {
         AssetId::from_slice(&[byte; 32]).expect("valid asset id")
@@ -505,23 +590,82 @@ mod tests {
         classify_active_spend(&tx, loan_input, asset(1), asset(2))
     }
 
+    /// An output at `script`, of an asset the classification does not read.
+    fn at(script: Script) -> TxOut {
+        TxOut {
+            script_pubkey: script,
+            ..plain(asset(9))
+        }
+    }
+
+    fn repayment_lock() -> TxOut {
+        at(asset_auth_script(asset(2), true))
+    }
+
+    fn installment_lock() -> TxOut {
+        at(asset_auth_script(asset(2), false))
+    }
+
+    fn carry_lock() -> TxOut {
+        at(asset_auth_script(asset(1), false))
+    }
+
+    /// An installment's outputs after output 0: the successor (at a script of its own), the
+    /// installment, the two carries and the release.
+    fn installment_outputs(first: TxOut) -> Vec<TxOut> {
+        vec![
+            first,
+            plain(asset(9)),
+            installment_lock(),
+            carry_lock(),
+            carry_lock(),
+            plain(asset(9)),
+        ]
+    }
+
     #[test]
     fn active_spend_holding_the_borrower_nft_is_an_installment() {
         assert_eq!(
-            classify(spend(
-                1,
-                vec![plain(asset(1)), plain(asset(9)), plain(asset(8))]
-            )),
+            classify(spend(1, installment_outputs(plain(asset(1))))),
+            Some(ActiveSpend::Installment)
+        );
+    }
+
+    /// The program checks only the NFT's asset and amount at an installment's output 0, so an
+    /// installment can burn it there; its outputs 1 to 4 still make it an installment.
+    #[test]
+    fn installment_burning_the_borrower_nft_is_an_installment() {
+        assert_eq!(
+            classify(spend(1, installment_outputs(burn(asset(1))))),
             Some(ActiveSpend::Installment)
         );
     }
 
     #[test]
-    fn active_spend_burning_the_borrower_nft_is_a_full_repayment() {
+    fn active_spend_paying_the_repayment_lock_is_a_full_repayment() {
         assert_eq!(
             classify(spend(
                 1,
-                vec![burn(asset(1)), plain(asset(8)), plain(asset(9))]
+                vec![burn(asset(1)), repayment_lock(), plain(asset(9))]
+            )),
+            Some(ActiveSpend::FullRepayment)
+        );
+    }
+
+    /// The full repayment leaves its outputs after 1 free: one that also has an installment's
+    /// outputs 2 to 4 is still the full repayment.
+    #[test]
+    fn full_repayment_with_an_installment_s_later_outputs_is_a_full_repayment() {
+        assert_eq!(
+            classify(spend(
+                1,
+                vec![
+                    burn(asset(1)),
+                    repayment_lock(),
+                    installment_lock(),
+                    carry_lock(),
+                    carry_lock(),
+                ]
             )),
             Some(ActiveSpend::FullRepayment)
         );
@@ -537,24 +681,46 @@ mod tests {
 
     #[test]
     fn active_spends_that_match_no_layout_are_refused() {
+        let mut no_carries = installment_outputs(plain(asset(1)));
+        no_carries.truncate(4);
+        let mut foreign_carry = installment_outputs(plain(asset(1)));
+        foreign_carry[4] = plain(asset(9));
+        let mut foreign_installment = installment_outputs(plain(asset(1)));
+        foreign_installment[2] = repayment_lock();
+        let mut two_nfts = installment_outputs(plain(asset(1)));
+        two_nfts[0].value = Value::Explicit(2);
         for (case, refused) in [
             ("no outputs", spend(1, vec![])),
             ("a burn without output 1", spend(1, vec![burn(asset(1))])),
             (
+                "the repayment lock without the NFT burned",
+                spend(1, vec![plain(asset(1)), repayment_lock()]),
+            ),
+            (
                 "an installment without output 2",
                 spend(1, vec![plain(asset(1)), plain(asset(9))]),
             ),
+            ("an installment without its carries", spend(1, no_carries)),
+            (
+                "an installment with a carry elsewhere",
+                spend(1, foreign_carry),
+            ),
+            (
+                "an installment paid to another lock",
+                spend(1, foreign_installment),
+            ),
+            ("two units of the borrower NFT", spend(1, two_nfts)),
             (
                 "an installment with the loan at input 0",
-                spend(0, vec![plain(asset(1)), plain(asset(9)), plain(asset(8))]),
+                spend(0, installment_outputs(plain(asset(1)))),
             ),
             (
                 "an installment with the loan at input 2",
-                spend(2, vec![plain(asset(1)), plain(asset(9)), plain(asset(8))]),
+                spend(2, installment_outputs(plain(asset(1)))),
             ),
             (
                 "a full repayment with the loan at input 0",
-                spend(0, vec![burn(asset(1)), plain(asset(8))]),
+                spend(0, vec![burn(asset(1)), repayment_lock()]),
             ),
             (
                 "a liquidation with the loan at input 1",
@@ -565,8 +731,15 @@ mod tests {
                 spend(0, vec![plain(asset(2)), plain(asset(9))]),
             ),
             (
+                "the lender NFT at an OP_RETURN that is not null data",
+                spend(
+                    0,
+                    vec![at_script(asset(2), vec![0x6a, 0x61]), plain(asset(9))],
+                ),
+            ),
+            (
                 "another asset at output 0",
-                spend(1, vec![plain(asset(3)), plain(asset(9)), plain(asset(8))]),
+                spend(1, installment_outputs(plain(asset(3)))),
             ),
             (
                 "another asset burned",
@@ -575,5 +748,85 @@ mod tests {
         ] {
             assert_eq!(classify(refused), None, "{case}");
         }
+    }
+
+    /// One unit of `asset` at the script of `bytes`.
+    fn at_script(asset: AssetId, bytes: Vec<u8>) -> TxOut {
+        TxOut {
+            script_pubkey: Script::from(bytes),
+            ..plain(asset)
+        }
+    }
+
+    #[test]
+    fn null_data_is_what_the_program_s_burn_check_accepts() {
+        for (case, bytes, null_data) in [
+            ("a bare OP_RETURN", vec![0x6a], true),
+            ("a direct push", vec![0x6a, 0x02, 0xaa, 0xbb], true),
+            ("an empty push", vec![0x6a, 0x00], true),
+            ("OP_PUSHDATA1", vec![0x6a, 0x4c, 0x01, 0xaa], true),
+            ("OP_PUSHDATA2", vec![0x6a, 0x4d, 0x01, 0x00, 0xaa], true),
+            (
+                "OP_PUSHDATA4",
+                vec![0x6a, 0x4e, 0x01, 0x00, 0x00, 0x00, 0xaa],
+                true,
+            ),
+            (
+                "OP_1NEGATE, OP_RESERVED, OP_1 and OP_16",
+                vec![0x6a, 0x4f, 0x50, 0x51, 0x60],
+                true,
+            ),
+            (
+                "pushes",
+                [vec![0x6a], [0x01, 0xaa].repeat(3)].concat(),
+                true,
+            ),
+            ("an empty script", vec![], false),
+            ("no OP_RETURN first", vec![0x51, 0x6a], false),
+            ("OP_NOP after the OP_RETURN", vec![0x6a, 0x61], false),
+            ("a second OP_RETURN", vec![0x6a, 0x6a], false),
+            ("a truncated push", vec![0x6a, 0x02, 0xaa], false),
+            ("a truncated OP_PUSHDATA1", vec![0x6a, 0x4c], false),
+            (
+                "a truncated OP_PUSHDATA2 length",
+                vec![0x6a, 0x4d, 0x01],
+                false,
+            ),
+            (
+                "a truncated OP_PUSHDATA4 push",
+                vec![0x6a, 0x4e, 0x02, 0, 0, 0, 0xaa],
+                false,
+            ),
+        ] {
+            assert_eq!(is_null_data(&Script::from(bytes)), null_data, "{case}");
+        }
+        assert!(is_null_data(&Script::new_op_return(b"burn")));
+    }
+
+    /// The locks are taproot outputs, whose script does not depend on the network.
+    #[test]
+    fn asset_auth_scripts_do_not_depend_on_the_network() {
+        for network in [
+            SimplicityNetwork::Liquid,
+            SimplicityNetwork::LiquidTestnet,
+            SimplicityNetwork::default_regtest(),
+        ] {
+            for with_asset_burn in [false, true] {
+                let lock = AssetAuth::new(AssetAuthParameters {
+                    asset_id: asset(2),
+                    asset_amount: 1,
+                    with_asset_burn,
+                    network,
+                });
+                assert_eq!(
+                    lock.get_script_pubkey(),
+                    asset_auth_script(asset(2), with_asset_burn),
+                );
+            }
+        }
+        assert_ne!(
+            asset_auth_script(asset(2), true),
+            asset_auth_script(asset(2), false)
+        );
     }
 }
