@@ -5,6 +5,7 @@ export const RoutePath = {
   Lend: '/lend',
   LendProposals: '/lend/proposals',
   LendLoans: '/lend/loans',
+  /** Redirects to the profile, which holds the terms. */
   LendTerms: '/lend/terms',
   LendProfile: '/lend/profile',
   Borrow: '/borrow',

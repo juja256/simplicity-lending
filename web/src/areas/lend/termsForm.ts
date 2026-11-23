@@ -1,4 +1,4 @@
-// What the console's Terms page opens with. Pure, so tests import it: it takes only types from
+// What the profile's terms form opens with. Pure, so tests import it: it takes only types from
 // the directory hook.
 import type { OwnEntry } from '@/privateLending/hooks/useDirectory'
 import {

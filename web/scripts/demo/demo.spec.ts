@@ -31,7 +31,7 @@ const { collateralAsset: COLLATERAL, principalAsset: PRINCIPAL } = TESTNET_PAIR
 
 const LENDER_NAME = 'E2E Lender'
 
-/** The `directory` stage's terms (`e2eTermsForm`), by their fields on the Terms page. */
+/** The `directory` stage's terms (`e2eTermsForm`), by their fields on the profile. */
 const TERMS: [label: string, value: string][] = [
   ['Least APR', '10'],
   [`Most principal per 1 ${COLLATERAL.symbol}`, '10000'],
@@ -230,8 +230,8 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     borrower.getByRole('navigation', { name: 'Borrowing steps' }).getByRole('link', { name })
   let lenderKey = ''
 
-  await test.step('1. the lender publishes terms on /lend/terms', async () => {
-    await lender.goto('/lend/terms')
+  await test.step('1. the lender publishes its name and terms on /lend/profile', async () => {
+    await lender.goto('/lend/profile')
     await connectSeedWallet(lender, env.lenderMnemonic)
     // The header names the key by its fingerprint, and the signer on the wallet button.
     await expect(sidebar.getByText(fingerprints.lender, { exact: true })).toBeVisible({
@@ -241,38 +241,37 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
 
     const publish = lender.getByRole('button', { name: 'Sign and publish' })
     await expect(publish).toBeVisible({ timeout: 2 * MINUTE })
-    // A first publish signs a name; an entry that verified keeps its own.
+    // The key signs the name with the terms: one form publishes both.
     const nameField = lender.getByRole('textbox', { name: 'Display name', exact: true })
-    if (await nameField.isVisible()) await nameField.fill(LENDER_NAME)
+    await nameField.fill(LENDER_NAME)
     for (const [label, value] of TERMS) {
       await lender.getByRole('textbox', { name: label, exact: true }).fill(value)
     }
     await publish.click()
-    await expect(lender.getByText('Terms published')).toBeVisible({ timeout: 2 * MINUTE })
+    await expect(lender.getByText('Profile published')).toBeVisible({ timeout: 2 * MINUTE })
     await expect(sidebar.getByText(LENDER_NAME, { exact: true })).toBeVisible({
       timeout: 2 * MINUTE,
     })
-    await shot(lender, 'lend-terms-published')
+    await shot(lender, 'lend-profile-published')
 
     // The profile shows the same key, whole.
-    await lenderNav('Profile').click()
     const main = lender.getByRole('main')
     await expect(main.getByText(fingerprints.lender, { exact: true })).toBeVisible()
     lenderKey = (await main.getByText(/^[0-9a-f]{64}$/).textContent()) ?? ''
     expect(lenderKey).toMatch(/^[0-9a-f]{64}$/)
-    await shot(lender, 'lend-profile-published')
 
-    // Back on Terms, the form opens on the published entry, verified against the key.
-    await lenderNav('Terms').click()
+    // Opened again, the form starts from the published entry, verified against the key.
+    await lenderNav('Proposals').click()
+    await lenderNav('Profile').click()
     await expect(lender.getByText(`as ${LENDER_NAME}`)).toBeVisible({ timeout: MINUTE })
-    await expect(nameField).toHaveCount(0)
+    await expect(nameField).toHaveValue(LENDER_NAME)
     for (const [label, value] of TERMS) {
       const field = lender.getByRole('textbox', { name: label, exact: true })
       await expect
         .poll(async () => Number(await field.inputValue()), { message: `${label} is pre-filled` })
         .toBe(Number(value))
     }
-    await shot(lender, 'lend-terms-prefilled')
+    await shot(lender, 'lend-profile-prefilled')
 
     // Desktop first: the sidebar beside the work area; under 1024 px, a bar above it.
     const main1280 = (await lender.getByRole('main').boundingBox())!
@@ -287,7 +286,7 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
       })
       .toBe(true)
     await expectNoHorizontalScroll(lender, 'the lender console at 900 px')
-    await shot(lender, 'lend-terms-900')
+    await shot(lender, 'lend-profile-900')
     await lender.setViewportSize({ width: 1280, height: 800 })
   })
 
@@ -673,7 +672,6 @@ test('the lender console and the borrower app on Liquid testnet', async ({ brows
     for (const [name, file] of [
       ['Proposals', 'lend-proposals'],
       ['Loan book', 'lend-loans'],
-      ['Terms', 'lend-terms'],
       ['Profile', 'lend-profile'],
     ]) {
       await lenderNav(name).click()

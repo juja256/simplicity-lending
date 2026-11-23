@@ -42,7 +42,7 @@ const ENTRY: DirectoryEntry = {
   updated_at: 1_700_000_000,
 }
 
-describe("the Terms page's form", () => {
+describe("the profile's terms form", () => {
   it('opens on the terms the key signed when the entry verified', () => {
     const own: OwnEntry = {
       entry: ENTRY,

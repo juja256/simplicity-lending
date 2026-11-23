@@ -15,7 +15,6 @@ import LenderLayout from '@/areas/lend/LenderLayout'
 import LoanBookPage from '@/areas/lend/LoanBookPage'
 import ProfilePage from '@/areas/lend/ProfilePage'
 import ProposalsPage from '@/areas/lend/ProposalsPage'
-import TermsPage from '@/areas/lend/TermsPage'
 import { WalletGate } from '@/areas/WalletGate'
 import { RoutePath } from '@/constants/routes'
 import { AppProviders } from '@/providers/AppProviders'
@@ -85,14 +84,8 @@ const router = createBrowserRouter([
               </WalletGate>
             ),
           },
-          {
-            path: RoutePath.LendTerms,
-            element: (
-              <WalletGate>
-                <TermsPage />
-              </WalletGate>
-            ),
-          },
+          // The terms moved into the profile, which publishes them with the name.
+          { path: RoutePath.LendTerms, element: <Navigate to={RoutePath.LendProfile} replace /> },
           {
             path: RoutePath.LendProfile,
             element: (

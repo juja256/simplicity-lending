@@ -15,7 +15,6 @@ import { NetworkNote } from '../NetworkNote'
 const SECTIONS = [
   { to: RoutePath.LendProposals, label: 'Proposals' },
   { to: RoutePath.LendLoans, label: 'Loan book' },
-  { to: RoutePath.LendTerms, label: 'Terms' },
   { to: RoutePath.LendProfile, label: 'Profile' },
 ]
 

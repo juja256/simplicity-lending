@@ -387,9 +387,10 @@ own browser context, connected through the connect modal's test-seed option. It 
 transactions and waits for their blocks: a run takes about 20 minutes. One test, one step per
 part:
 
-1. the lender publishes the `directory` stage's terms as "E2E Lender" on `/lend/terms`, and the
-   console shows the name, the key fingerprint and "Seed phrase" on the wallet button; the terms
-   form opens pre-filled from the verified entry; under 1024 px the sidebar becomes a top bar;
+1. the lender publishes the `directory` stage's terms as "E2E Lender" on `/lend/profile`, and the
+   console shows the name, the key fingerprint and "Seed phrase" on the wallet button; the name
+   and terms form opens pre-filled from the verified entry; under 1024 px the sidebar becomes a
+   top bar;
 2. the borrower picks the lender on `/borrow`; the form opens at the lender's minimums, the
    summary sentence follows the typing, an APR one basis point low and a collateral one base unit
    low each show their error and keep "Lock collateral and send" disabled; at the minimums the

@@ -16,9 +16,10 @@ under **For lenders**, and **Borrow** under **For borrowers**. Each area links t
 wallet can use both. The route decides the area; the app does not remember a role.
 
 - **The lender console** (`/lend`) is where a lender publishes terms and runs a book. Its sidebar
-  shows the wallet's balance and has four sections: **Proposals** (`/lend/proposals`, the
-  proposals addressed to you), **Loan book** (`/lend/loans`), **Terms** (`/lend/terms`) and
-  **Profile** (`/lend/profile`). On a narrow screen the sidebar becomes a bar above the work area.
+  shows the wallet's balance and has three sections: **Proposals** (`/lend/proposals`, the
+  proposals addressed to you), **Loan book** (`/lend/loans`) and **Profile** (`/lend/profile`,
+  your lending key, name and terms). On a narrow screen the sidebar becomes a bar above the work
+  area.
 - **The borrower app** (`/borrow`) takes a borrower through three steps: **Choose a lender**
   (`/borrow`), **Propose** (`/borrow/<lender key>`) and **My loans** (`/borrow/loans`). Its header
   shows the wallet's balance.
@@ -46,14 +47,15 @@ Each wallet has a lending key, derived in the browser. The console's **Profile**
 lending key** with its fingerprint, and **Copy key** copies the whole key. Proposals reach a lender
 through this key.
 
-A lender is listed for borrowers by publishing terms on the console's **Terms** page. The terms are
-for the pair the app is built for (tL-BTC collateral and TEST principal on testnet): the least APR,
-the most principal per 1 unit of collateral, the shortest and longest term in days, and the smallest
-and largest principal. A display name is published with them. The name and terms are public, and the
-app signs them together with the lending key. **Sign and publish** shows **Terms published** once
-the directory has them. **Profile** changes the name (**Publish name**, which signs the current
-terms again, unchanged) or removes the entry (**Remove from directory**). Proposals and loans
-already made are not affected by a removal.
+A lender is listed for borrowers by publishing a display name and terms under **Name and terms** on
+the console's **Profile**. The terms are for the pair the app is built for (tL-BTC collateral and
+TEST principal on testnet): the least APR, the most principal per 1 unit of collateral, the shortest
+and longest term in days, and the smallest and largest principal. The name and terms are public, and
+the app signs them together with the lending key, so one form changes either or both. **Sign and
+publish** shows **Profile published** once the directory has them, and the form opens on the
+published entry afterwards. **Remove from directory**, under **Directory**, removes the entry.
+Proposals and loans already made are not affected by a removal. The old `/lend/terms` address opens
+the profile.
 
 The borrower app lists only lenders whose signed terms verify, each with when the terms were
 published, and shows each lender's fingerprint as **Lender key**. A lender whose entry does not
@@ -159,7 +161,7 @@ restart when the lender accepts.
 
 ## Lend
 
-1. Publish your terms on the console's **Terms** page, as described above.
+1. Publish your name and terms on the console's **Profile**, as described above.
 2. Fund your wallet with the principal asset and testnet L-BTC for fees.
 3. Under **Proposals**, each proposal addressed to you shows its borrower, principal, collateral,
    APR and term, and how it compares with your terms: a **Within your terms** badge, or one badge
