@@ -16,11 +16,16 @@ under **For lenders**, and **Borrow** under **For borrowers**. Each area links t
 wallet can use both. The route decides the area; the app does not remember a role.
 
 - **The lender console** (`/lend`) is where a lender publishes terms and runs a book. Its sidebar
-  has four sections: **Proposals** (`/lend/proposals`, the proposals addressed to you), **Loan
-  book** (`/lend/loans`), **Terms** (`/lend/terms`) and **Profile** (`/lend/profile`). On a narrow
-  screen the sidebar becomes a bar above the work area.
+  shows the wallet's balance and has four sections: **Proposals** (`/lend/proposals`, the
+  proposals addressed to you), **Loan book** (`/lend/loans`), **Terms** (`/lend/terms`) and
+  **Profile** (`/lend/profile`). On a narrow screen the sidebar becomes a bar above the work area.
 - **The borrower app** (`/borrow`) takes a borrower through three steps: **Choose a lender**
-  (`/borrow`), **Propose** (`/borrow/<lender key>`) and **My loans** (`/borrow/loans`).
+  (`/borrow`), **Propose** (`/borrow/<lender key>`) and **My loans** (`/borrow/loans`). Its header
+  shows the wallet's balance.
+
+Each balance counts the wallet's confirmed coins of the pair's two assets (tL-BTC and TEST on
+testnet), which the app spends, with any unconfirmed amount beside it as **pending**. It
+refreshes every minute and when the tab regains focus.
 
 Both areas can be opened before connecting a wallet. The old `/app` routes open the landing page.
 

@@ -2,6 +2,7 @@ import { Link, Outlet, useMatch } from 'react-router-dom'
 
 import ArrowRightIcon from '@/components/icons/ArrowRightIcon'
 import { JadeUnlockModal } from '@/components/JadeUnlockModal'
+import WalletBalances from '@/components/WalletBalances'
 import { WalletButton } from '@/components/WalletButton'
 import { RoutePath } from '@/constants/routes'
 
@@ -89,6 +90,7 @@ export default function BorrowerLayout() {
             </Link>
             <WalletButton />
           </div>
+          <WalletBalances layout='row' />
           <div className='border-separator flex flex-wrap items-center justify-between gap-x-4 gap-y-3 border-b pb-4'>
             <Steps />
             <Link

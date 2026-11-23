@@ -4,6 +4,7 @@ import { Link, NavLink, Outlet } from 'react-router-dom'
 import ArrowRightIcon from '@/components/icons/ArrowRightIcon'
 import { JadeUnlockModal } from '@/components/JadeUnlockModal'
 import KeyFingerprint from '@/components/KeyFingerprint'
+import WalletBalances from '@/components/WalletBalances'
 import { WalletButton } from '@/components/WalletButton'
 import { RoutePath } from '@/constants/routes'
 import { useDirectory } from '@/privateLending/hooks/useDirectory'
@@ -21,7 +22,10 @@ const SECTIONS = [
 const FOCUS_RING =
   'focus-visible:outline-accent focus-visible:outline-2 focus-visible:outline-offset-2'
 
-/** The connected lender: its directory name and key fingerprint, and the wallet button. */
+/**
+ * The connected lender: its directory name and key fingerprint, its wallet's balance, and the
+ * wallet button.
+ */
 function LenderIdentity() {
   const { isReady, privateCapable } = useWallet()
   const { identity, own } = useDirectory({ ownEntry: true })
@@ -38,6 +42,7 @@ function LenderIdentity() {
       ) : isReady && privateCapable ? (
         <Skeleton className='h-9 w-40 rounded' />
       ) : null}
+      <WalletBalances />
       <WalletButton showSigner />
     </div>
   )
